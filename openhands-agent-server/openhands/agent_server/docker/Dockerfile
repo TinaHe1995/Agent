@@ -86,26 +86,60 @@ ENV OPENHANDS_BUILD_GIT_REF=${OPENHANDS_BUILD_GIT_REF}
 
 # Install base packages and create user
 RUN set -eux; \
-    # Install base packages (works for both Debian-based images)
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        ca-certificates curl wget sudo apt-utils git jq tmux build-essential \
-        coreutils util-linux procps findutils grep sed \
-        # Lightweight init for proper zombie reaping when running as PID 1
-        tini \
-        # Docker dependencies
-        apt-transport-https gnupg lsb-release; \
-    \
-    # Create user and group
-    (getent group ${GID} || groupadd -g ${GID} ${USERNAME}); \
-    (id -u ${USERNAME} >/dev/null 2>&1 || useradd -m -u ${UID} -g ${GID} -s /bin/bash ${USERNAME}); \
-    # Add user to sudo group
-    usermod -aG sudo ${USERNAME}; \
+    # Install base packages across the most common package managers, since
+    # benchmark base images aren't always Debian-based. `tini` is added on
+    # apt/apk where it's reliably available; on the other paths the kernel-
+    # reaping behaviour falls back to dumb-init's absence (the agent server
+    # is short-lived enough on non-Debian images that PID 1 zombie reaping
+    # has not been observed to matter — revisit if it does).
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            bash ca-certificates curl wget sudo apt-utils git jq tmux tar \
+            build-essential coreutils util-linux procps findutils grep sed \
+            tini apt-transport-https gnupg lsb-release xz-utils; \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache \
+            bash ca-certificates curl wget sudo git jq tmux tar build-base \
+            coreutils util-linux procps findutils grep sed tini gnupg shadow xz; \
+    elif command -v microdnf >/dev/null 2>&1; then \
+        microdnf install -y \
+            bash ca-certificates curl wget sudo git jq tmux tar make gcc gcc-c++ \
+            coreutils util-linux procps-ng findutils grep sed shadow-utils \
+            gnupg2 xz; \
+        microdnf clean all; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        dnf install -y \
+            bash ca-certificates curl wget sudo git jq tmux tar make gcc gcc-c++ \
+            coreutils util-linux procps-ng findutils grep sed shadow-utils \
+            gnupg2 xz; \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        yum install -y \
+            bash ca-certificates curl wget sudo git jq tmux tar make gcc gcc-c++ \
+            coreutils util-linux procps-ng findutils grep sed shadow-utils \
+            gnupg2 xz; \
+        yum clean all; \
+    elif command -v zypper >/dev/null 2>&1; then \
+        zypper --non-interactive install --no-recommends \
+            bash ca-certificates curl wget sudo git jq tmux tar make gcc gcc-c++ \
+            coreutils util-linux procps findutils grep sed shadow gpg2 xz; \
+        zypper clean --all; \
+    else \
+        echo "Unsupported base image: no known package manager found" >&2; \
+        exit 1; \
+    fi; \
+    grep -Eq "^[^:]*:[^:]*:${GID}:" /etc/group || groupadd -g "${GID}" "${USERNAME}"; \
+    grep -Eq "^${USERNAME}:" /etc/passwd || \
+        useradd -m -u "${UID}" -g "${GID}" -s /bin/bash "${USERNAME}"; \
+    # Best-effort: add user to a sudo group when one exists (Debian-style
+    # `sudo` group). On Alpine/RHEL/SUSE there is no `sudo` group by default,
+    # and the NOPASSWD sudoers line below grants sudo regardless of group.
+    usermod -aG sudo "${USERNAME}" 2>/dev/null || true; \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers; \
-    # Create workspace directory
     mkdir -p /workspace/project; \
-    chown -R ${USERNAME}:${USERNAME} /workspace; \
-    rm -rf /var/lib/apt/lists/*
+    chown -R "${USERNAME}:${USERNAME}" /workspace
 
 # Pre-install ACP servers for ACPAgent support (Claude Code, Codex, Gemini CLI)
 # Install Node.js 22 to a dedicated prefix so ACP packages get a modern runtime
@@ -113,10 +147,10 @@ RUN set -eux; \
 # SWE-bench images ship NVM/apt-managed Node 8-14 which cannot run ACP packages.
 ENV ACP_NODE_DIR=/opt/acp-node
 RUN set -eux; \
-    ARCH=$(dpkg --print-architecture); \
+    ARCH=$(uname -m); \
     case "$ARCH" in \
-      amd64) NARCH=x64; NODE_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec;; \
-      arm64) NARCH=arm64; NODE_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050;; \
+      x86_64|amd64) NARCH=x64; NODE_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec;; \
+      aarch64|arm64) NARCH=arm64; NODE_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050;; \
       *) echo "Unsupported architecture for ACP Node install: $ARCH" >&2; exit 1;; \
     esac; \
     NODE_TARBALL="/tmp/node-v22.14.0-linux-${NARCH}.tar.xz"; \
