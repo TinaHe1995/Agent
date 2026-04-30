@@ -9,6 +9,12 @@ from .api_models import (
     SettingsResponse,
     SettingsUpdateRequest,
 )
+from .acp_providers import (
+    ACP_PROVIDERS,
+    ACPProviderInfo,
+    detect_acp_provider_by_agent_name,
+    get_acp_provider,
+)
 from .metadata import (
     SETTINGS_METADATA_KEY,
     SETTINGS_SECTION_METADATA_KEY,
@@ -26,6 +32,7 @@ if TYPE_CHECKING:
         ACPAgentSettings,
         AgentKind,
         AgentSettings,
+        AgentSettingsBase,
         AgentSettingsConfig,
         CondenserSettings,
         ConversationSettings,
@@ -49,6 +56,7 @@ _MODEL_EXPORTS = {
     "ACPAgentSettings",
     "AgentKind",
     "AgentSettings",
+    "AgentSettingsBase",
     "AgentSettingsConfig",
     "CondenserSettings",
     "ConversationSettings",
@@ -66,11 +74,14 @@ _MODEL_EXPORTS = {
 }
 
 __all__ = [
+    "ACP_PROVIDERS",
+    "ACPProviderInfo",
     "AGENT_SETTINGS_SCHEMA_VERSION",
     "CONVERSATION_SETTINGS_SCHEMA_VERSION",
     "ACPAgentSettings",
     "AgentKind",
     "AgentSettings",
+    "AgentSettingsBase",
     "AgentSettingsConfig",
     "CondenserSettings",
     "ConversationSettings",
@@ -94,9 +105,11 @@ __all__ = [
     "VerificationSettings",
     "create_agent_from_settings",
     "default_agent_settings",
+    "detect_acp_provider_by_agent_name",
     "export_agent_settings_schema",
     "export_settings_schema",
     "field_meta",
+    "get_acp_provider",
     "validate_agent_settings",
 ]
 
