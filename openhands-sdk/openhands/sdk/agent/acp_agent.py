@@ -44,7 +44,10 @@ from acp.transports import default_environment
 from pydantic import Field, PrivateAttr
 
 from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.settings.acp_providers import detect_acp_provider_by_agent_name
+from openhands.sdk.settings.acp_providers import (
+    build_session_model_meta,
+    detect_acp_provider_by_agent_name,
+)
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
     ACPToolCallEvent,
@@ -196,13 +199,7 @@ def _resolve_bypass_mode(agent_name: str) -> str:
 
 def _build_session_meta(agent_name: str, acp_model: str | None) -> dict[str, Any]:
     """Build ACP session metadata for server-specific model selection."""
-    if not acp_model:
-        return {}
-    # claude-agent-acp: model selection via session _meta (claudeCode.options.model)
-    if "claude" in agent_name.lower():
-        return {"claudeCode": {"options": {"model": acp_model}}}
-    # codex-acp, gemini-cli: use protocol-level set_session_model instead (see below)
-    return {}
+    return build_session_model_meta(agent_name, acp_model)
 
 
 async def _maybe_set_session_model(
@@ -1001,9 +998,14 @@ class ACPAgent(AgentBase):
                     # through LiteLLM proxy. claude-agent-acp and codex-acp
                     # read their provider base URL from env vars directly.
                     if method_id == "gemini-api-key":
-                        gemini_base_url = env.get("GEMINI_BASE_URL")
-                        if gemini_base_url:
-                            auth_kwargs["gateway"] = {"baseUrl": gemini_base_url}
+                        provider = detect_acp_provider_by_agent_name(agent_name)
+                        base_url_var = (
+                            provider.base_url_env_var if provider is not None else None
+                        )
+                        if base_url_var:
+                            base_url = env.get(base_url_var)
+                            if base_url:
+                                auth_kwargs["gateway"] = {"baseUrl": base_url}
                     await conn.authenticate(method_id=method_id, **auth_kwargs)
                 else:
                     logger.warning(

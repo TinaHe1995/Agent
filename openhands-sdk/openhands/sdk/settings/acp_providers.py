@@ -21,7 +21,10 @@ of maintaining their own copies of this metadata.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,7 @@ class ACPProviderInfo:
     display_name: str
     """Human-readable name suitable for UI labels."""
 
-    default_command: list[str] = field(compare=False)
+    default_command: tuple[str, ...] = field(compare=False)
     """Default subprocess command used when no explicit ``acp_command`` is set."""
 
     api_key_env_var: str | None
@@ -76,40 +79,55 @@ class ACPProviderInfo:
     - ``True`` for codex-acp and gemini-cli.
     """
 
+    session_meta_key: str | None
+    """Top-level ``_meta`` key for model selection, or ``None``.
 
-ACP_PROVIDERS: dict[str, ACPProviderInfo] = {
+    When non-``None``, the provider selects its model via ACP session ``_meta``
+    using the structure ``{session_meta_key: {"options": {"model": <model>}}}``.
+    ``None`` means the provider uses the ``set_session_model`` protocol call
+    instead (see :attr:`supports_set_session_model`).
+
+    - ``"claudeCode"`` — claude-agent-acp
+    - ``None``         — codex-acp, gemini-cli
+    """
+
+
+ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType({
     "claude-code": ACPProviderInfo(
         key="claude-code",
         display_name="Claude Code",
-        default_command=["npx", "-y", "@agentclientprotocol/claude-agent-acp"],
+        default_command=("npx", "-y", "@agentclientprotocol/claude-agent-acp"),
         api_key_env_var="ANTHROPIC_API_KEY",
         base_url_env_var=None,
         default_session_mode="bypassPermissions",
         agent_name_patterns=("claude-agent",),
         supports_set_session_model=False,
+        session_meta_key="claudeCode",
     ),
     "codex": ACPProviderInfo(
         key="codex",
         display_name="Codex",
-        default_command=["npx", "-y", "@zed-industries/codex-acp"],
+        default_command=("npx", "-y", "@zed-industries/codex-acp"),
         api_key_env_var="OPENAI_API_KEY",
         base_url_env_var=None,
         default_session_mode="full-access",
         agent_name_patterns=("codex-acp",),
         supports_set_session_model=True,
+        session_meta_key=None,
     ),
     "gemini-cli": ACPProviderInfo(
         key="gemini-cli",
         display_name="Gemini CLI",
-        default_command=["npx", "-y", "@google/gemini-cli", "--acp"],
+        default_command=("npx", "-y", "@google/gemini-cli", "--acp"),
         api_key_env_var="GEMINI_API_KEY",
         base_url_env_var="GEMINI_BASE_URL",
         default_session_mode="yolo",
         agent_name_patterns=("gemini-cli",),
         supports_set_session_model=True,
+        session_meta_key=None,
     ),
-}
-"""Registry of built-in ACP providers keyed by ``acp_server`` value."""
+})
+"""Read-only registry of built-in ACP providers keyed by ``acp_server`` value."""
 
 
 def get_acp_provider(key: str) -> ACPProviderInfo | None:
@@ -132,3 +150,23 @@ def detect_acp_provider_by_agent_name(agent_name: str) -> ACPProviderInfo | None
         if any(pat in lower for pat in info.agent_name_patterns):
             return info
     return None
+
+
+def build_session_model_meta(
+    agent_name: str, acp_model: str | None
+) -> dict[str, Any]:
+    """Build ACP session ``_meta`` content for model selection.
+
+    Returns the dict to spread into ``new_session()`` kwargs for providers
+    that select their model via ``_meta`` (i.e. those whose
+    :attr:`~ACPProviderInfo.session_meta_key` is not ``None``).
+
+    Returns an empty dict when *acp_model* is ``None`` or when the detected
+    provider uses the ``set_session_model`` protocol call instead.
+    """
+    if not acp_model:
+        return {}
+    provider = detect_acp_provider_by_agent_name(agent_name)
+    if provider is None or provider.session_meta_key is None:
+        return {}
+    return {provider.session_meta_key: {"options": {"model": acp_model}}}
