@@ -779,7 +779,7 @@ def test_acp_resolve_command_uses_registry_defaults() -> None:
 
     for server_key in ("claude-code", "codex", "gemini-cli"):
         settings = ACPAgentSettings(acp_server=server_key)
-        expected = ACP_PROVIDERS[server_key].default_command
+        expected = list(ACP_PROVIDERS[server_key].default_command)
         assert settings.resolve_acp_command() == expected
 
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
 from openhands.sdk.settings.acp_providers import (
     ACP_PROVIDERS,
     ACPProviderInfo,
+    build_session_model_meta,
     detect_acp_provider_by_agent_name,
     get_acp_provider,
 )
@@ -31,6 +34,7 @@ class TestACPProviderInfo:
         assert info.default_session_mode == "bypassPermissions"
         assert "claude-agent" in info.agent_name_patterns
         assert info.supports_set_session_model is False
+        assert info.session_meta_key == "claudeCode"
 
     def test_codex_metadata(self):
         info = ACP_PROVIDERS["codex"]
@@ -42,6 +46,7 @@ class TestACPProviderInfo:
         assert info.default_session_mode == "full-access"
         assert "codex-acp" in info.agent_name_patterns
         assert info.supports_set_session_model is True
+        assert info.session_meta_key is None
 
     def test_gemini_cli_metadata(self):
         info = ACP_PROVIDERS["gemini-cli"]
@@ -53,11 +58,23 @@ class TestACPProviderInfo:
         assert info.default_session_mode == "yolo"
         assert "gemini-cli" in info.agent_name_patterns
         assert info.supports_set_session_model is True
+        assert info.session_meta_key is None
 
     def test_provider_info_is_frozen(self):
         info = ACP_PROVIDERS["claude-code"]
         with pytest.raises((AttributeError, TypeError)):
             info.key = "mutated"  # type: ignore[misc]
+
+    def test_default_command_is_tuple(self):
+        for key, info in ACP_PROVIDERS.items():
+            assert isinstance(info.default_command, tuple), (
+                f"{key}: default_command must be a tuple"
+            )
+
+    def test_acp_providers_is_read_only(self):
+        assert isinstance(ACP_PROVIDERS, MappingProxyType)
+        with pytest.raises(TypeError):
+            ACP_PROVIDERS["new-provider"] = ACP_PROVIDERS["claude-code"]  # type: ignore[index]
 
 
 class TestGetACPProvider:
@@ -135,3 +152,25 @@ class TestProviderRegistryConsistency:
                 assert detected.key == key, (
                     f"pattern {pattern!r} matched {detected.key!r}, expected {key!r}"
                 )
+
+
+class TestBuildSessionModelMeta:
+    def test_empty_when_no_model(self):
+        assert build_session_model_meta("claude-agent-acp", None) == {}
+        assert build_session_model_meta("claude-agent-acp", "") == {}
+
+    def test_claude_uses_meta_key(self):
+        result = build_session_model_meta("claude-agent-acp v0.29.0", "claude-opus-4")
+        assert result == {"claudeCode": {"options": {"model": "claude-opus-4"}}}
+
+    def test_codex_returns_empty(self):
+        result = build_session_model_meta("codex-acp", "gpt-4o")
+        assert result == {}
+
+    def test_gemini_returns_empty(self):
+        result = build_session_model_meta("gemini-cli 0.38.0", "gemini-2.0-flash")
+        assert result == {}
+
+    def test_unknown_agent_returns_empty(self):
+        result = build_session_model_meta("unknown-agent", "some-model")
+        assert result == {}
