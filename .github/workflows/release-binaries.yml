@@ -97,32 +97,37 @@ jobs:
                   ./dist/openhands-agent-server --port 8002 > server_test.log 2>&1 &
                   SERVER_PID=$!
 
-                  sleep 5
+                  cleanup() {
+                      kill "$SERVER_PID" 2>/dev/null || true
+                      wait "$SERVER_PID" 2>/dev/null || true
+                      if [ -f server_test.log ]; then
+                          echo "----- server_test.log (tail) -----"
+                          tail -100 server_test.log || true
+                          rm -f server_test.log
+                      fi
+                  }
+                  trap cleanup EXIT
 
-                  if grep -q "system_prompt.j2.*not found" server_test.log; then
-                      echo "ERROR: Template files not found in binary!"
-                      cat server_test.log
-                      kill $SERVER_PID 2>/dev/null || true
-                      exit 1
-                  fi
+                  # Poll /health for up to 90s; fail if it never comes up.
+                  for i in $(seq 1 30); do
+                      if grep -q "system_prompt.j2.*not found" server_test.log 2>/dev/null; then
+                          echo "ERROR: Template files not found in binary!"
+                          exit 1
+                      fi
+                      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                          echo "ERROR: Server process exited before /health responded"
+                          exit 1
+                      fi
+                      if curl -f -s http://localhost:8002/health >/dev/null 2>&1; then
+                          echo "✓ /health responded after ${i} attempt(s)"
+                          echo "✓ Binary smoke test passed"
+                          exit 0
+                      fi
+                      sleep 3
+                  done
 
-                  if ! kill -0 $SERVER_PID 2>/dev/null; then
-                      echo "ERROR: Server failed to start!"
-                      cat server_test.log
-                      exit 1
-                  fi
-
-                  if curl -f -s http://localhost:8002/health >/dev/null 2>&1; then
-                      echo "✓ Health endpoint accessible"
-                  else
-                      echo "⚠ Health endpoint not accessible (may be expected)"
-                  fi
-
-                  kill $SERVER_PID 2>/dev/null || true
-                  wait $SERVER_PID 2>/dev/null || true
-                  rm -f server_test.log
-
-                  echo "✓ Binary smoke test passed"
+                  echo "ERROR: /health never responded within 90s"
+                  exit 1
 
             - name: Stage release asset
               shell: bash
