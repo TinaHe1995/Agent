@@ -4,10 +4,11 @@ This document describes the automated release workflows for the OpenHands Softwa
 
 ## Overview
 
-The release process has been automated with two GitHub Actions workflows:
+The release process has been automated with three GitHub Actions workflows:
 
 1. **prepare-release.yml** - Prepares a release PR with version updates
 2. **pypi-release.yml** - Automatically publishes packages to PyPI when a release is created
+3. **release-binaries.yml** - Builds and attaches multi-arch agent-server binaries to the release, and smoke-tests the multi-arch Docker images
 
 ## How to Create a New Release
 
@@ -55,6 +56,31 @@ Once the release is published, the **pypi-release.yml** workflow will automatica
 
 You can monitor the progress in the [Actions tab](https://github.com/OpenHands/software-agent-sdk/actions/workflows/pypi-release.yml).
 
+### Step 4b: Release Binaries + Docker Smoke Test (Automated)
+
+In parallel with the PyPI workflow, **release-binaries.yml** also fires on `release: published`. It:
+
+- ✅ Builds the agent-server PyInstaller binary on a 4-runner matrix (linux x86_64/arm64, macOS x86_64/arm64) and smoke-tests each
+- ✅ Generates a combined `SHA256SUMS` and attaches all artifacts to the GitHub release as `agent-server-<version>-<os>-<arch>`
+- ✅ Verifies that the multi-arch Docker manifest `ghcr.io/openhands/agent-server:<version>-<variant>` published by `server.yml` covers both `linux/amd64` and `linux/arm64` for every variant (`python`, `java`, `golang`)
+- ✅ Pulls each variant on each architecture with `--platform=linux/<arch>`, boots the container, and asserts `/health` responds
+
+#### Build time / runner expectations
+
+| Stage | Runtime (typical) | Runners |
+|---|---|---|
+| Binary builds (4-way matrix, parallel) | ~10–15 min on Linux, ~12–18 min on macOS | `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-13`, `macos-14` |
+| `publish-binaries` (download + checksum + upload) | ~1–2 min | `ubuntu-24.04` |
+| `docker-smoke-test` (6-way matrix, parallel) | Up to 45 min (mostly polling for the docker images) | `ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64 |
+
+#### QEMU / buildx requirements
+
+The smoke test does **not** require QEMU: each (variant, arch) job runs on a runner whose architecture matches `--platform=linux/<arch>`, so containers run natively. We do still set up Docker Buildx so we can call `docker buildx imagetools inspect` on the multi-arch manifest list.
+
+The wait window for the multi-arch manifest is 45 min — long enough to absorb the full `server.yml` matrix runtime (~25–30 min for `build-and-push-image` + `merge-manifests`) when the release publish event races with the tag push that triggers the docker pipeline.
+
+If the release is older than ~30 min and the manifest is already in GHCR, the wait step exits immediately.
+
 ### Step 5: Version Bump PRs (Automated)
 
 After successful PyPI publication, the workflow will automatically create PRs to update SDK versions in downstream repositories:
@@ -88,6 +114,7 @@ If you need to manually trigger the PyPI release workflow:
 
 - `.github/workflows/prepare-release.yml` - Automated release preparation
 - `.github/workflows/pypi-release.yml` - PyPI package publication
+- `.github/workflows/release-binaries.yml` - Multi-arch binary publishing + docker manifest smoke test
 
 ## Troubleshooting
 
@@ -108,6 +135,14 @@ If PyPI publication fails:
 - Check that the `PYPI_TOKEN_OPENHANDS` secret is properly configured
 - Verify the version doesn't already exist on PyPI
 - Check the workflow logs for specific error messages
+
+### Release Binaries Failed
+
+If `release-binaries.yml` fails:
+- **Binary build failure**: re-run the failed matrix job; PyInstaller flakes are rare but possible. If it persists, the issue is likely in `agent-server.spec`.
+- **`docker-smoke-test` timed out waiting for the manifest**: `server.yml` did not publish multi-arch images for that tag. Check that workflow's run for the corresponding tag push and re-trigger if needed.
+- **`/health` never responded**: open the failing job; the cleanup trap dumps the last 100 lines of `docker logs` for the container.
+- The workflow can be re-run against an existing tag via `workflow_dispatch` with the `release_tag` input (e.g. `v1.20.1`); `gh release upload --clobber` makes this safe.
 
 ## Previous Manual Process
 
