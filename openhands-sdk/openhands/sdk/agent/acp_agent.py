@@ -187,9 +187,6 @@ def _select_auth_method(
     return None
 
 
-
-
-
 async def _maybe_set_session_model(
     conn: ClientSideConnection,
     agent_name: str,
@@ -200,7 +197,8 @@ async def _maybe_set_session_model(
 
     Uses :func:`~openhands.sdk.settings.acp_providers.detect_acp_provider_by_agent_name`
     to check whether the server supports ``set_session_model``.
-    claude-agent-acp uses session ``_meta`` via :func:`~openhands.sdk.settings.acp_providers.build_session_model_meta` instead.
+    claude-agent-acp uses session ``_meta`` via
+    :func:`~openhands.sdk.settings.acp_providers.build_session_model_meta` instead.
     """
     if not acp_model:
         return
