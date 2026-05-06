@@ -3686,9 +3686,7 @@ class TestACPEnvConflictSuppression:
                 )
             )
             if extra_os_env:
-                stack.enter_context(
-                    patch.dict("os.environ", extra_os_env, clear=False)
-                )
+                stack.enter_context(patch.dict("os.environ", extra_os_env, clear=False))
             agent._start_acp_server(state)
 
         return captured
@@ -3736,7 +3734,9 @@ class TestACPEnvConflictSuppression:
             acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
             agent_context=AgentContext(
                 secrets={
-                    "ANTHROPIC_API_KEY": StaticSecret(value=SecretStr("sk-from-secret")),
+                    "ANTHROPIC_API_KEY": StaticSecret(
+                        value=SecretStr("sk-from-secret")
+                    ),
                     "ANTHROPIC_BASE_URL": StaticSecret(
                         value=SecretStr("https://proxy.example.com")
                     ),
