@@ -19,6 +19,13 @@ from PyInstaller.utils.hooks import (
 # happen inside function bodies AND traverse PEP-420 google.cloud namespace
 # packages, so collect_submodules alone misses everything below the namespace
 # root. collect_all walks the actual installed dirs.
+#
+# google-cloud-aiplatform is an optional extra (`openhands-sdk[vertex]`); skip
+# the whole block if it's not installed so local builds without the extra work.
+import importlib.util as _vertex_importlib_util
+
+_VERTEX_AVAILABLE = _vertex_importlib_util.find_spec("vertexai") is not None
+
 _vertex_pkgs = (
     "vertexai",
     "google.cloud.aiplatform",
@@ -37,11 +44,21 @@ _vertex_pkgs = (
 _vertex_datas = []
 _vertex_binaries = []
 _vertex_hiddenimports = []
-for _pkg in _vertex_pkgs:
-    _d, _b, _h = collect_all(_pkg)
-    _vertex_datas += _d
-    _vertex_binaries += _b
-    _vertex_hiddenimports += _h
+if _VERTEX_AVAILABLE:
+    for _pkg in _vertex_pkgs:
+        _d, _b, _h = collect_all(_pkg)
+        _vertex_datas += _d
+        _vertex_binaries += _b
+        _vertex_hiddenimports += _h
+    # google.rpc.status_pb2 is a gRPC proto stub imported dynamically; only pin
+    # it when the SDK is actually present.
+    _vertex_hiddenimports.append("google.rpc.status_pb2")
+else:
+    print(
+        "[agent-server.spec] vertexai not installed; "
+        "skipping Vertex AI bundle collection. "
+        "Install openhands-sdk[vertex] before building to include it."
+    )
 
 # Get the project root directory (current working directory when running PyInstaller)
 project_root = Path.cwd()
@@ -137,12 +154,9 @@ a = Analysis(
         *collect_submodules("fakeredis"),
         *collect_submodules("lupa"),  # Required for fakeredis[lua] Lua scripting support
 
-        # Vertex AI SDK hidden imports (collected via collect_all above)
+        # Vertex AI SDK hidden imports (collected via collect_all above; empty
+        # if openhands-sdk[vertex] is not installed in the build env).
         *_vertex_hiddenimports,
-        # google.rpc.status_pb2 is a gRPC proto stub imported dynamically by
-        # the gRPC channel layer; pin it explicitly in case namespace traversal
-        # misses it.
-        "google.rpc.status_pb2",
 
         # mcp subpackages used at runtime (avoid CLI)
         "mcp.types",

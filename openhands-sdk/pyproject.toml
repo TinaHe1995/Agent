@@ -19,7 +19,6 @@ dependencies = [
     "tenacity>=9.1.2",
     "websockets>=12",
     "lmnr>=0.7.47",
-    "google-cloud-aiplatform>=1.38",
 ]
 
 [project.urls]
@@ -30,6 +29,7 @@ Documentation = "https://docs.openhands.dev/sdk"
 
 [project.optional-dependencies]
 boto3 = ["boto3>=1.35.0"]
+vertex = ["google-cloud-aiplatform>=1.38"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
