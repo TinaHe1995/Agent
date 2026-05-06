@@ -9,6 +9,7 @@ from pydantic import PrivateAttr
 
 from openhands.sdk.git.models import GitChange, GitDiff
 from openhands.sdk.logger import get_logger
+from openhands.sdk.settings import SecretsListResponse, SettingsResponse
 from openhands.sdk.workspace.base import BaseWorkspace
 from openhands.sdk.workspace.models import CommandResult, FileOperationResult
 from openhands.sdk.workspace.remote.remote_workspace_mixin import RemoteWorkspaceMixin
@@ -299,20 +300,17 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
 
         response = self.client.get("/api/settings", headers=headers)
         response.raise_for_status()
-        data = response.json()
 
-        agent_settings = data.get("agent_settings", {})
-        llm_config = agent_settings.get("llm", {})
+        # Validate response using shared SDK model
+        data = SettingsResponse.model_validate(response.json())
 
-        kwargs: dict[str, Any] = {}
-        if llm_config.get("model"):
-            kwargs["model"] = llm_config["model"]
-        if llm_config.get("api_key"):
-            kwargs["api_key"] = llm_config["api_key"]
-        if llm_config.get("base_url"):
-            kwargs["base_url"] = llm_config["base_url"]
+        llm_config = data.agent_settings.get("llm", {})
 
-        # User-provided kwargs take precedence
+        # Start with all persisted LLM config fields
+        # The server returns agent_settings.llm as a serialized LLM model_dump()
+        kwargs: dict[str, Any] = dict(llm_config)
+
+        # User-provided kwargs take precedence over persisted settings
         kwargs.update(llm_kwargs)
 
         return LLM(**kwargs)
@@ -361,17 +359,18 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
 
         response = self.client.get("/api/settings/secrets", headers=self._headers)
         response.raise_for_status()
-        data = response.json()
+
+        # Validate response using shared SDK model
+        data = SecretsListResponse.model_validate(response.json())
 
         result: dict[str, LookupSecret] = {}
-        for item in data.get("secrets", []):
-            name = item["name"]
-            if names is not None and name not in names:
+        for item in data.secrets:
+            if names is not None and item.name not in names:
                 continue
-            result[name] = LookupSecret(
-                url=f"{self.host}/api/settings/secrets/{name}",
+            result[item.name] = LookupSecret(
+                url=f"{self.host}/api/settings/secrets/{item.name}",
                 headers=dict(self._headers),
-                description=item.get("description"),
+                description=item.description,
             )
 
         return result
@@ -416,10 +415,11 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
 
         response = self.client.get("/api/settings", headers=headers)
         response.raise_for_status()
-        data = response.json()
 
-        agent_settings = data.get("agent_settings", {})
-        mcp_config_data = agent_settings.get("mcp_config")
+        # Validate response using shared SDK model
+        data = SettingsResponse.model_validate(response.json())
+
+        mcp_config_data = data.agent_settings.get("mcp_config")
 
         if not mcp_config_data:
             return {}
