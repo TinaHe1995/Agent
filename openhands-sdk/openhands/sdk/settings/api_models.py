@@ -10,11 +10,29 @@ Server-side usage:
 
 Client-side usage:
     RemoteWorkspace uses these models to validate responses from settings APIs.
+    Use the typed accessor methods (``get_agent_settings()``,
+    ``get_conversation_settings()``) to parse the raw dicts into typed models.
+
+Note on dict fields:
+    ``SettingsResponse`` uses ``dict[str, Any]`` for ``agent_settings`` and
+    ``conversation_settings`` rather than typed models because the server needs
+    to control how secrets are serialized (plaintext/encrypted/redacted) via
+    serialization context. Typed Pydantic fields would lose this context during
+    FastAPI's automatic JSON serialization.
+
+    Clients that need type safety should use the accessor methods which validate
+    the dicts into ``AgentSettingsConfig`` and ``ConversationSettings``.
 """
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, SecretStr
+
+
+if TYPE_CHECKING:
+    from .model import AgentSettingsConfig, ConversationSettings
 
 
 # ── Settings API Models ───────────────────────────────────────────────────
@@ -25,11 +43,42 @@ class SettingsResponse(BaseModel):
 
     Contains the full settings payload including agent configuration,
     conversation settings, and a flag indicating if an LLM API key is set.
+
+    The ``agent_settings`` and ``conversation_settings`` fields are raw dicts
+    because the server controls secret serialization via context. Use the
+    typed accessor methods for validation:
+
+    Example::
+
+        response = SettingsResponse.model_validate(api_response.json())
+        agent = response.get_agent_settings()  # Returns AgentSettingsConfig
+        conv = response.get_conversation_settings()  # Returns ConversationSettings
     """
 
     agent_settings: dict[str, Any]
     conversation_settings: dict[str, Any]
     llm_api_key_is_set: bool
+
+    def get_agent_settings(self) -> AgentSettingsConfig:
+        """Parse and validate ``agent_settings`` into a typed model.
+
+        Returns:
+            The validated agent settings as either ``OpenHandsAgentSettings``
+            or ``ACPAgentSettings`` depending on the ``agent_kind`` discriminator.
+        """
+        from .model import validate_agent_settings
+
+        return validate_agent_settings(self.agent_settings)
+
+    def get_conversation_settings(self) -> ConversationSettings:
+        """Parse and validate ``conversation_settings`` into a typed model.
+
+        Returns:
+            The validated conversation settings.
+        """
+        from .model import ConversationSettings
+
+        return ConversationSettings.model_validate(self.conversation_settings)
 
 
 class SettingsUpdateRequest(BaseModel):
