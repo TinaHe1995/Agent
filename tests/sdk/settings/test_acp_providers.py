@@ -30,7 +30,7 @@ class TestACPProviderInfo:
         assert info.default_command[0] == "npx"
         assert "@agentclientprotocol/claude-agent-acp" in info.default_command[-1]
         assert info.api_key_env_var == "ANTHROPIC_API_KEY"
-        assert info.base_url_env_var is None
+        assert info.base_url_env_var == "ANTHROPIC_BASE_URL"
         assert info.default_session_mode == "bypassPermissions"
         assert "claude-agent" in info.agent_name_patterns
         assert info.supports_set_session_model is False
@@ -42,7 +42,7 @@ class TestACPProviderInfo:
         assert info.display_name == "Codex"
         assert "@zed-industries/codex-acp" in info.default_command[-1]
         assert info.api_key_env_var == "OPENAI_API_KEY"
-        assert info.base_url_env_var is None
+        assert info.base_url_env_var == "OPENAI_BASE_URL"
         assert info.default_session_mode == "full-access"
         assert "codex-acp" in info.agent_name_patterns
         assert info.supports_set_session_model is True
