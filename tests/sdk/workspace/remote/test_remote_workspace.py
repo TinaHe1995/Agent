@@ -873,26 +873,21 @@ def test_load_skills_from_agent_server_calls_api():
         host="http://localhost:8000", working_dir="/workspace", api_key="test-key"
     )
 
-    with patch("httpx.Client") as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__ = Mock(return_value=mock_client)
-        mock_client_class.return_value.__exit__ = Mock(return_value=None)
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "skills": [
+            {
+                "name": "test-skill",
+                "content": "Test content",
+                "description": "A test skill",
+                "triggers": ["test"],
+            }
+        ],
+        "sources": {"public": 1},
+    }
+    mock_response.raise_for_status = Mock()
 
-        mock_response = Mock()
-        mock_response.json.return_value = {
-            "skills": [
-                {
-                    "name": "test-skill",
-                    "content": "Test content",
-                    "description": "A test skill",
-                    "triggers": ["test"],
-                }
-            ],
-            "sources": {"public": 1},
-        }
-        mock_response.raise_for_status = Mock()
-        mock_client.post.return_value = mock_response
-
+    with patch.object(workspace.client, "post", return_value=mock_response):
         skills, context = workspace.load_skills_from_agent_server()
 
         assert len(skills) == 1
@@ -907,16 +902,11 @@ def test_load_skills_from_agent_server_falls_back_when_no_skills():
         host="http://localhost:8000", working_dir="/workspace", api_key="test-key"
     )
 
-    with patch("httpx.Client") as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__ = Mock(return_value=mock_client)
-        mock_client_class.return_value.__exit__ = Mock(return_value=None)
+    mock_response = Mock()
+    mock_response.json.return_value = {"skills": [], "sources": {}}
+    mock_response.raise_for_status = Mock()
 
-        mock_response = Mock()
-        mock_response.json.return_value = {"skills": [], "sources": {}}
-        mock_response.raise_for_status = Mock()
-        mock_client.post.return_value = mock_response
-
+    with patch.object(workspace.client, "post", return_value=mock_response):
         skills, context = workspace.load_skills_from_agent_server()
 
         assert len(skills) == 0
@@ -929,41 +919,35 @@ def test_load_skills_from_agent_server_with_project_dirs():
         host="http://localhost:8000", working_dir="/workspace", api_key="test-key"
     )
 
-    with patch("httpx.Client") as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__ = Mock(return_value=mock_client)
-        mock_client_class.return_value.__exit__ = Mock(return_value=None)
+    # Return different skills for different calls
+    call_count = 0
 
-        # Return different skills for different calls
-        call_count = 0
+    def side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        response = Mock()
+        if call_count == 1:
+            # Global skills call
+            response.json.return_value = {
+                "skills": [{"name": "global-skill", "content": "Global"}],
+                "sources": {},
+            }
+        else:
+            # Project-specific call
+            response.json.return_value = {
+                "skills": [
+                    {"name": f"project-skill-{call_count}", "content": "Project"}
+                ],
+                "sources": {},
+            }
+        response.raise_for_status = Mock()
+        return response
 
-        def side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            response = Mock()
-            if call_count == 1:
-                # Global skills call
-                response.json.return_value = {
-                    "skills": [{"name": "global-skill", "content": "Global"}],
-                    "sources": {},
-                }
-            else:
-                # Project-specific call
-                response.json.return_value = {
-                    "skills": [
-                        {"name": f"project-skill-{call_count}", "content": "Project"}
-                    ],
-                    "sources": {},
-                }
-            response.raise_for_status = Mock()
-            return response
-
-        mock_client.post.side_effect = side_effect
-
+    with patch.object(workspace.client, "post", side_effect=side_effect) as mock_post:
         skills, context = workspace.load_skills_from_agent_server(
             project_dirs=["/workspace/repo1", "/workspace/repo2"]
         )
 
         # Should have loaded global skills + 2 project dirs = 3 calls
-        assert mock_client.post.call_count == 3
+        assert mock_post.call_count == 3
         assert len(skills) >= 1  # At least the global skill

@@ -629,14 +629,14 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
             reraise=True,
         )
         def _fetch_skills() -> httpx.Response:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(
-                    f"{self.host}/api/skills",
-                    json=payload,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                return resp
+            resp = self.client.post(
+                f"{self.host}/api/skills",
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp
 
         try:
             resp = _fetch_skills()
