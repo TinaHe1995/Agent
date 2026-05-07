@@ -16,7 +16,10 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from openhands.agent_server.config import WebhookSpec
-from openhands.agent_server.conversation_service import WebhookSubscriber
+from openhands.agent_server.conversation_service import (
+    ConversationService,
+    WebhookSubscriber,
+)
 from openhands.agent_server.event_service import EventService
 from openhands.agent_server.models import StoredConversation
 from openhands.agent_server.utils import utc_now
@@ -24,6 +27,11 @@ from openhands.sdk import LLM, Agent
 from openhands.sdk.event.llm_convertible import MessageEvent
 from openhands.sdk.llm.message import Message, TextContent
 from openhands.sdk.workspace import LocalWorkspace
+from tests.stress.scripts import (
+    SlowTestLLM,
+    start_conversation_with_test_llm,
+    text_message,
+)
 
 
 @pytest.fixture
@@ -1247,3 +1255,68 @@ class TestWebhookSubscriberTimerBehavior:
 
         # _post_events should have been called immediately
         subscriber._post_events.assert_called_once()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "conversation_service.py:862 uses asyncio.gather() without await; "
+        "errors during webhook subscribe are silently swallowed."
+    ),
+)
+@pytest.mark.timeout(30)
+async def test_webhook_subscribe_errors_surface(tmp_path, monkeypatch):
+    persist = tmp_path / "persist"
+    persist.mkdir()
+    workspace = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+
+    # Force WebhookSubscriber's first __call__ to raise. event_service.py:412
+    # invokes that __call__ during registration — which is what the unawaited
+    # gather schedules.
+    original_init = WebhookSubscriber.__init__
+
+    def _broken_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._broken = True
+
+    async def _broken_call(self, event):
+        if getattr(self, "_broken", False):
+            raise RuntimeError("webhook subscriber init failed")
+
+    monkeypatch.setattr(WebhookSubscriber, "__init__", _broken_init)
+    monkeypatch.setattr(WebhookSubscriber, "__call__", _broken_call)
+
+    captured: list[dict] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _lp, ctx: captured.append(ctx))
+
+    try:
+        service = ConversationService(
+            conversations_dir=persist,
+            webhook_specs=[
+                WebhookSpec(
+                    base_url="http://unused.test",
+                    event_buffer_size=1,
+                    num_retries=0,
+                )
+            ],
+        )
+        async with service:
+            await start_conversation_with_test_llm(
+                service,
+                parent_llm=SlowTestLLM.from_messages(
+                    [text_message("done")], latency_s=0.0
+                ),
+                workspace_dir=workspace,
+                usage_id="webhook-error",
+                initial_text=None,
+            )
+            await asyncio.sleep(0.2)
+
+        msgs = [str(ctx.get("exception") or ctx.get("message", "")) for ctx in captured]
+        assert any("webhook subscriber init failed" in m for m in msgs), (
+            "subscribe error was silently swallowed by the unawaited gather."
+        )
+    finally:
+        loop.set_exception_handler(None)
