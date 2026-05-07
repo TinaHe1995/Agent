@@ -131,6 +131,9 @@ class APIRemoteWorkspace(RemoteWorkspace):
 
         self.runtime_api_url = self.runtime_api_url.rstrip("/")
 
+        # Initialize callback settings from env vars
+        self._init_callback_settings()
+
         try:
             self._start_or_attach_to_runtime()
             super().model_post_init(context)
@@ -422,4 +425,5 @@ class APIRemoteWorkspace(RemoteWorkspace):
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self._send_completion_callback(exc_type, exc_val)
         self.cleanup()
