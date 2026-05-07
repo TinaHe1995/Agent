@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.request import urlopen
 
@@ -13,11 +14,14 @@ from pydantic import Field, PrivateAttr
 
 from openhands.sdk.logger import get_logger
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
+from openhands.sdk.workspace.repo import CloneResult, RepoMapping, RepoSource
 
 
 if TYPE_CHECKING:
+    from openhands.sdk.context import AgentContext
     from openhands.sdk.llm.llm import LLM
     from openhands.sdk.secret import LookupSecret
+    from openhands.sdk.skills import Skill
 
 
 logger = get_logger(__name__)
@@ -910,10 +914,50 @@ class OpenHandsCloudWorkspace(RemoteWorkspace):
             logger.warning(f"Error fetching secret '{name}': {e}")
             return None
 
-    # --- Skill Loading Methods ---
-    # NOTE: clone_repos, get_repos_context, and load_skills_from_agent_server
-    # are inherited from RemoteWorkspace. Only _call_skills_api is overridden
-    # here to add the X-Session-API-Key header for Cloud mode.
+    # --- Repository Cloning and Skill Loading Methods ---
+    # These methods delegate to RemoteWorkspace but are explicitly defined here
+    # to maintain API compatibility (griffe detects method removal from subclass
+    # as a breaking change even when methods are inherited).
+
+    def clone_repos(
+        self,
+        repos: list[RepoSource | dict[str, Any] | str],
+        target_dir: str | Path | None = None,
+    ) -> CloneResult:
+        """Clone repositories to the workspace directory.
+
+        See RemoteWorkspace.clone_repos for full documentation.
+        """
+        return super().clone_repos(repos, target_dir)
+
+    def get_repos_context(self, repo_mappings: dict[str, RepoMapping]) -> str:
+        """Generate context string describing cloned repositories.
+
+        See RemoteWorkspace.get_repos_context for full documentation.
+        """
+        return super().get_repos_context(repo_mappings)
+
+    def load_skills_from_agent_server(
+        self,
+        project_dirs: list[str | Path] | None = None,
+        load_public: bool = True,
+        load_user: bool = True,
+        load_project: bool = True,
+        load_org: bool = True,
+        timeout: float = 60.0,
+    ) -> tuple[list[Skill], AgentContext]:
+        """Load skills from the agent server.
+
+        See RemoteWorkspace.load_skills_from_agent_server for full documentation.
+        """
+        return super().load_skills_from_agent_server(
+            project_dirs=project_dirs,
+            load_public=load_public,
+            load_user=load_user,
+            load_project=load_project,
+            load_org=load_org,
+            timeout=timeout,
+        )
 
     def _call_skills_api(
         self,
