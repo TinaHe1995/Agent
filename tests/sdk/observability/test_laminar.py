@@ -403,3 +403,34 @@ def contextlib_compat():
     import contextlib
 
     return contextlib.contextmanager
+
+
+def test_deprecated_shims_emit_warnings():
+    """The legacy global-stack API must emit DeprecationWarning so external
+    callers (none found in the org-wide audit, but still) are alerted before
+    the 1.27.0 removal.
+
+    We patch ``_current_version`` to ``1.22.0`` because the helper only emits
+    warnings once the running SDK has reached the ``deprecated_in`` version
+    (so during 1.21.x development the warnings are silent; they activate the
+    moment 1.22.0 ships).
+    """
+    from openhands.sdk.observability import laminar as lam
+
+    # Force observability off so the shim's start_root_span returns None and
+    # we don't reach into a real Laminar SDK.
+    with (
+        patch.object(lam, "should_enable_observability", return_value=False),
+        patch(
+            "openhands.sdk.utils.deprecation._current_version",
+            return_value="1.22.0",
+        ),
+    ):
+        with pytest.warns(DeprecationWarning, match="start_active_span"):
+            lam.start_active_span("conversation", session_id="sid")
+        with pytest.warns(DeprecationWarning, match="end_active_span"):
+            lam.end_active_span()
+        with pytest.warns(DeprecationWarning, match="SpanManager.start_active_span"):
+            lam.SpanManager().start_active_span("conversation")
+        with pytest.warns(DeprecationWarning, match="SpanManager.end_active_span"):
+            lam.SpanManager().end_active_span()
