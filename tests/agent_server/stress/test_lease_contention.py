@@ -24,8 +24,8 @@ from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.models import StartConversationRequest
 from openhands.sdk import Agent
 from openhands.sdk.workspace import LocalWorkspace
-from tests.stress.budgets import LEASE_CONTENTION
-from tests.stress.scripts import placeholder_llm
+from tests.agent_server.stress.budgets import LEASE_CONTENTION
+from tests.agent_server.stress.scripts import placeholder_llm
 
 
 pytestmark = [pytest.mark.stress, pytest.mark.timeout(30)]

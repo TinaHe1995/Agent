@@ -31,7 +31,7 @@ import psutil
 import pytest
 
 from openhands.agent_server.bash_service import BashEventService
-from tests.stress.budgets import LONG_RUNNING_COMMAND
+from tests.agent_server.stress.budgets import LONG_RUNNING_COMMAND
 
 
 pytestmark = pytest.mark.stress

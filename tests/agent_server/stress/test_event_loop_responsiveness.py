@@ -28,8 +28,8 @@ from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.models import StartConversationRequest
 from openhands.sdk import Agent
 from openhands.sdk.workspace import LocalWorkspace
-from tests.stress.budgets import EVENT_LOOP_RESPONSIVENESS
-from tests.stress.scripts import placeholder_llm
+from tests.agent_server.stress.budgets import EVENT_LOOP_RESPONSIVENESS
+from tests.agent_server.stress.scripts import placeholder_llm
 
 
 pytestmark = pytest.mark.stress

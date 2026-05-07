@@ -27,7 +27,7 @@ from openhands.sdk import LLM, Agent
 from openhands.sdk.event.llm_convertible import MessageEvent
 from openhands.sdk.llm.message import Message, TextContent
 from openhands.sdk.workspace import LocalWorkspace
-from tests.stress.scripts import (
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,

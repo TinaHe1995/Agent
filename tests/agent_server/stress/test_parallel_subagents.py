@@ -30,9 +30,9 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.llm import Message, MessageToolCall, TextContent
 from openhands.sdk.subagent.registry import _reset_registry_for_tests, register_agent
 from openhands.tools.task import TaskToolSet
-from tests.stress.budgets import PARALLEL_SUBAGENTS
-from tests.stress.probe import ResourceProbe
-from tests.stress.scripts import (
+from tests.agent_server.stress.budgets import PARALLEL_SUBAGENTS
+from tests.agent_server.stress.probe import ResourceProbe
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,

@@ -31,7 +31,7 @@ from openhands.agent_server.server_details_router import (
     mark_initialization_complete,
     server_details_router,
 )
-from tests.stress.probe import ResourceProbe
+from tests.agent_server.stress.probe import ResourceProbe
 
 
 @pytest_asyncio.fixture

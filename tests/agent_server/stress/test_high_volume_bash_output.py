@@ -20,7 +20,7 @@ from uuid import UUID
 import pytest
 
 from openhands.agent_server.bash_service import BashEventService
-from tests.stress.budgets import HIGH_VOLUME_BASH_OUTPUT
+from tests.agent_server.stress.budgets import HIGH_VOLUME_BASH_OUTPUT
 
 
 pytestmark = [pytest.mark.stress, pytest.mark.timeout(60)]

@@ -9,7 +9,7 @@ real binary, no real network, no real LLM: everything runs against
 ``tmp_path``.
 
 The suite is excluded from the default pytest collection
-(``addopts = --ignore=tests/stress`` in pyproject.toml) so it doesn't run
+(``addopts = --ignore=tests/agent_server/stress`` in pyproject.toml) so it doesn't run
 on every ``make test``.
 
 Layout
@@ -38,11 +38,11 @@ How to run
 ----------
 Default (quick) mode — runs the whole suite::
 
-    uv run pytest tests/stress/
+    uv run pytest tests/agent_server/stress/
 
 Single test, with logs visible::
 
-    uv run pytest tests/stress/test_conversation_listing.py -p no:logging
+    uv run pytest tests/agent_server/stress/test_conversation_listing.py -p no:logging
 
 What you'll see
 ---------------

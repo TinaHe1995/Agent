@@ -21,9 +21,9 @@ import pytest
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.llm import Message, TextContent
-from tests.stress.budgets import CONCURRENT_CONVERSATIONS
-from tests.stress.probe import ResourceProbe
-from tests.stress.scripts import (
+from tests.agent_server.stress.budgets import CONCURRENT_CONVERSATIONS
+from tests.agent_server.stress.probe import ResourceProbe
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     wait_for_terminal,

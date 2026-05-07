@@ -43,9 +43,9 @@ from openhands.agent_server.dependencies import get_conversation_service
 from openhands.agent_server.event_router import event_router
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
-from tests.stress.budgets import SLOW_WEBHOOK
-from tests.stress.probe import ResourceProbe
-from tests.stress.scripts import (
+from tests.agent_server.stress.budgets import SLOW_WEBHOOK
+from tests.agent_server.stress.probe import ResourceProbe
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,

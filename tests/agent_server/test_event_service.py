@@ -38,7 +38,7 @@ from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 from openhands.sdk.workspace import LocalWorkspace
 from openhands.tools.terminal import TerminalAction, TerminalObservation
-from tests.stress.scripts import (
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,

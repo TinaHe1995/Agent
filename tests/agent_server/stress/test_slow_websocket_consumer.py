@@ -36,8 +36,8 @@ from openhands.agent_server.event_service import EventService
 from openhands.agent_server.pub_sub import Subscriber
 from openhands.sdk.event import Event
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
-from tests.stress.budgets import SLOW_WEBSOCKET_CONSUMER
-from tests.stress.scripts import (
+from tests.agent_server.stress.budgets import SLOW_WEBSOCKET_CONSUMER
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,

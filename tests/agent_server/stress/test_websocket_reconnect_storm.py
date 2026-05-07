@@ -21,8 +21,8 @@ from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.event_service import EventService
 from openhands.agent_server.pub_sub import Subscriber
 from openhands.sdk.event import Event
-from tests.stress.budgets import WEBSOCKET_RECONNECT_STORM
-from tests.stress.scripts import (
+from tests.agent_server.stress.budgets import WEBSOCKET_RECONNECT_STORM
+from tests.agent_server.stress.scripts import (
     SlowTestLLM,
     start_conversation_with_test_llm,
     text_message,
