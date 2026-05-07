@@ -320,6 +320,18 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
         except Exception as e:
             logger.warning(f"Completion callback failed: {e}")
 
+    def __exit__(
+        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any
+    ) -> None:
+        """Exit the workspace context, send completion callback, and cleanup.
+
+        Sends a completion callback (if configured via env vars) before calling
+        the parent cleanup. Subclasses that override ``__exit__`` should call
+        ``super().__exit__(...)`` to ensure the callback is sent.
+        """
+        self._send_completion_callback(exc_type, exc_val)
+        super().__exit__(exc_type, exc_val, exc_tb)
+
     # ── Settings Methods ──────────────────────────────────────────────────
     # These methods fetch configuration from the agent-server's persisted
     # settings endpoints. Subclasses like OpenHandsCloudWorkspace may override
