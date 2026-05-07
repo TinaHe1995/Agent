@@ -306,19 +306,6 @@ def _make_workspace():
         return ws
 
 
-def test_api_remote_workspace_inits_callback_settings(monkeypatch):
-    """Test that APIRemoteWorkspace calls _init_callback_settings during init."""
-    monkeypatch.setenv("AUTOMATION_CALLBACK_URL", "https://svc.test/complete")
-    monkeypatch.setenv("AUTOMATION_CALLBACK_API_KEY", "test-api-key")
-    monkeypatch.setenv("AUTOMATION_RUN_ID", "run-42")
-
-    ws = _make_workspace()
-
-    assert ws._automation_callback_url == "https://svc.test/complete"
-    assert ws._automation_callback_api_key == "test-api-key"
-    assert ws._automation_run_id == "run-42"
-
-
 def test_api_remote_workspace_exit_sends_callback(monkeypatch):
     """Test that APIRemoteWorkspace.__exit__ sends completion callback."""
     monkeypatch.setenv("AUTOMATION_CALLBACK_URL", "https://svc.test/complete")

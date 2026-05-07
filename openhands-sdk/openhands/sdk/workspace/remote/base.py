@@ -68,11 +68,6 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
     """
 
     _client: httpx.Client | None = PrivateAttr(default=None)
-
-    # Callback state (read from env vars via _init_callback_settings)
-    _automation_callback_url: str | None = PrivateAttr(default=None)
-    _automation_callback_api_key: str | None = PrivateAttr(default=None)
-    _automation_run_id: str | None = PrivateAttr(default=None)
     _conversation_id: str | None = PrivateAttr(default=None)
 
     def reset_client(self) -> None:
@@ -277,28 +272,18 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
         """
         return self._conversation_id
 
-    def _init_callback_settings(self) -> None:
-        """Read automation callback settings from environment variables.
-
-        Called by subclasses in model_post_init() to initialize callback settings.
-        Reads:
-          - ``AUTOMATION_CALLBACK_URL`` — URL to POST completion status to
-          - ``AUTOMATION_CALLBACK_API_KEY`` — Bearer token for callback auth (optional)
-          - ``AUTOMATION_RUN_ID`` — Run ID to include in callback payload (optional)
-        """
-        self._automation_callback_url = os.environ.get("AUTOMATION_CALLBACK_URL")
-        self._automation_callback_api_key = os.environ.get(
-            "AUTOMATION_CALLBACK_API_KEY"
-        )
-        self._automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
-
     def _send_completion_callback(
         self, exc_type: type | None, exc_val: BaseException | None
     ) -> None:
         """POST completion status to the automation service (best-effort).
 
         Call this from ``__exit__`` before ``cleanup()``. Does nothing when
-        ``AUTOMATION_CALLBACK_URL`` env var was not set.
+        ``AUTOMATION_CALLBACK_URL`` env var is not set.
+
+        Reads configuration from environment variables:
+          - ``AUTOMATION_CALLBACK_URL`` — URL to POST completion status to
+          - ``AUTOMATION_CALLBACK_API_KEY`` — Bearer token for callback auth (optional)
+          - ``AUTOMATION_RUN_ID`` — Run ID to include in callback payload (optional)
 
         Includes ``conversation_id`` in the payload if one was registered via
         ``register_conversation()``.
@@ -307,18 +292,17 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
             exc_type: Exception type if an exception was raised, None otherwise
             exc_val: Exception value if an exception was raised, None otherwise
         """
-        try:
-            callback_url = self._automation_callback_url
-        except AttributeError:
-            return
-
+        callback_url = os.environ.get("AUTOMATION_CALLBACK_URL")
         if not callback_url:
             return
 
+        callback_api_key = os.environ.get("AUTOMATION_CALLBACK_API_KEY")
+        run_id = os.environ.get("AUTOMATION_RUN_ID")
+
         status = "COMPLETED" if exc_type is None else "FAILED"
         payload: dict[str, Any] = {"status": status}
-        if self._automation_run_id:
-            payload["run_id"] = self._automation_run_id
+        if run_id:
+            payload["run_id"] = run_id
         if exc_val is not None:
             payload["error"] = str(exc_val)
 
@@ -328,8 +312,8 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
 
         try:
             headers: dict[str, str] = {}
-            if self._automation_callback_api_key:
-                headers["Authorization"] = f"Bearer {self._automation_callback_api_key}"
+            if callback_api_key:
+                headers["Authorization"] = f"Bearer {callback_api_key}"
             with httpx.Client(timeout=10.0) as cb_client:
                 resp = cb_client.post(callback_url, json=payload, headers=headers)
                 logger.info(f"Completion callback sent ({status}): {resp.status_code}")

@@ -131,9 +131,6 @@ class APIRemoteWorkspace(RemoteWorkspace):
 
         self.runtime_api_url = self.runtime_api_url.rstrip("/")
 
-        # Initialize callback settings from env vars
-        self._init_callback_settings()
-
         try:
             self._start_or_attach_to_runtime()
             super().model_post_init(context)
