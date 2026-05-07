@@ -478,10 +478,12 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
             reraise=True,
         )
         def _fetch_secret() -> httpx.Response:
-            return self.client.get(
+            resp = self.client.get(
                 f"/api/settings/secrets/{name}",
                 headers=self._headers,
             )
+            resp.raise_for_status()
+            return resp
 
         try:
             resp = _fetch_secret()
