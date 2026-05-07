@@ -1,0 +1,8 @@
+# Mirrors agent-server's pre-PR ENTRYPOINT:
+#   ENTRYPOINT ["/agent-server/.venv/bin/python", "-m", "openhands.agent_server"]
+# i.e. python is PID 1 with no init.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends procps git \
+    && rm -rf /var/lib/apt/lists/*
+COPY orphan_spawner.py /orphan_spawner.py
+ENTRYPOINT ["python", "/orphan_spawner.py"]
