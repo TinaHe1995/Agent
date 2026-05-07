@@ -314,7 +314,7 @@ MODELS = {
         "display_name": "GPT OSS 120B",
         "llm_config": {
             "model": (
-                "litellm_proxy/fireworks_ai/accounts/fireworks/models/gpt-oss-120b"
+                "litellm_proxy/openai/gpt-oss-120b"
             ),
             "temperature": 0.0,
         },
