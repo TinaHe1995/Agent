@@ -93,8 +93,8 @@ RUN set -eux; \
     # is short-lived enough on non-Debian images that PID 1 zombie reaping
     # has not been observed to matter — revisit if it does).
     if command -v apt-get >/dev/null 2>&1; then \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
+        apt-get -o Acquire::Retries=5 update; \
+        apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             bash ca-certificates curl wget sudo apt-utils git jq tmux tar \
             build-essential coreutils util-linux procps findutils grep sed \
             tini apt-transport-https gnupg lsb-release xz-utils; \
@@ -145,37 +145,57 @@ RUN set -eux; \
 # Install Node.js 22 to a dedicated prefix so ACP packages get a modern runtime
 # WITHOUT overwriting the repo-specific Node.js that test suites depend on.
 # SWE-bench images ship NVM/apt-managed Node 8-14 which cannot run ACP packages.
+#
+# This step is best-effort: SWE-Bench Pro base images come from many distros
+# and some have an old glibc (or use musl) that cannot run the upstream Node
+# 22 glibc tarball. When that happens we leave $ACP_NODE_DIR empty and skip
+# ACP setup so the rest of the build (and non-ACP agents) still work.
 ENV ACP_NODE_DIR=/opt/acp-node
-RUN set -eux; \
+RUN set -ux; \
+    mkdir -p "$ACP_NODE_DIR"; \
     ARCH=$(uname -m); \
+    NARCH=""; \
+    NODE_SHA256=""; \
     case "$ARCH" in \
       x86_64|amd64) NARCH=x64; NODE_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec;; \
       aarch64|arm64) NARCH=arm64; NODE_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050;; \
-      *) echo "Unsupported architecture for ACP Node install: $ARCH" >&2; exit 1;; \
     esac; \
-    NODE_TARBALL="/tmp/node-v22.14.0-linux-${NARCH}.tar.xz"; \
-    mkdir -p "$ACP_NODE_DIR"; \
-    curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${NARCH}.tar.xz" -o "$NODE_TARBALL"; \
-    echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c -; \
-    tar -xJ --strip-components=1 -C "$ACP_NODE_DIR" -f "$NODE_TARBALL"; \
-    rm -f "$NODE_TARBALL"; \
-    PATH="$ACP_NODE_DIR/bin:$PATH"; \
-    node --version; \
-    npm install -g \
-      @agentclientprotocol/claude-agent-acp@0.30.0 \
-      @zed-industries/codex-acp@0.11.1 \
-      @google/gemini-cli@0.38.0; \
-    # Create wrappers in /usr/local/bin that prepend ACP's Node 22 to PATH.
-    # This ensures the ACP binary's #!/usr/bin/env node shebang resolves to
-    # Node 22, while the repo's own node (NVM/system) stays untouched for tests.
-    for bin in claude-agent-acp codex-acp gemini; do \
-      if [ -e "$ACP_NODE_DIR/bin/$bin" ]; then \
-        printf '#!/bin/sh\nPATH="%s/bin:$PATH" exec "%s/bin/%s" "$@"\n' \
-          "$ACP_NODE_DIR" "$ACP_NODE_DIR" "$bin" \
-          > /usr/local/bin/"$bin"; \
-        chmod +x /usr/local/bin/"$bin"; \
+    NODE_TARBALL=""; \
+    if [ -z "$NARCH" ]; then \
+      echo "Skipping ACP Node install: unsupported architecture '$ARCH'" >&2; \
+    else \
+      NODE_TARBALL="/tmp/node-v22.14.0-linux-${NARCH}.tar.xz"; \
+      if curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${NARCH}.tar.xz" -o "$NODE_TARBALL" \
+         && echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c - \
+         && tar -xJ --strip-components=1 -C "$ACP_NODE_DIR" -f "$NODE_TARBALL" \
+         && "$ACP_NODE_DIR/bin/node" --version; then \
+        PATH="$ACP_NODE_DIR/bin:$PATH"; \
+        if "$ACP_NODE_DIR/bin/npm" install -g \
+            @agentclientprotocol/claude-agent-acp@0.30.0 \
+            @zed-industries/codex-acp@0.11.1 \
+            @google/gemini-cli@0.38.0; then \
+          # Create wrappers in /usr/local/bin that prepend ACP's Node 22 to PATH.
+          # This ensures the ACP binary's #!/usr/bin/env node shebang resolves
+          # to Node 22, while the repo's own node (NVM/system) stays untouched
+          # for tests.
+          for bin in claude-agent-acp codex-acp gemini; do \
+            if [ -e "$ACP_NODE_DIR/bin/$bin" ]; then \
+              printf '#!/bin/sh\nPATH="%s/bin:$PATH" exec "%s/bin/%s" "$@"\n' \
+                "$ACP_NODE_DIR" "$ACP_NODE_DIR" "$bin" \
+                > /usr/local/bin/"$bin"; \
+              chmod +x /usr/local/bin/"$bin"; \
+            fi; \
+          done; \
+        else \
+          echo "Warning: ACP npm install failed; ACP agents will not be available on this image" >&2; \
+          rm -rf "$ACP_NODE_DIR"/*; \
+        fi; \
+      else \
+        echo "Warning: ACP Node 22 runtime is not compatible with this base image (likely older glibc or musl libc); ACP agents will not be available" >&2; \
+        rm -rf "$ACP_NODE_DIR"/*; \
       fi; \
-    done
+    fi; \
+    rm -f "$NODE_TARBALL" 2>/dev/null || true
 
 # Configure Claude Code managed settings for headless operation:
 # Allow all tool permissions (no human in the loop to approve).
