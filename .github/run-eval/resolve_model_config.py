@@ -43,6 +43,17 @@ if sigalrm := getattr(signal, "SIGALRM", None):
 # Keep this list in sync with SDK LLM config parameters that are SDK-internal.
 SDK_ONLY_PARAMS = {"disable_vision"}
 
+# Default model IDs for scheduled/label-triggered integration test runs.
+# This list is the single source of truth; the integration-runner workflow
+# reads it from the checked-out branch via `resolve_model_config.py`, so
+# changes on release branches take effect even though `pull_request_target`
+# evaluates workflow-level env vars from the default branch.
+DEFAULT_INTEGRATION_MODEL_IDS = [
+    "claude-sonnet-4-6",
+    "deepseek-v4-flash",
+    "kimi-k2.6",
+    "gemini-3.1-pro",
+]
 
 # Model configurations dictionary
 MODELS = {

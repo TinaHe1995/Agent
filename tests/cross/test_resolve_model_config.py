@@ -14,6 +14,7 @@ from pydantic import BaseModel, field_validator, model_validator
 run_eval_path = Path(__file__).parent.parent.parent / ".github" / "run-eval"
 sys.path.append(str(run_eval_path))
 from resolve_model_config import (  # noqa: E402  # type: ignore[import-not-found]
+    DEFAULT_INTEGRATION_MODEL_IDS,
     MODELS,
     check_model,
     find_models_by_id,
@@ -659,3 +660,12 @@ def test_deepseek_v4_flash_config():
     assert model["id"] == "deepseek-v4-flash"
     assert model["display_name"] == "DeepSeek V4 Flash"
     assert model["llm_config"]["model"] == "litellm_proxy/deepseek/deepseek-v4-flash"
+
+
+def test_default_integration_model_ids_all_exist():
+    """Every ID in DEFAULT_INTEGRATION_MODEL_IDS must exist in MODELS."""
+    for model_id in DEFAULT_INTEGRATION_MODEL_IDS:
+        assert model_id in MODELS, (
+            f"DEFAULT_INTEGRATION_MODEL_IDS contains '{model_id}' "
+            f"which is not in MODELS"
+        )

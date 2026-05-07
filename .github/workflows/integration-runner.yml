@@ -49,8 +49,6 @@ on:
 
 env:
     N_PROCESSES: 4 # Global configuration for number of parallel processes for evaluation
-    # Default models for scheduled/label-triggered runs (subset of models from resolve_model_config.py)
-    DEFAULT_MODEL_IDS: claude-sonnet-4-6,deepseek-v4-flash,kimi-k2.6,gemini-3.1-pro
 
 jobs:
     setup-matrix:
@@ -75,27 +73,26 @@ jobs:
               id: resolve-models
               env:
                   MODEL_IDS_INPUT: ${{ github.event.inputs.model_ids || '' }}
-                  DEFAULT_MODEL_IDS: ${{ env.DEFAULT_MODEL_IDS }}
               run: |
-                  # Use input model_ids if provided, otherwise use defaults
-                  if [ -z "$MODEL_IDS_INPUT" ]; then
-                    MODEL_IDS="$DEFAULT_MODEL_IDS"
-                    echo "No model_ids specified, using defaults: $MODEL_IDS"
-                  else
-                    MODEL_IDS="$MODEL_IDS_INPUT"
-                    echo "Using specified model_ids: $MODEL_IDS"
-                  fi
-
-                  # Resolve model configs using resolve_model_config.py
-                  # Transform output to matrix format for integration tests
-                  MATRIX=$(python3 << EOF
+                  # Resolve model configs using resolve_model_config.py from the
+                  # checked-out branch.  DEFAULT_INTEGRATION_MODEL_IDS lives in
+                  # that file so release branches can update the default set
+                  # without waiting for main to be updated (pull_request_target
+                  # evaluates workflow-level env from the default branch).
+                  MATRIX=$(python3 << 'EOF'
                   import json
+                  import os
                   import sys
                   sys.path.insert(0, '.github/run-eval')
-                  from resolve_model_config import MODELS
+                  from resolve_model_config import DEFAULT_INTEGRATION_MODEL_IDS, MODELS
 
-                  model_ids = "$MODEL_IDS".split(",")
-                  model_ids = [m.strip() for m in model_ids if m.strip()]
+                  model_ids_input = os.environ.get("MODEL_IDS_INPUT", "").strip()
+                  if model_ids_input:
+                      model_ids = [m.strip() for m in model_ids_input.split(",") if m.strip()]
+                      print(f"Using specified model_ids: {','.join(model_ids)}", file=sys.stderr)
+                  else:
+                      model_ids = list(DEFAULT_INTEGRATION_MODEL_IDS)
+                      print(f"No model_ids specified, using defaults: {','.join(model_ids)}", file=sys.stderr)
 
                   matrix = []
                   for model_id in model_ids:
@@ -104,7 +101,6 @@ jobs:
                           print(f"Error: Model ID '{model_id}' not found. Available: {available}", file=sys.stderr)
                           sys.exit(1)
                       model = MODELS[model_id]
-                      # Create run-suffix from model id (replace special chars with underscore)
                       run_suffix = model_id.replace("-", "_").replace(".", "_") + "_run"
                       matrix.append({
                           "id": model_id,
