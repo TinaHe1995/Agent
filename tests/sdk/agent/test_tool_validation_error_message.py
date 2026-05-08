@@ -83,9 +83,13 @@ def test_validation_error_shows_keys_not_values():
     )
     agent = Agent(llm=llm, tools=[Tool(name="ValidationTestTool")])
 
-    # Create tool call with large arguments but missing security_risk field
+    # Create tool call with large arguments and an invalid security_risk to
+    # trigger a validation error in the same code path.
     large_value = "x" * 1000
-    tool_args = f'{{"command": "view", "path": "/test", "old_str": "{large_value}"}}'
+    tool_args = (
+        f'{{"command": "view", "path": "/test", "old_str": "{large_value}", '
+        f'"security_risk": "INVALID"}}'
+    )
 
     def mock_llm_response(messages, **kwargs):
         return ModelResponse(
