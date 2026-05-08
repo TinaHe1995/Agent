@@ -219,6 +219,37 @@ async def test_stale_owner_cannot_append_after_lease_takeover(tmp_path):
                 primary_state.execution_status = ConversationExecutionStatus.ERROR
 
 
+@pytest.mark.asyncio
+async def test_event_services_use_centralized_lease_renewal(tmp_path):
+    """Event services created by ConversationService should not spawn
+    their own lease renewal tasks — renewal is handled centrally."""
+    conversations_dir = tmp_path / "conversations"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+    )
+
+    async with ConversationService(conversations_dir=conversations_dir) as svc:
+        info, _ = await svc.start_conversation(request)
+        assert svc._event_services is not None
+        es = svc._event_services[info.id]
+
+        # Per-service renewal task should NOT be created
+        assert es._lease_task is None
+        assert es._external_lease_renewal is True
+
+        # Centralized task should exist
+        assert svc._lease_renewal_task is not None
+        assert not svc._lease_renewal_task.done()
+
+    # After __aexit__, centralized task should be cleaned up
+    assert svc._lease_renewal_task is None
+
+
 class TestConversationServiceSearchConversations:
     """Test cases for ConversationService.search_conversations method."""
 
