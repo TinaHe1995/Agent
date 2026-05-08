@@ -97,7 +97,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short -m 'not stress'"
 asyncio_mode = "auto"
 markers = [
-    "stress: stress / scale tests, excluded from default collection by `-m 'not stress'`. Run with `pytest -m stress` or `pytest tests/agent_server/stress/`.",
+    "stress: stress / scale tests, deselected by default via `-m 'not stress'` in addopts (still collected so import-time breakage surfaces). Run with `pytest -m stress`, or `pytest -m stress tests/agent_server/stress/` for path-scoped runs.",
 ]
 
 # Pyright configuration for PEP 420 namespace packages

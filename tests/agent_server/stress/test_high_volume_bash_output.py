@@ -13,6 +13,7 @@ What "coalesced" means in this codebase:
 """
 
 import asyncio
+import os
 import statistics
 import time
 from uuid import UUID
@@ -21,6 +22,7 @@ import pytest
 
 from openhands.agent_server.bash_service import BashEventService
 from tests.agent_server.stress.budgets import HIGH_VOLUME_BASH_OUTPUT
+from tests.agent_server.stress.scripts import descendants_of
 
 
 pytestmark = [pytest.mark.stress, pytest.mark.timeout(60)]
@@ -38,6 +40,7 @@ async def test_high_volume_bash_output_is_bounded(
     # a deterministic byte count makes the event-count assertion stable
     # across machines (a wall-clock-bounded `yes` produces variable output).
     flood_bytes = 5 * 1024 * 1024  # 5 MB
+    pre_children = set(p.pid for p in descendants_of(os.getpid()))
     resp = await client.post(
         "/api/bash/start_bash_command",
         json={
@@ -106,11 +109,35 @@ async def test_high_volume_bash_output_is_bounded(
         f"Output is being emitted per-line/per-byte instead of coalesced."
     )
 
-    # 2. /health stayed responsive throughout.
-    if health_lats:
-        p95 = statistics.quantiles(health_lats, n=20)[-1]
-        assert p95 < HIGH_VOLUME_BASH_OUTPUT.health_p95_s, (
-            f"/health p95 {p95 * 1000:.1f} ms during bash flood (budget "
-            f"{HIGH_VOLUME_BASH_OUTPUT.health_p95_s * 1000:.0f} ms). The "
-            f"flood is starving the event loop."
-        )
+    # 2. /health stayed responsive throughout. Require ≥ 10 samples so the
+    # n=20 quantile actually represents a p95 — with fewer samples it
+    # collapses toward the max and the assertion stops being meaningful.
+    assert len(health_lats) >= 10, (
+        f"only {len(health_lats)} /health samples collected during the "
+        f"flood; not enough for a representative p95. Either the flood "
+        f"finished before sampling could land or the polling loop is "
+        f"misconfigured."
+    )
+    p95 = statistics.quantiles(health_lats, n=20)[-1]
+    assert p95 < HIGH_VOLUME_BASH_OUTPUT.health_p95_s, (
+        f"/health p95 {p95 * 1000:.1f} ms during bash flood (budget "
+        f"{HIGH_VOLUME_BASH_OUTPUT.health_p95_s * 1000:.0f} ms). The "
+        f"flood is starving the event loop."
+    )
+
+    # 3. Pipeline cleanup: `yes | head -c N` is two processes (the shell
+    # spawns yes, head, and a writer). After the command completes, all
+    # descendants must be reaped — bash_service mishandling process groups
+    # for pipelines would leak children that test_long_running_command
+    # doesn't surface (it only exercises non-pipeline shells).
+    cleanup_deadline = time.monotonic() + 3.0
+    leaked: set[int] = set()
+    while time.monotonic() < cleanup_deadline:
+        leaked = set(p.pid for p in descendants_of(os.getpid())) - pre_children
+        if not leaked:
+            break
+        await asyncio.sleep(0.1)
+    assert not leaked, (
+        f"after the flood ended, descendants of the test process still "
+        f"include {leaked}. bash_service is leaking pipeline children."
+    )

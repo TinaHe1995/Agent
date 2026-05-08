@@ -223,10 +223,18 @@ async def test_pagination_is_correct_and_bounded(
     #    listing-start vs peak-during-listing. A "list everything into
     #    memory each call" regression overruns this; allocator noise does
     #    not.
+    #
+    # Use only samples captured during the loop — `probe.peak_rss_mb()`
+    # returns the all-time peak, which would include the seeding spike from
+    # earlier in the test and inflate the delta artificially.
+    pre_loop_idx = len(probe.samples)
     pre_loop_rss = probe.samples[-1].rss_mb
     for _k in range(50):
         await _time_first_page(client, page_size=page_size)
-    peak_during_loop = probe.peak_rss_mb()
+    peak_during_loop = max(
+        (s.rss_mb for s in probe.samples[pre_loop_idx:]),
+        default=pre_loop_rss,
+    )
     delta = peak_during_loop - pre_loop_rss
     assert delta < CONVERSATION_LISTING.listing_rss_delta_mb, (
         f"RSS grew {delta:.1f} MB during 50 list calls "

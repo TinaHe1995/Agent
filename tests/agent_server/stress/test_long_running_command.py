@@ -27,22 +27,14 @@ import statistics
 import time
 from uuid import UUID
 
-import psutil
 import pytest
 
 from openhands.agent_server.bash_service import BashEventService
 from tests.agent_server.stress.budgets import LONG_RUNNING_COMMAND
+from tests.agent_server.stress.scripts import descendants_of
 
 
 pytestmark = pytest.mark.stress
-
-
-def _descendants_of(pid: int) -> list[psutil.Process]:
-    """All recursive descendants of ``pid``. Empty if pid is gone."""
-    try:
-        return psutil.Process(pid).children(recursive=True)
-    except psutil.NoSuchProcess:
-        return []
 
 
 async def test_long_running_bash_does_not_block_event_loop(
@@ -56,7 +48,7 @@ async def test_long_running_bash_does_not_block_event_loop(
     # Start a command that stays alive for ``duration`` seconds and emits a
     # final marker. We give the service a slightly larger timeout so the
     # natural-exit path runs (we test the timeout path separately below).
-    pre_children = set(p.pid for p in _descendants_of(os.getpid()))
+    pre_children = set(p.pid for p in descendants_of(os.getpid()))
     resp = await client.post(
         "/api/bash/start_bash_command",
         json={
@@ -118,7 +110,7 @@ async def test_long_running_bash_does_not_block_event_loop(
     cleanup_deadline = time.monotonic() + LONG_RUNNING_COMMAND.cleanup_timeout_s
     leaked: set[int] = set()
     while time.monotonic() < cleanup_deadline:
-        post_children = set(p.pid for p in _descendants_of(os.getpid()))
+        post_children = set(p.pid for p in descendants_of(os.getpid()))
         leaked = post_children - pre_children
         if not leaked:
             break
@@ -141,7 +133,7 @@ async def test_bash_timeout_kills_process_cleanly(
     This is the closest available substitute for an explicit cancel; see the
     module docstring for the API gap.
     """
-    pre_children = set(p.pid for p in _descendants_of(os.getpid()))
+    pre_children = set(p.pid for p in descendants_of(os.getpid()))
 
     resp = await client.post(
         "/api/bash/start_bash_command",
@@ -183,7 +175,7 @@ async def test_bash_timeout_kills_process_cleanly(
     cleanup_deadline = time.monotonic() + LONG_RUNNING_COMMAND.cleanup_timeout_s
     leaked: set[int] = set()
     while time.monotonic() < cleanup_deadline:
-        post_children = set(p.pid for p in _descendants_of(os.getpid()))
+        post_children = set(p.pid for p in descendants_of(os.getpid()))
         leaked = post_children - pre_children
         if not leaked:
             return

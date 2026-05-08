@@ -319,7 +319,16 @@ async def test_webhook_queue_bounded_under_sustained_downstream_failure(
     # test would bake test concerns into production. Reach into _pub_sub
     # directly here.
     webhook_sub = next(
-        s for s in es._pub_sub._subscribers.values() if isinstance(s, WebhookSubscriber)
+        (
+            s
+            for s in es._pub_sub._subscribers.values()
+            if isinstance(s, WebhookSubscriber)
+        ),
+        None,
+    )
+    assert webhook_sub is not None, (
+        f"no WebhookSubscriber registered on the event service. Found: "
+        f"{[type(s).__name__ for s in es._pub_sub._subscribers.values()]}"
     )
 
     n_events = 500

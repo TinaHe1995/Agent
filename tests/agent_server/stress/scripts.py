@@ -12,6 +12,7 @@ from typing import Any, Final
 from uuid import UUID
 
 import httpx
+import psutil
 from pydantic import PrivateAttr, SecretStr
 
 from openhands.agent_server.conversation_service import ConversationService
@@ -59,6 +60,14 @@ def placeholder_llm(usage_id: str) -> LLM:
 
 def text_message(text: str) -> Message:
     return Message(role="assistant", content=[TextContent(text=text)])
+
+
+def descendants_of(pid: int) -> list[psutil.Process]:
+    """All recursive descendants of ``pid``. Empty if pid is gone."""
+    try:
+        return psutil.Process(pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
 
 
 async def start_conversation_with_test_llm(
