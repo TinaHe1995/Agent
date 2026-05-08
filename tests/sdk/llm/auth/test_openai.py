@@ -608,3 +608,42 @@ def test_joserfc_keyset_import():
     # Should have imported one key
     keys = list(key_set)
     assert len(keys) == 1
+
+
+def test_extract_chatgpt_account_id_with_joserfc():
+    """End-to-end test: create a JWT with joserfc and verify extraction."""
+    from joserfc import jwk as joserfc_jwk, jwt as joserfc_jwt
+    from joserfc.jwk import KeySetSerialization
+
+    from openhands.sdk.llm.auth.openai import (
+        _extract_chatgpt_account_id,
+        _jwks_cache,
+    )
+
+    # Generate a test RSA key pair
+    key = joserfc_jwk.RSAKey.generate_key(2048)
+    kid = key.thumbprint()
+
+    # Build a signed JWT with the expected OpenAI claims structure
+    claims = {
+        "iss": "https://auth.openai.com",
+        "sub": "test-user",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct_test_12345",
+        },
+    }
+    token_str = joserfc_jwt.encode({"alg": "RS256", "kid": kid}, claims, key)
+
+    # Build a JWKS dict matching what OpenAI's endpoint returns
+    key_dict = key.as_dict()
+    key_dict["kid"] = kid
+    jwks_data: KeySetSerialization = {"keys": [key_dict]}
+
+    # Patch the JWKS cache to return our test key set
+    key_set = joserfc_jwk.KeySet.import_key_set(jwks_data)
+    with patch.object(_jwks_cache, "get_key_set", return_value=key_set):
+        account_id = _extract_chatgpt_account_id(token_str)
+
+    assert account_id == "acct_test_12345"
