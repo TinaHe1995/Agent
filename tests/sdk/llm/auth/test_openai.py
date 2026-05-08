@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from joserfc import jwt as joserfc_jwt
+from joserfc.jwk import KeySet, RSAKey
 
 from openhands.sdk.llm.auth.credentials import CredentialStore, OAuthCredentials
 from openhands.sdk.llm.auth.openai import (
@@ -21,6 +23,7 @@ from openhands.sdk.llm.auth.openai import (
     OpenAISubscriptionAuth,
     _build_authorize_url,
     _display_consent_and_confirm,
+    _extract_chatgpt_account_id,
     _generate_pkce,
     _get_consent_marker_path,
     _has_acknowledged_consent,
@@ -585,7 +588,7 @@ def test_no_authlib_jose_import():
 
 def test_joserfc_keyset_import():
     """Test that joserfc KeySet can import a JWKS structure."""
-    from joserfc.jwk import KeySet, KeySetSerialization
+    from joserfc.jwk import KeySetSerialization
 
     # Minimal valid RSA JWK for testing (RFC 7517 example modulus)
     rsa_n = (
@@ -610,40 +613,84 @@ def test_joserfc_keyset_import():
     assert len(keys) == 1
 
 
-def test_extract_chatgpt_account_id_with_joserfc():
-    """End-to-end test: create a JWT with joserfc and verify extraction."""
-    from joserfc import jwk as joserfc_jwk, jwt as joserfc_jwt
-    from joserfc.jwk import KeySetSerialization
+# =========================================================================
+# End-to-end tests for _extract_chatgpt_account_id with joserfc
+# =========================================================================
 
-    from openhands.sdk.llm.auth.openai import (
-        _extract_chatgpt_account_id,
-        _jwks_cache,
+
+@pytest.fixture
+def rsa_signing_key():
+    """Generate an RSA key pair for JWT signing in tests."""
+    return RSAKey.generate_key(2048, parameters={"kid": "test-key-1"})
+
+
+@pytest.fixture
+def mock_jwks_cache(rsa_signing_key):
+    """Mock _jwks_cache to return a KeySet with the test public key."""
+    pub_dict = rsa_signing_key.as_dict(private=False)
+    key_set = KeySet.import_key_set({"keys": [pub_dict]})
+    with patch(
+        "openhands.sdk.llm.auth.openai._jwks_cache.get_key_set",
+        return_value=key_set,
+    ):
+        yield
+
+
+def _sign_jwt(key: RSAKey, claims: dict) -> str:
+    """Sign a JWT with the given RSA key and claims."""
+    header = {"alg": "RS256", "kid": key.kid}
+    return joserfc_jwt.encode(header, claims, key)
+
+
+def test_extract_chatgpt_account_id_success(rsa_signing_key, mock_jwks_cache):
+    """End-to-end: sign a JWT with joserfc, extract chatgpt_account_id."""
+    token = _sign_jwt(
+        rsa_signing_key,
+        {
+            "sub": "user-123",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-abc-456",
+            },
+        },
+    )
+    account_id = _extract_chatgpt_account_id(token)
+    assert account_id == "acct-abc-456"
+
+
+def test_extract_chatgpt_account_id_missing_claim(rsa_signing_key, mock_jwks_cache):
+    """Returns None when the JWT has no chatgpt_account_id claim."""
+    token = _sign_jwt(rsa_signing_key, {"sub": "user-123"})
+    assert _extract_chatgpt_account_id(token) is None
+
+
+def test_extract_chatgpt_account_id_wrong_key(rsa_signing_key):
+    """Returns None when JWT signature cannot be verified (wrong key)."""
+    # Sign with the test key but verify against a different key
+    different_key = RSAKey.generate_key(2048, parameters={"kid": "other-key"})
+    different_pub = different_key.as_dict(private=False)
+    wrong_key_set = KeySet.import_key_set({"keys": [different_pub]})
+
+    token = _sign_jwt(
+        rsa_signing_key,
+        {
+            "sub": "user-123",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-should-not-appear",
+            },
+        },
     )
 
-    # Generate a test RSA key pair
-    key = joserfc_jwk.RSAKey.generate_key(2048)
-    kid = key.thumbprint()
+    with patch(
+        "openhands.sdk.llm.auth.openai._jwks_cache.get_key_set",
+        return_value=wrong_key_set,
+    ):
+        assert _extract_chatgpt_account_id(token) is None
 
-    # Build a signed JWT with the expected OpenAI claims structure
-    claims = {
-        "iss": "https://auth.openai.com",
-        "sub": "test-user",
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 3600,
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "acct_test_12345",
-        },
-    }
-    token_str = joserfc_jwt.encode({"alg": "RS256", "kid": kid}, claims, key)
 
-    # Build a JWKS dict matching what OpenAI's endpoint returns
-    key_dict = key.as_dict()
-    key_dict["kid"] = kid
-    jwks_data: KeySetSerialization = {"keys": [key_dict]}
-
-    # Patch the JWKS cache to return our test key set
-    key_set = joserfc_jwk.KeySet.import_key_set(jwks_data)
-    with patch.object(_jwks_cache, "get_key_set", return_value=key_set):
-        account_id = _extract_chatgpt_account_id(token_str)
-
-    assert account_id == "acct_test_12345"
+def test_extract_chatgpt_account_id_jwks_fetch_failure():
+    """Returns None when JWKS cache raises RuntimeError."""
+    with patch(
+        "openhands.sdk.llm.auth.openai._jwks_cache.get_key_set",
+        side_effect=RuntimeError("network error"),
+    ):
+        assert _extract_chatgpt_account_id("dummy.jwt.token") is None
