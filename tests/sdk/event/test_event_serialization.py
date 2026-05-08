@@ -1,5 +1,7 @@
 """Comprehensive tests for event serialization and deserialization."""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -156,6 +158,23 @@ def test_condensation_serialization() -> None:
     json_data = event.model_dump_json()
     deserialized = Condensation.model_validate_json(json_data)
     assert deserialized == event
+
+
+def test_condensation_deserializes_from_list_format() -> None:
+    """Backward compat: old persisted data stored forgotten_event_ids as a list."""
+    event = Condensation(
+        summary="summary",
+        forgotten_event_ids={"id1", "id2"},
+        llm_response_id="resp_1",
+    )
+    raw = json.loads(event.model_dump_json())
+
+    # Simulate the old persisted format: a JSON array (list) of IDs
+    raw["forgotten_event_ids"] = ["id1", "id2"]
+    deserialized = Condensation.model_validate(raw)
+
+    assert deserialized.forgotten_event_ids == {"id1", "id2"}
+    assert isinstance(deserialized.forgotten_event_ids, set)
 
 
 def test_condensation_request_serialization() -> None:
