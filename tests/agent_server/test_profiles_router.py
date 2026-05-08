@@ -510,10 +510,10 @@ def test_get_profile_corrupted_returns_400(client, temp_profiles_dir):
 def test_save_profile_timeout_returns_503(client, monkeypatch):
     """Save endpoint surfaces TimeoutError as 503."""
 
-    def boom(self):
+    def boom(self, name, llm, include_secrets=False, *, max_profiles=None):
         raise TimeoutError("locked")
 
-    monkeypatch.setattr(LLMProfileStore, "list", boom)
+    monkeypatch.setattr(LLMProfileStore, "save", boom)
 
     response = client.post(
         "/api/profiles/anything",
@@ -532,6 +532,19 @@ def test_rename_profile_timeout_returns_503(client, store, monkeypatch):
     monkeypatch.setattr(LLMProfileStore, "rename", boom)
 
     response = client.post("/api/profiles/src/rename", json={"new_name": "dst"})
+    assert response.status_code == 503
+
+
+def test_delete_profile_timeout_returns_503(client, store, monkeypatch):
+    """Delete endpoint surfaces TimeoutError as 503."""
+    store.save("present", LLM(model="gpt-4o"))
+
+    def boom(self, name):
+        raise TimeoutError("locked")
+
+    monkeypatch.setattr(LLMProfileStore, "delete", boom)
+
+    response = client.delete("/api/profiles/present")
     assert response.status_code == 503
 
 

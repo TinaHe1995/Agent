@@ -8,7 +8,10 @@ import pytest
 from pydantic import SecretStr
 
 from openhands.sdk.llm import LLM
-from openhands.sdk.llm.llm_profile_store import LLMProfileStore
+from openhands.sdk.llm.llm_profile_store import (
+    LLMProfileStore,
+    ProfileLimitExceeded,
+)
 
 
 @pytest.fixture
@@ -469,6 +472,7 @@ def test_list_summaries_returns_metadata(
     assert len(summaries) == 2
     by_name = {s["name"]: s for s in summaries}
     assert by_name["a"]["model"] == sample_llm.model
+    assert by_name["a"]["base_url"] == sample_llm.base_url
     assert by_name["a"]["api_key_set"] is False
 
 
@@ -499,6 +503,62 @@ def test_list_summaries_skips_corrupted(
 
     summaries = profile_store.list_summaries()
     assert [s["name"] for s in summaries] == ["good"]
+
+
+def test_list_summaries_skips_non_dict(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    """A JSON file whose top-level value isn't an object is skipped, not raised."""
+    profile_store.save("good", sample_llm)
+    (profile_store.base_dir / "list.json").write_text("[1, 2, 3]")
+    (profile_store.base_dir / "string.json").write_text('"plain"')
+
+    summaries = profile_store.list_summaries()
+    assert [s["name"] for s in summaries] == ["good"]
+
+
+def test_list_summaries_skips_invalid_filename(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    """Files with names not matching PROFILE_NAME_REGEX are skipped."""
+    profile_store.save("good", sample_llm)
+    (profile_store.base_dir / ".hidden.json").write_text('{"model": "x"}')
+    (profile_store.base_dir / "bad@name.json").write_text('{"model": "x"}')
+
+    summaries = profile_store.list_summaries()
+    assert [s["name"] for s in summaries] == ["good"]
+
+
+# ── Save with max_profiles ─────────────────────────────────────────────────
+
+
+def test_save_with_max_profiles_blocks_over_limit(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("a", sample_llm)
+    profile_store.save("b", sample_llm)
+
+    with pytest.raises(ProfileLimitExceeded, match="2"):
+        profile_store.save("c", sample_llm, max_profiles=2)
+
+
+def test_save_with_max_profiles_allows_overwrite(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    """Overwriting an existing profile is allowed even when at the limit."""
+    profile_store.save("a", sample_llm)
+    profile_store.save("b", sample_llm)
+
+    profile_store.save("a", sample_llm, max_profiles=2)
+    assert len(profile_store.list()) == 2
+
+
+def test_save_with_max_profiles_allows_under_limit(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("a", sample_llm, max_profiles=5)
+    profile_store.save("b", sample_llm, max_profiles=5)
+    assert len(profile_store.list()) == 2
 
 
 def test_list_summaries_does_not_mutate_env(

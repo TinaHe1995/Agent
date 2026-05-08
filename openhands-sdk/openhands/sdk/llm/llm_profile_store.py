@@ -31,6 +31,10 @@ PROFILE_NAME_REGEX: Final[re.Pattern[str]] = re.compile(PROFILE_NAME_PATTERN)
 logger = get_logger(__name__)
 
 
+class ProfileLimitExceeded(Exception):
+    """Raised when saving would exceed the configured profile limit."""
+
+
 class LLMProfileStore:
     """Standalone utility for persisting LLM configurations."""
 
@@ -93,22 +97,41 @@ class LLMProfileStore:
             )
         return self.base_dir / f"{clean_name}.json"
 
-    def save(self, name: str, llm: LLM, include_secrets: bool = False) -> None:
+    def save(
+        self,
+        name: str,
+        llm: LLM,
+        include_secrets: bool = False,
+        *,
+        max_profiles: int | None = None,
+    ) -> None:
         """Save a profile to the profile directory.
 
-        Note that if a profile name already exists, it will be overwritten.
+        Overwrites an existing profile of the same name. When ``max_profiles``
+        is set, raises ``ProfileLimitExceeded`` if creating a *new* profile
+        would exceed the limit. The check happens under the same lock as the
+        save, so it is race-free against other ``save`` calls in this process.
 
         Args:
             name: Name of the profile to save.
             llm: LLM instance to save
             include_secrets: Whether to include the profile secrets. Defaults to False.
+            max_profiles: Optional cap on the number of profiles.
 
         Raises:
+            ProfileLimitExceeded: If ``max_profiles`` would be exceeded.
             TimeoutError: If the lock cannot be acquired.
         """
         profile_path = self._get_profile_path(name)
 
         with self._acquire_lock():
+            if max_profiles is not None and not profile_path.exists():
+                count = sum(1 for _ in self.base_dir.glob("*.json"))
+                if count >= max_profiles:
+                    raise ProfileLimitExceeded(
+                        f"Profile limit reached ({max_profiles})."
+                    )
+
             if profile_path.exists():
                 logger.info(
                     f"[Profile Store] Profile `{name}` already exists. Overwriting."
@@ -208,17 +231,28 @@ class LLMProfileStore:
         """List profile metadata without instantiating LLM objects.
 
         Reads JSON directly to avoid ``LLM._set_env_side_effects`` mutating
-        ``os.environ``. Corrupted profiles are skipped with a warning.
+        ``os.environ``. Files with invalid names, corrupted JSON, or non-dict
+        top-level values are skipped with a warning.
         """
         summaries: list[dict[str, Any]] = []
         with self._acquire_lock():
             for path in sorted(self.base_dir.glob("*.json")):
                 name = path.stem
+                if not PROFILE_NAME_REGEX.match(name):
+                    logger.warning(
+                        f"[Profile Store] Skipping profile with invalid name {name!r}"
+                    )
+                    continue
                 try:
                     data = json.loads(path.read_text())
                 except (OSError, json.JSONDecodeError) as e:
                     logger.warning(
                         f"[Profile Store] Skipping corrupted profile {name!r}: {e}"
+                    )
+                    continue
+                if not isinstance(data, dict):
+                    logger.warning(
+                        f"[Profile Store] Skipping non-dict profile {name!r}"
                     )
                     continue
                 api_key = data.get("api_key")

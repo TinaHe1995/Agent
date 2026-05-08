@@ -11,6 +11,7 @@ from openhands.sdk.llm import LLM
 from openhands.sdk.llm.llm_profile_store import (
     PROFILE_NAME_PATTERN,
     LLMProfileStore,
+    ProfileLimitExceeded,
 )
 from openhands.sdk.logger import get_logger
 
@@ -135,19 +136,22 @@ async def save_profile(
     a new profile would exceed ``MAX_PROFILES``.
     """
     store = LLMProfileStore()
-    filename = f"{name}.json"
-
-    with _store_errors():
-        existing = store.list()
-        if filename not in existing and len(existing) >= MAX_PROFILES:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"Profile limit reached ({MAX_PROFILES}). "
-                    "Delete a profile before saving a new one."
-                ),
+    try:
+        with _store_errors():
+            store.save(
+                name,
+                body.llm,
+                include_secrets=body.include_secrets,
+                max_profiles=MAX_PROFILES,
             )
-        store.save(name, body.llm, include_secrets=body.include_secrets)
+    except ProfileLimitExceeded:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Profile limit reached ({MAX_PROFILES}). "
+                "Delete a profile before saving a new one."
+            ),
+        )
 
     return ProfileMutationResponse(name=name, message=f"Profile '{name}' saved")
 
