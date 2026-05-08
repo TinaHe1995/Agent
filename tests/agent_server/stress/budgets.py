@@ -39,11 +39,12 @@ class ConversationListingBudget:
     # Deep-page p95 must be < first-page p95 × this (graceful degradation).
     deep_page_factor: float = 4.0
     # 50 sequential list calls. Peak RSS during listing must stay below the
-    # snapshot at listing-start + this delta. _search_conversations today
-    # materializes a ConversationInfo for every conversation in the store
-    # per call, so at N=2000 we see ~4 MB allocator high-water per call;
-    # the budget is sized to allow that and still catch a >5× regression
-    # in per-call retention.
+    # snapshot at listing-start + this delta. `_search_conversations` today
+    # materialises a ConversationInfo for every conversation in the store
+    # per call, so at N=2000 we observe ~4 MB allocator high-water per call
+    # → ~200 MB across the loop. The 300 MB budget gives ~50% headroom over
+    # current behaviour and would fire on a ~1.5× per-call retention
+    # regression (e.g., per-call growth jumping from 4 to 6 MB).
     listing_rss_delta_mb: float = 300.0
 
 

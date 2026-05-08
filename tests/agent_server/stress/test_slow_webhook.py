@@ -184,8 +184,13 @@ async def test_slow_webhook_does_not_unbound_growth(
       (a) the conversation eventually FINISHED, and
       (b) the webhook subscriber buffer doesn't accumulate unbounded events.
     """
-    workspace = str(tmp_path / "ws")
-    (tmp_path / "ws").mkdir()
+    # Distinct workspaces per run so any workspace-side state from the
+    # baseline (e.g. .git from `_ensure_workspace_is_git_repo`, scratch
+    # files) doesn't bleed into the webhook timing.
+    workspace_baseline = str(tmp_path / "ws_baseline")
+    workspace_webhook = str(tmp_path / "ws_webhook")
+    (tmp_path / "ws_baseline").mkdir()
+    (tmp_path / "ws_webhook").mkdir()
 
     # Baseline: same flow, no webhook. Reuses the bash_service-backed app
     # but with a webhook-free ConversationService. We need a separate ASGI
@@ -204,14 +209,14 @@ async def test_slow_webhook_does_not_unbound_growth(
         baseline_wall, baseline_status = await _run_conversation_and_time(
             baseline_service,
             baseline_client,
-            workspace,
+            workspace_baseline,
             usage_id="webhook-baseline",
         )
     assert baseline_status == ConversationExecutionStatus.FINISHED
 
     # Webhook run.
     webhook_wall, webhook_status = await _run_conversation_and_time(
-        conversation_service, client, workspace, usage_id="webhook-slow"
+        conversation_service, client, workspace_webhook, usage_id="webhook-slow"
     )
 
     # 1. The conversation finishes. Catches "slow webhook deadlocks the
@@ -353,16 +358,23 @@ async def test_webhook_queue_bounded_under_sustained_downstream_failure(
     stable_deadline = time.monotonic() + 5.0
     last_size = -1
     stable_count = 0
+    stabilised = False
     while time.monotonic() < stable_deadline:
         size = len(webhook_sub.queue)
         if size == last_size:
             stable_count += 1
             if stable_count >= 2:
+                stabilised = True
                 break
         else:
             stable_count = 0
         last_size = size
         await asyncio.sleep(0.1)
+    assert stabilised, (
+        f"webhook queue did not stabilise within 5 s "
+        f"(last_size={last_size}); the assertion below would otherwise "
+        f"fire on a mid-flight reading."
+    )
 
     assert len(webhook_sub.queue) < n_events // 2, (
         f"queue grew to {len(webhook_sub.queue)} after {n_events} events; "

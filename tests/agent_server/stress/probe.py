@@ -47,7 +47,11 @@ class ResourceProbe:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-        self._samples.append(self._take())
+        # Final post-run sample — suppress so a psutil hiccup at teardown
+        # can't mask an exception that's already propagating out of the
+        # `async with` body.
+        with contextlib.suppress(Exception):
+            self._samples.append(self._take())
 
     async def _loop(self) -> None:
         with contextlib.suppress(asyncio.CancelledError):

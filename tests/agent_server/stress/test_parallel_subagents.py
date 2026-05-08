@@ -159,6 +159,13 @@ async def test_parallel_subagents_all_complete(
     assert single_subs[0].remaining_responses == 0
     _reset_registry_for_tests()
 
+    # Snapshot probe state between the reference run and the parallel run
+    # so the resource assertions below measure *only* the parallel run.
+    # Without this the peak/baseline include any RSS spike caused by the
+    # single-agent run, which is unrelated to the leak we're checking.
+    pre_parallel_idx = len(probe.samples)
+    pre_parallel_rss_mb = probe.samples[-1].rss_mb
+
     # Now the actual n-sub-agent run.
     parallel_wall, sub_llms, status = await _run_once(
         conversation_service,
@@ -194,12 +201,19 @@ async def test_parallel_subagents_all_complete(
         f"{PARALLEL_SUBAGENTS.wall_time_factor}). Sub-agents likely serialized."
     )
 
-    # 3. Resource budget. Compared against a baseline captured at fixture
-    #    entry; absolute RSS is too noisy across CI runners.
-    rss_growth = probe.rss_delta_mb() / max(probe.baseline.rss_mb, 1.0)
+    # 3. Resource budget. Compared against the snapshot taken between the
+    #    single-agent reference run and the parallel run, so the spike
+    #    from the reference run isn't attributed here.
+    parallel_peak_rss_mb = max(
+        (s.rss_mb for s in probe.samples[pre_parallel_idx:]),
+        default=pre_parallel_rss_mb,
+    )
+    rss_growth = (parallel_peak_rss_mb - pre_parallel_rss_mb) / max(
+        pre_parallel_rss_mb, 1.0
+    )
     assert rss_growth < PARALLEL_SUBAGENTS.rss_growth_factor, (
-        f"RSS grew {rss_growth:.2f}× baseline "
-        f"({probe.baseline.rss_mb:.1f} MB → peak {probe.peak_rss_mb():.1f} MB). "
+        f"RSS grew {rss_growth:.2f}× during the parallel run "
+        f"({pre_parallel_rss_mb:.1f} MB → peak {parallel_peak_rss_mb:.1f} MB). "
         f"Budget: < {PARALLEL_SUBAGENTS.rss_growth_factor}×."
     )
     assert probe.fd_delta() < PARALLEL_SUBAGENTS.max_fd_growth, (
