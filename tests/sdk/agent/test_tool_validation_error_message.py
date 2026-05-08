@@ -294,7 +294,9 @@ def test_omitted_security_risk_still_requires_confirmation():
     collected_events = []
     conversation = Conversation(agent=agent, callbacks=[collected_events.append])
     conversation.set_security_analyzer(LLMSecurityAnalyzer())
-    conversation.set_confirmation_policy(ConfirmRisky(confirm_unknown=True))
+    # confirm_unknown defaults to True, so the default ConfirmRisky policy
+    # will require confirmation for UNKNOWN-risk actions.
+    conversation.set_confirmation_policy(ConfirmRisky())
 
     with patch(
         "openhands.sdk.llm.llm.litellm_completion",
