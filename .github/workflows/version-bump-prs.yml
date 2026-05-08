@@ -261,20 +261,6 @@ jobs:
 
                   echo "✅ Updated pyproject.toml"
 
-                  # SDK 1.21.0 moved skills exports from openhands.sdk.context.skills
-                  # to openhands.sdk.skills. Keep this migration idempotent so reruns
-                  # can update existing bump branches cleanly.
-                  echo "🔧 Updating SDK skill import paths..."
-                  mapfile -t SDK_IMPORT_FILES < <(grep -RIl "openhands\\.sdk\\.context\\.skills" openhands tests || true)
-                  for file in "${SDK_IMPORT_FILES[@]}"; do
-                    sed -i 's/openhands\.sdk\.context\.skills/openhands.sdk.skills/g' "$file"
-                  done
-                  if [ "${#SDK_IMPORT_FILES[@]}" -gt 0 ]; then
-                    echo "✅ Updated SDK skill imports in ${#SDK_IMPORT_FILES[@]} file(s)"
-                  else
-                    echo "ℹ️ No legacy SDK skill imports found"
-                  fi
-
                   # 2. Regenerate poetry.lock with the new versions
                   # Note: In Poetry 2.x, the default behavior is to not update packages already
                   # in the lock file (the --no-update flag was removed in Poetry 2.x)
@@ -296,11 +282,7 @@ jobs:
                   # 4. Run pre-commit to fix formatting with the target repo's config.
                   echo "🔧 Running pre-commit to fix formatting..."
                   pip install pre-commit
-                  PRE_COMMIT_FILES=(pyproject.toml "$PYPROJECT_FMT_CONFIG")
-                  if [ "${#SDK_IMPORT_FILES[@]}" -gt 0 ]; then
-                    PRE_COMMIT_FILES+=("${SDK_IMPORT_FILES[@]}")
-                  fi
-                  pre-commit run --files "${PRE_COMMIT_FILES[@]}" --config ./dev_config/python/.pre-commit-config.yaml || true
+                  pre-commit run --files pyproject.toml "$PYPROJECT_FMT_CONFIG" --config ./dev_config/python/.pre-commit-config.yaml || true
 
                   # Check if there are changes
                   if git diff --quiet; then
@@ -310,9 +292,6 @@ jobs:
 
                   # Commit and push
                   git add pyproject.toml poetry.lock "$SANDBOX_SPEC_FILE" "$PYPROJECT_FMT_CONFIG"
-                  if [ "${#SDK_IMPORT_FILES[@]}" -gt 0 ]; then
-                    git add "${SDK_IMPORT_FILES[@]}"
-                  fi
                   git commit -m "Bump openhands-sdk, openhands-tools, openhands-agent-server to $VERSION" \
                     -m "Automated version bump after PyPI release." \
                     -m "" \
@@ -320,7 +299,6 @@ jobs:
                     -m "- Updated SDK packages to v$VERSION with exact pins in pyproject.toml" \
                     -m "- Regenerated poetry.lock" \
                     -m "- Updated AGENT_SERVER_IMAGE to ${VERSION}" \
-                    -m "- Updated SDK skill import paths if needed" \
                     -m "" \
                     -m "Co-authored-by: openhands <openhands@all-hands.dev>"
                   git push -u origin "$BRANCH"
@@ -345,7 +323,6 @@ jobs:
                   - Updated SDK packages in \`pyproject.toml\` with exact pins
                   - Regenerated \`poetry.lock\` with the target repo's Poetry version
                   - Updated \`AGENT_SERVER_IMAGE\` to \`${VERSION}\` in \`sandbox_spec_service.py\`
-                  - Updated SDK skill import paths if needed
 
                   **Triggered by:** Release of [software-agent-sdk v$VERSION](https://github.com/OpenHands/software-agent-sdk/releases/tag/v$VERSION)
 
