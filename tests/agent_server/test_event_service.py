@@ -688,16 +688,15 @@ class TestEventServiceSendMessage:
         conversation.run = MagicMock()
 
         event_service._conversation = conversation
-        event_service._get_execution_status = AsyncMock(
-            return_value=ConversationExecutionStatus.RUNNING
-        )
         message = Message(role="user", content=[])
 
-        # Call send_message with run=True
+        # Call send_message with run=True — should silently skip run
         await event_service.send_message(message, run=True)
 
         conversation.send_message.assert_called_once_with(message)
-        event_service._get_execution_status.assert_awaited_once()
+        # run() delegates to self.run() which checks status under lock
+        # and raises ValueError (caught by send_message) — so
+        # conversation.run is never invoked.
         conversation.run.assert_not_called()
 
     @pytest.mark.asyncio
@@ -715,6 +714,7 @@ class TestEventServiceSendMessage:
         conversation.run = MagicMock()
 
         event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
         message = Message(role="user", content=[])
 
         # Call send_message with run=True
@@ -723,12 +723,9 @@ class TestEventServiceSendMessage:
         # Verify send_message was called
         conversation.send_message.assert_called_once_with(message)
 
-        # Wait for the background task to call run with a timeout
-        async def wait_for_run_called():
-            while not conversation.run.called:
-                await asyncio.sleep(0.001)
-
-        await asyncio.wait_for(wait_for_run_called(), timeout=1.0)
+        # send_message delegates to self.run() which creates a background task
+        assert event_service._run_task is not None
+        await event_service._run_task
 
         # Verify run was called since agent was idle
         conversation.run.assert_called_once()
@@ -748,6 +745,7 @@ class TestEventServiceSendMessage:
         conversation.run = MagicMock(side_effect=RuntimeError("Test error"))
 
         event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
         message = Message(role="user", content=[])
 
         # Patch the logger to verify exception logging
@@ -755,16 +753,14 @@ class TestEventServiceSendMessage:
             # Call send_message with run=True
             await event_service.send_message(message, run=True)
 
-            # Wait for the background task to complete with a timeout
-            async def wait_for_exception_logged():
-                while not mock_logger.exception.called:
-                    await asyncio.sleep(0.001)
-
-            await asyncio.wait_for(wait_for_exception_logged(), timeout=1.0)
+            # Wait for the background task to complete
+            assert event_service._run_task is not None
+            await event_service._run_task
 
             # Verify the exception was logged via logger.exception()
+            # (logged by run()'s _run_and_publish handler)
             mock_logger.exception.assert_called_once_with(
-                "Error during conversation run from send_message"
+                "Error during conversation run"
             )
 
         # Verify send_message was still called
