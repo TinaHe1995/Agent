@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openhands.workspace.cloud.repo import (
+# Import from SDK repo module (cloud workspace re-exports these)
+from openhands.sdk.workspace.repo import (
     CloneResult,
     GitProvider,
     RepoMapping,
@@ -175,6 +176,10 @@ class TestHelperFunctions:
         assert _extract_repo_name("https://github.com/owner/repo") == "repo"
         assert _extract_repo_name("https://github.com/owner/repo.git") == "repo"
         assert _extract_repo_name("https://gitlab.com/owner/repo") == "repo"
+
+    def test_extract_repo_name_windows_file_url(self):
+        """Test extracting repo names from Windows file URLs."""
+        assert _extract_repo_name(r"file://C:\Users\user\work\repo") == "repo"
 
     def test_extract_repo_name_ssh_url(self):
         """Test extracting repo name from SSH URLs."""
@@ -427,7 +432,7 @@ class TestCloneRepos:
 class TestCloudWorkspaceRepoMethods:
     """Tests for OpenHandsCloudWorkspace repo methods."""
 
-    @patch("openhands.workspace.cloud.workspace.clone_repos")
+    @patch("openhands.sdk.workspace.remote.base._clone_repos_helper")
     @patch.object(
         __import__(
             "openhands.workspace.cloud.workspace", fromlist=["OpenHandsCloudWorkspace"]
@@ -467,7 +472,7 @@ class TestCloudWorkspaceRepoMethods:
             assert len(repos) == 2
             assert all(isinstance(r, RepoSource) for r in repos)
 
-    @patch("openhands.workspace.cloud.workspace.clone_repos")
+    @patch("openhands.sdk.workspace.remote.base._clone_repos_helper")
     @patch.object(
         __import__(
             "openhands.workspace.cloud.workspace", fromlist=["OpenHandsCloudWorkspace"]

@@ -3,8 +3,16 @@ from __future__ import annotations
 import pathlib
 from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from openhands.sdk.context.prompts import render_template
 from openhands.sdk.llm import Message, TextContent
@@ -18,6 +26,7 @@ from openhands.sdk.skills import (
     to_prompt,
 )
 from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
+from openhands.sdk.utils.pydantic_secrets import serialize_secret
 
 
 logger = get_logger(__name__)
@@ -95,7 +104,7 @@ class AgentContext(BaseModel):
             "Values can be either strings or SecretSource instances "
             "(str | SecretSource)."
         ),
-        json_schema_extra={"acp_compatible": False},
+        json_schema_extra={"acp_compatible": True},
     )
     current_datetime: datetime | str | None = Field(
         default_factory=datetime.now,
@@ -108,6 +117,21 @@ class AgentContext(BaseModel):
         ),
         json_schema_extra={"acp_compatible": True},
     )
+
+    @field_serializer("secrets", when_used="always")
+    def _serialize_secrets(
+        self, value: Mapping[str, SecretValue] | None, info
+    ) -> dict[str, Any] | None:
+        """Mask raw-string ``secrets`` values via :func:`serialize_secret`."""
+        if value is None:
+            return None
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, SecretSource):
+                out[k] = v.model_dump(mode=info.mode, context=info.context)
+            else:
+                out[k] = serialize_secret(SecretStr(v), info)
+        return out
 
     @field_validator("skills")
     @classmethod
@@ -316,20 +340,24 @@ class AgentContext(BaseModel):
 
         ACP servers own their tools, MCP servers, hooks, and execution model, so
         this adapter only emits prompt-only context.  Unsupported AgentContext
-        semantics (e.g. secrets) are rejected by
-        :meth:`validate_acp_compatibility`.
+        fields are rejected by :meth:`validate_acp_compatibility`.
 
         The rendering reuses :meth:`get_system_message_suffix` with the same
         ``system_message_suffix.j2`` template so that ACP agents receive the
-        identical prompt layout as the general agent (minus secrets).
+        identical prompt layout as the regular agent.  This includes the
+        ``<CUSTOM_SECRETS>`` block when secrets are present, informing the ACP
+        subprocess which environment variables are available.  The actual secret
+        values are injected into the subprocess environment by
+        ``ACPAgent._start_acp_server``; the prompt block only advertises their
+        names so the agent knows to use them.
 
         ``user_message_suffix`` is a compatible field but is not emitted here
         because ``LocalConversation`` already applies it through
         ``event.to_llm_message()``; including it would duplicate it.
         """
         self.validate_acp_compatibility()
-        # ACP doesn't support secrets (enforced above) and has no model-specific
-        # skill filtering, so we delegate to the shared renderer with no extras.
+        # No model-specific skill filtering for ACP — delegate to the shared
+        # renderer which also renders the <CUSTOM_SECRETS> block from secrets.
         return self.get_system_message_suffix()
 
     def get_user_message_suffix(

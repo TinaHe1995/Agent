@@ -175,9 +175,7 @@ class TestRemoteConversation:
     @patch(
         "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
     )
-    def test_acp_remote_conversation_uses_acp_conversation_contract(
-        self, mock_ws_client
-    ):
+    def test_acp_remote_conversation_uses_acp_agent_kind(self, mock_ws_client):
         acp_agent = ACPAgent(acp_command=["echo", "test"])
         conversation_id = str(uuid.uuid4())
         mock_client_instance = Mock()
@@ -416,9 +414,7 @@ class TestRemoteConversation:
 
         mock_client_instance.request.side_effect = request_side_effect
 
-        with pytest.raises(
-            ValueError, match="only available through the ACP conversation contract"
-        ):
+        with pytest.raises(ValueError, match="was started with an ACP agent"):
             RemoteConversation(
                 agent=self.agent,
                 workspace=self.workspace,
@@ -1321,3 +1317,25 @@ class TestRemoteConversation:
             conversation.execute_tool("any_tool", mock_action)
 
         assert "not yet supported for RemoteConversation" in str(exc_info.value)
+
+    @patch(
+        "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
+    )
+    def test_remote_conversation_calls_register_conversation(self, mock_ws_client):
+        """Test RemoteConversation.__init__ calls workspace.register_conversation."""
+        conversation_id = str(uuid.uuid4())
+        self.setup_mock_client(conversation_id=conversation_id)
+
+        mock_ws_instance = Mock()
+        mock_ws_client.return_value = mock_ws_instance
+
+        # Patch register_conversation at the class level to verify it gets called
+        with patch.object(RemoteWorkspace, "register_conversation") as mock_register:
+            # Create RemoteConversation - this should call register_conversation
+            _conversation = RemoteConversation(
+                agent=self.agent,
+                workspace=self.workspace,
+            )
+
+            # Verify register_conversation was called with the conversation ID
+            mock_register.assert_called_once_with(conversation_id)

@@ -13,12 +13,11 @@ from acp.exceptions import RequestError as ACPRequestError
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
-    _build_session_meta,
     _estimate_cost_from_tokens,
     _extract_token_usage,
+    _image_url_to_acp_block,
     _maybe_set_session_model,
     _OpenHandsACPBridge,
-    _resolve_bypass_mode,
     _select_auth_method,
     _serialize_tool_content,
 )
@@ -28,9 +27,16 @@ from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
 )
-from openhands.sdk.event import ACPToolCallEvent, MessageEvent, SystemPromptEvent
-from openhands.sdk.llm import Message, TextContent
+from openhands.sdk.event import (
+    ACPToolCallEvent,
+    ActionEvent,
+    MessageEvent,
+    SystemPromptEvent,
+)
+from openhands.sdk.llm import ImageContent, Message, TextContent
 from openhands.sdk.skills import KeywordTrigger, Skill
+from openhands.sdk.tool.builtins.finish import FinishAction
+from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
 from openhands.sdk.workspace.local import LocalWorkspace
 
 
@@ -148,12 +154,78 @@ class TestACPAgentSerialization:
             acp_args=["--verbose"],
             acp_env={"FOO": "bar"},
         )
-        dumped = agent.model_dump_json()
+        # ``acp_env`` is redacted by default, so a value-preserving round-trip
+        # requires expose_secrets=True (same contract as ``LLM.api_key``).
+        dumped = agent.model_dump_json(context={"expose_secrets": True})
         restored = AgentBase.model_validate_json(dumped)
         assert isinstance(restored, ACPAgent)
         assert restored.acp_command == agent.acp_command
         assert restored.acp_args == agent.acp_args
         assert restored.acp_env == agent.acp_env
+
+    def test_acp_env_redacted_by_default(self):
+        """``acp_env`` values must be masked in default serialization output.
+
+        Regression guard: trace dumps consumed by evaluation tooling embed the
+        full ACPAgent state under ``history[*].value.agent``. Before masking,
+        live proxy keys leaked into shareable archives.
+        """
+        agent = ACPAgent(
+            acp_command=["echo", "test"],
+            acp_env={
+                "OPENAI_API_KEY": "sk-real-secret-do-not-leak",
+                "GEMINI_API_KEY": "sk-other-secret",
+                "GEMINI_BASE_URL": "https://llm-proxy.example/",
+            },
+        )
+
+        # In-memory state still holds the real values — only serialization masks.
+        assert agent.acp_env["OPENAI_API_KEY"] == "sk-real-secret-do-not-leak"
+
+        # model_dump returns SecretStr objects — real values are hidden.
+        dumped = agent.model_dump()
+        for v in dumped["acp_env"].values():
+            assert str(v) == REDACTED_SECRET_VALUE
+
+        # JSON path that produced the original leaks must not contain any of
+        # the real values.
+        dumped_json = agent.model_dump_json()
+        assert "sk-real-secret-do-not-leak" not in dumped_json
+        assert "sk-other-secret" not in dumped_json
+        assert "https://llm-proxy.example/" not in dumped_json
+        assert REDACTED_SECRET_VALUE in dumped_json
+
+    def test_acp_env_exposed_with_expose_secrets(self):
+        """``expose_secrets=True`` returns the real values for transport use."""
+        secrets = {
+            "OPENAI_API_KEY": "sk-real-secret",
+            "BASE_URL": "https://llm-proxy.example/",
+        }
+        agent = ACPAgent(acp_command=["echo", "test"], acp_env=dict(secrets))
+
+        dumped = agent.model_dump(context={"expose_secrets": True})
+        assert dumped["acp_env"] == secrets
+
+        # Round-trip with expose_secrets must reconstruct the original values.
+        json_blob = agent.model_dump_json(context={"expose_secrets": True})
+        restored = AgentBase.model_validate_json(json_blob)
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == secrets
+
+    def test_acp_env_serializer_does_not_mutate_in_memory_state(self):
+        """Serialization must not mutate ``self.acp_env`` — the runtime path
+        (:meth:`ACPAgent._start_acp_server`) reads it directly to populate the
+        subprocess environment.
+        """
+        original = {"OPENAI_API_KEY": "sk-real-secret"}
+        agent = ACPAgent(acp_command=["echo", "test"], acp_env=dict(original))
+
+        # Multiple dumps in different modes must leave the live dict alone.
+        agent.model_dump()
+        agent.model_dump_json()
+        agent.model_dump(context={"expose_secrets": True})
+
+        assert agent.acp_env == original
 
     def test_deserialization_from_dict(self):
         data = {
@@ -211,13 +283,15 @@ class TestACPAgentValidation:
 
         self._init_with_patches(agent, tmp_path)
 
-    def test_rejects_unsupported_agent_context_at_init(self, tmp_path):
+    def test_allows_agent_context_with_secrets(self, tmp_path):
+        """Secrets are now ACP-compatible: they are injected into the subprocess
+        env by _start_acp_server and advertised in the prompt via <CUSTOM_SECRETS>."""
         agent = ACPAgent(
             acp_command=["echo"],
             agent_context=AgentContext(secrets={"GITHUB_TOKEN": "ghp_secret"}),
         )
-        with pytest.raises(NotImplementedError, match="secrets"):
-            self._init_with_patches(agent, tmp_path)
+        # Should not raise
+        self._init_with_patches(agent, tmp_path)
 
     def test_agent_context_to_acp_prompt_context(self):
         context = AgentContext(
@@ -261,11 +335,31 @@ class TestACPAgentValidation:
         assert prompt is not None
         assert "<CURRENT_DATETIME>" in prompt
 
-    def test_agent_context_to_acp_prompt_context_rejects_secrets(self):
-        context = AgentContext(secrets={"GITHUB_TOKEN": "ghp_secret"})
+    def test_agent_context_to_acp_prompt_context_includes_secrets(self):
+        """Secrets appear in the ACP prompt as a <CUSTOM_SECRETS> block so the
+        ACP subprocess knows which environment variables are available."""
+        from pydantic import SecretStr
 
-        with pytest.raises(NotImplementedError, match="secrets"):
-            context.to_acp_prompt_context()
+        from openhands.sdk.secret import StaticSecret
+
+        context = AgentContext(
+            secrets={
+                "GITHUB_TOKEN": StaticSecret(
+                    value=SecretStr("ghp_secret"),
+                    description="GitHub authentication token",
+                ),
+                "MY_API_KEY": StaticSecret(value=SecretStr("key123")),
+            },
+            current_datetime=None,
+        )
+
+        prompt = context.to_acp_prompt_context()
+
+        assert prompt is not None
+        assert "<CUSTOM_SECRETS>" in prompt
+        assert "$GITHUB_TOKEN" in prompt
+        assert "GitHub authentication token" in prompt
+        assert "$MY_API_KEY" in prompt
 
     def test_agent_context_to_acp_prompt_context_includes_legacy_repo_skills(self):
         context = AgentContext(
@@ -336,12 +430,81 @@ class TestACPAgentValidation:
             extended_content=[TextContent(text="Prefer concise responses.")],
         )
 
-        prompt = agent._build_acp_prompt(event)
+        blocks = agent._build_acp_prompt(event)
 
-        assert prompt is not None
-        assert "First block." in prompt
-        assert "Second block." in prompt
-        assert prompt.count("Prefer concise responses.") == 1
+        assert blocks is not None
+        texts = [b.text for b in blocks if hasattr(b, "text")]
+        assert "First block." in texts
+        assert "Second block." in texts
+        assert sum(1 for t in texts if t == "Prefer concise responses.") == 1
+
+    def test_build_acp_prompt_includes_image_content(self):
+        agent = _make_agent()
+        event = MessageEvent(
+            source="user",
+            llm_message=Message(
+                role="user",
+                content=[
+                    TextContent(text="What is in this image?"),
+                    ImageContent(image_urls=["data:image/png;base64,iVBOR"]),
+                ],
+            ),
+        )
+
+        blocks = agent._build_acp_prompt(event)
+
+        assert blocks is not None
+        assert len(blocks) == 2
+        assert blocks[0].type == "text"
+        assert blocks[0].text == "What is in this image?"
+        assert blocks[1].type == "image"
+        assert blocks[1].data == "iVBOR"
+        assert blocks[1].mime_type == "image/png"
+
+
+class TestImageUrlToAcpBlock:
+    def test_data_uri(self):
+        block = _image_url_to_acp_block("data:image/jpeg;base64,/9j/4AAQ")
+        assert block is not None
+        assert block.data == "/9j/4AAQ"
+        assert block.mime_type == "image/jpeg"
+
+    def test_plain_url(self):
+        block = _image_url_to_acp_block("https://example.com/img.png")
+        assert block is not None
+        assert block.uri == "https://example.com/img.png"
+
+    def test_invalid_data_uri_returns_none(self):
+        block = _image_url_to_acp_block("data:broken")
+        assert block is None
+
+    def test_real_png_round_trips(self):
+        """Verify a real PNG image survives the full conversion path."""
+        import base64
+        import struct
+        import zlib
+
+        # Minimal valid 1x1 red PNG
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+        ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+        raw = zlib.compress(b"\x00\xff\x00\x00")
+        idat_crc = zlib.crc32(b"IDAT" + raw) & 0xFFFFFFFF
+        idat = struct.pack(">I", len(raw)) + b"IDAT" + raw + struct.pack(">I", idat_crc)
+        iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+        iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
+        png_bytes = sig + ihdr + idat + iend
+
+        b64_data = base64.b64encode(png_bytes).decode()
+        data_uri = f"data:image/png;base64,{b64_data}"
+
+        block = _image_url_to_acp_block(data_uri)
+        assert block is not None
+        assert block.mime_type == "image/png"
+        decoded = base64.b64decode(block.data)
+        assert decoded == png_bytes
+        assert decoded[:4] == b"\x89PNG"
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +840,7 @@ class TestACPAgentStep:
         conversation.state = state
         return conversation
 
-    def test_step_emits_message_event(self, tmp_path):
+    def test_step_emits_finish_action_event(self, tmp_path):
         agent = _make_agent()
         conversation = self._make_conversation_with_message(tmp_path)
         events: list = []
@@ -698,14 +861,12 @@ class TestACPAgentStep:
 
         agent.step(conversation, on_event=events.append)
 
-        # step() emits MessageEvent + ActionEvent(FinishAction)
-        # + ObservationEvent(FinishObservation)
-        assert len(events) == 3
-        assert isinstance(events[0], MessageEvent)
-        assert events[0].source == "agent"
-        content_block = events[0].llm_message.content[0]
-        assert isinstance(content_block, TextContent)
-        assert content_block.text == "The answer is 4"
+        # step() emits ActionEvent(FinishAction) + ObservationEvent(FinishObservation)
+        # MessageEvent is not emitted — FinishAction.message carries the response text
+        assert len(events) == 2
+        assert isinstance(events[0], ActionEvent)
+        assert isinstance(events[0].action, FinishAction)
+        assert events[0].action.message == "The answer is 4"
 
     @staticmethod
     def _wire_passthrough_mocks(agent: ACPAgent) -> None:
@@ -761,8 +922,7 @@ class TestACPAgentStep:
         prompt_call = agent._conn.prompt.await_args
         assert prompt_call is not None
         prompt_blocks = prompt_call.args[0]
-        assert len(prompt_blocks) == 1
-        prompt_text = prompt_blocks[0].text
+        prompt_text = "\n\n".join(b.text for b in prompt_blocks if hasattr(b, "text"))
         assert "Review this PR." in prompt_text
         assert "<name>review</name>" in prompt_text
         assert "<description>Review pull requests.</description>" in prompt_text
@@ -808,7 +968,9 @@ class TestACPAgentStep:
 
         prompt_call = agent._conn.prompt.await_args
         assert prompt_call is not None
-        prompt_text = prompt_call.args[0][0].text
+        prompt_text = "\n\n".join(
+            b.text for b in prompt_call.args[0] if hasattr(b, "text")
+        )
         assert "Review this PR." in prompt_text
         assert "<REPO_CONTEXT>" in prompt_text
         assert "Always follow repository-specific review rules." in prompt_text
@@ -861,13 +1023,16 @@ class TestACPAgentStep:
 
         prompt_call = agent._conn.prompt.await_args
         assert prompt_call is not None
-        prompt_text = prompt_call.args[0][0].text
+        prompt_text = "\n\n".join(
+            b.text for b in prompt_call.args[0] if hasattr(b, "text")
+        )
         assert "Legacy triggered review instructions." in prompt_text
         assert "AgentSkills triggered review instructions." in prompt_text
         assert "<name>agentskill-review</name>" in prompt_text
         assert "<description>AgentSkills review catalog.</description>" in prompt_text
 
-    def test_step_includes_reasoning(self, tmp_path):
+    def test_step_with_reasoning_surfaces_via_action_event(self, tmp_path):
+        """Reasoning traces are preserved in ActionEvent.reasoning_content."""
         agent = _make_agent()
         conversation = self._make_conversation_with_message(tmp_path)
         events: list = []
@@ -887,8 +1052,10 @@ class TestACPAgentStep:
 
         agent.step(conversation, on_event=events.append)
 
-        msg = events[0].llm_message
-        assert msg.reasoning_content == "I need to add 2+2"
+        assert isinstance(events[0], ActionEvent)
+        assert isinstance(events[0].action, FinishAction)
+        assert events[0].action.message == "4"
+        assert events[0].reasoning_content == "I need to add 2+2"
 
     def test_step_sets_finished(self, tmp_path):
         agent = _make_agent()
@@ -966,9 +1133,9 @@ class TestACPAgentStep:
 
         agent.step(conversation, on_event=events.append)
 
-        content_block = events[0].llm_message.content[0]
-        assert isinstance(content_block, TextContent)
-        assert "(No response from ACP server)" in content_block.text
+        assert isinstance(events[0], ActionEvent)
+        assert isinstance(events[0].action, FinishAction)
+        assert "(No response from ACP server)" in events[0].action.message
 
     def test_step_passes_on_token(self, tmp_path):
         agent = _make_agent()
@@ -1992,12 +2159,11 @@ class TestACPToolCallEmission:
 
         agent.step(conversation, on_event=events.append)
 
-        # Should be: 2 tool call events (live) + 1 message event
-        # + finish action + finish observation
-        assert len(events) == 5
+        # Should be: 2 tool call events (live) + finish action + finish observation
+        assert len(events) == 4
         assert isinstance(events[0], ACPToolCallEvent)
         assert isinstance(events[1], ACPToolCallEvent)
-        assert isinstance(events[2], MessageEvent)
+        assert isinstance(events[2], ActionEvent)
 
         # Verify first tool call event
         assert events[0].tool_call_id == "tc-1"
@@ -2103,9 +2269,9 @@ class TestACPToolCallEmission:
 
         agent.step(conversation, on_event=events.append)
 
-        # MessageEvent + ActionEvent(FinishAction) + ObservationEvent(FinishObservation)
-        assert len(events) == 3
-        assert isinstance(events[0], MessageEvent)
+        # ActionEvent(FinishAction) + ObservationEvent(FinishObservation)
+        assert len(events) == 2
+        assert isinstance(events[0], ActionEvent)
 
     def test_tool_call_events_cleared_between_turns(self, tmp_path):
         """accumulated_tool_calls are cleared on reset() between turns."""
@@ -2142,10 +2308,10 @@ class TestACPToolCallEmission:
         # step() calls reset() which should clear old tool calls
         agent.step(conversation, on_event=events.append)
 
-        # Only the MessageEvent + FinishAction + FinishObservation should appear —
+        # Only the FinishAction + FinishObservation should appear —
         # the old tool call was cleared by reset()
-        assert len(events) == 3
-        assert isinstance(events[0], MessageEvent)
+        assert len(events) == 2
+        assert isinstance(events[0], ActionEvent)
 
 
 # ---------------------------------------------------------------------------
@@ -2362,34 +2528,6 @@ class TestClientForkTextRouting:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_bypass_mode
-# ---------------------------------------------------------------------------
-
-
-class TestResolveBypassMode:
-    def test_claude_agent(self):
-        assert _resolve_bypass_mode("claude-agent-acp") == "bypassPermissions"
-
-    def test_claude_agent_with_scope(self):
-        assert (
-            _resolve_bypass_mode("@agentclientprotocol/claude-agent-acp")
-            == "bypassPermissions"
-        )
-
-    def test_codex_acp(self):
-        assert _resolve_bypass_mode("codex-acp") == "full-access"
-
-    def test_codex_acp_with_version(self):
-        assert _resolve_bypass_mode("Codex-ACP v0.9.2") == "full-access"
-
-    def test_unknown_server_defaults_to_full_access(self):
-        assert _resolve_bypass_mode("some-other-agent") == "full-access"
-
-    def test_empty_name_defaults_to_full_access(self):
-        assert _resolve_bypass_mode("") == "full-access"
-
-
-# ---------------------------------------------------------------------------
 # acp_session_mode field
 # ---------------------------------------------------------------------------
 
@@ -2439,23 +2577,24 @@ class TestSelectAuthMethod:
         with patch("openhands.sdk.agent.acp_agent.Path.home", return_value=tmp_path):
             assert _select_auth_method(methods, env) == "chatgpt"
 
-    def test_api_key_fallback_when_no_chatgpt_file(self):
+    def test_api_key_fallback_when_no_chatgpt_file(self, tmp_path):
         """Falls back to API key when chatgpt is offered but auth file absent."""
         methods = [
             self._make_auth_method("chatgpt"),
             self._make_auth_method("openai-api-key"),
         ]
         env = {"OPENAI_API_KEY": "sk-test"}
-        # Path.home() points to a real dir without .codex/auth.json
-        assert _select_auth_method(methods, env) == "openai-api-key"
+        with patch("openhands.sdk.agent.acp_agent.Path.home", return_value=tmp_path):
+            assert _select_auth_method(methods, env) == "openai-api-key"
 
-    def test_no_matching_credentials(self):
+    def test_no_matching_credentials(self, tmp_path):
         methods = [
             self._make_auth_method("chatgpt"),
             self._make_auth_method("openai-api-key"),
         ]
         env = {"UNRELATED": "value"}
-        assert _select_auth_method(methods, env) is None
+        with patch("openhands.sdk.agent.acp_agent.Path.home", return_value=tmp_path):
+            assert _select_auth_method(methods, env) is None
 
     def test_chatgpt_auth_file(self, tmp_path):
         methods = [self._make_auth_method("chatgpt")]
@@ -2469,29 +2608,17 @@ class TestSelectAuthMethod:
     def test_empty_auth_methods(self):
         assert _select_auth_method([], {}) is None
 
-    def test_method_not_in_server_list(self):
+    def test_method_not_in_server_list(self, tmp_path):
         """Even if env var is set, method must be offered by server."""
         methods = [self._make_auth_method("chatgpt")]
         env = {"OPENAI_API_KEY": "sk-test"}
-        assert _select_auth_method(methods, env) is None
+        with patch("openhands.sdk.agent.acp_agent.Path.home", return_value=tmp_path):
+            assert _select_auth_method(methods, env) is None
 
 
 # ---------------------------------------------------------------------------
 # ACP model overrides
 # ---------------------------------------------------------------------------
-
-
-class TestBuildSessionMeta:
-    def test_claude_agent_adds_model_override(self):
-        assert _build_session_meta("claude-agent-acp", "claude-opus-4-6") == {
-            "claudeCode": {"options": {"model": "claude-opus-4-6"}}
-        }
-
-    def test_codex_agent_does_not_use_session_meta(self):
-        assert _build_session_meta("codex-acp", "gpt-5.4") == {}
-
-    def test_missing_model_does_not_add_session_meta(self):
-        assert _build_session_meta("claude-agent-acp", None) == {}
 
 
 class TestMaybeSetSessionModel:
@@ -2608,8 +2735,10 @@ class TestACPPromptRetry:
         assert (
             conversation.state.execution_status == ConversationExecutionStatus.FINISHED
         )
-        assert len(events) == 3
-        assert "Success after retry" in events[0].llm_message.content[0].text
+        assert len(events) == 2
+        assert isinstance(events[0], ActionEvent)
+        assert isinstance(events[0].action, FinishAction)
+        assert "Success after retry" in events[0].action.message
 
     def test_no_retry_on_non_connection_error(self, tmp_path):
         """Non-connection errors fail immediately without retry."""
@@ -2728,9 +2857,9 @@ class TestACPPromptRetry:
         assert (
             conversation.state.execution_status == ConversationExecutionStatus.FINISHED
         )
-        assert (
-            "Success after server error retry" in events[0].llm_message.content[0].text
-        )
+        assert isinstance(events[0], ActionEvent)
+        assert isinstance(events[0].action, FinishAction)
+        assert "Success after server error retry" in events[0].action.message
 
     def test_no_retry_on_non_retriable_acp_error(self, tmp_path):
         """Non-retriable ACP error codes fail immediately."""
@@ -2798,14 +2927,6 @@ class TestACPPromptRetry:
 # ---------------------------------------------------------------------------
 # Gemini-specific tests
 # ---------------------------------------------------------------------------
-
-
-class TestGeminiBypassMode:
-    def test_gemini_cli_uses_yolo(self):
-        assert _resolve_bypass_mode("gemini-cli") == "yolo"
-
-    def test_gemini_cli_with_version(self):
-        assert _resolve_bypass_mode("gemini-cli/0.35.3") == "yolo"
 
 
 class TestGeminiSessionModel:
@@ -3291,3 +3412,298 @@ class TestACPSessionIdPersistence:
         assert kwargs["cwd"] == str(workspace)
         conn2.new_session.assert_not_awaited()
         assert agent2._session_id == "roundtrip-sess"
+
+
+class TestACPSecretsEnvInjection:
+    """Tests for secret injection into the ACP subprocess environment.
+
+    Secrets passed via ``agent_context.secrets`` must land in the subprocess
+    env so the ACP server (Claude Code, Codex CLI, etc.) can use them.
+    ``acp_env`` entries take precedence over agent_context secrets.
+    """
+
+    @staticmethod
+    def _make_conn():
+        conn = MagicMock()
+        init_response = MagicMock()
+        init_response.agent_info = MagicMock()
+        init_response.agent_info.name = "claude-agent-acp"
+        init_response.agent_info.version = "1.0"
+        init_response.auth_methods = []
+        conn.initialize = AsyncMock(return_value=init_response)
+        new_response = MagicMock()
+        new_response.session_id = "sess-1"
+        conn.new_session = AsyncMock(return_value=new_response)
+        conn.load_session = AsyncMock(return_value=MagicMock())
+        conn.set_session_mode = AsyncMock()
+        conn.set_session_model = AsyncMock()
+        conn.authenticate = AsyncMock()
+        conn.close = AsyncMock()
+        return conn
+
+    @staticmethod
+    def _run_start_capturing_env(agent, tmp_path) -> dict:
+        """Run _start_acp_server and return the env dict passed to the subprocess."""
+        from contextlib import ExitStack
+
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        captured: dict = {}
+        conn = TestACPSecretsEnvInjection._make_conn()
+
+        mock_process = MagicMock()
+        mock_process.stdin = MagicMock()
+        mock_process.stdout = MagicMock()
+
+        async def _fake_create_subprocess_exec(*_args, env=None, **_kwargs):
+            captured.update(env or {})
+            return mock_process
+
+        async def _fake_filter(_src, _dst):
+            return None
+
+        state = _make_state(tmp_path)
+        agent._executor = AsyncExecutor()
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
+                    new=_fake_create_subprocess_exec,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.ClientSideConnection",
+                    return_value=conn,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent._filter_jsonrpc_lines",
+                    new=_fake_filter,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.asyncio.StreamReader",
+                    return_value=MagicMock(),
+                )
+            )
+            agent._start_acp_server(state)
+
+        return captured
+
+    def test_static_secret_injected_into_subprocess_env(self, tmp_path):
+        """A StaticSecret in agent_context.secrets lands in the subprocess env."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                secrets={
+                    "GITHUB_TOKEN": StaticSecret(
+                        value=SecretStr("ghp_test123"),
+                        description="GitHub token",
+                    )
+                }
+            )
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+        assert env.get("GITHUB_TOKEN") == "ghp_test123"
+
+    def test_acp_env_takes_precedence_over_agent_context_secret(self, tmp_path):
+        """An explicit acp_env entry wins over the same key in agent_context.secrets."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            acp_env={"MY_TOKEN": "acp-env-wins"},
+            agent_context=AgentContext(
+                secrets={"MY_TOKEN": StaticSecret(value=SecretStr("secret-panel"))}
+            ),
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+        assert env.get("MY_TOKEN") == "acp-env-wins"
+
+    def test_none_value_secret_not_injected(self, tmp_path):
+        """A StaticSecret with value=None is not added to the subprocess env."""
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                secrets={"ABSENT_SECRET": StaticSecret(value=None)}
+            )
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+        assert "ABSENT_SECRET" not in env
+
+    def test_empty_string_secret_not_injected(self, tmp_path):
+        """Empty string secrets are not injected into the subprocess env."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                secrets={"EMPTY_SECRET": StaticSecret(value=SecretStr(""))}
+            )
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+        assert "EMPTY_SECRET" not in env
+
+
+class TestACPEnvConflictSuppression:
+    """CLAUDE_CONFIG_DIR OAuth auth must not coexist with API-key env vars.
+
+    When CLAUDE_CONFIG_DIR is present in the subprocess environment the agent
+    uses a credential file for OAuth.  If ANTHROPIC_API_KEY or
+    ANTHROPIC_BASE_URL are also present they redirect requests to a proxy that
+    does not support OAuth bearer tokens, breaking auth silently.
+
+    _start_acp_server must strip the conflicting vars regardless of where they
+    came from: acp_env, os.environ, or agent_context.secrets.
+    """
+
+    @staticmethod
+    def _make_conn():
+        conn = MagicMock()
+        init_response = MagicMock()
+        init_response.agent_info = MagicMock()
+        init_response.agent_info.name = "claude-agent-acp"
+        init_response.agent_info.version = "1.0"
+        init_response.auth_methods = []
+        conn.initialize = AsyncMock(return_value=init_response)
+        new_response = MagicMock()
+        new_response.session_id = "sess-conflict"
+        conn.new_session = AsyncMock(return_value=new_response)
+        conn.load_session = AsyncMock(return_value=MagicMock())
+        conn.set_session_mode = AsyncMock()
+        conn.set_session_model = AsyncMock()
+        conn.authenticate = AsyncMock()
+        conn.close = AsyncMock()
+        return conn
+
+    @staticmethod
+    def _run_start_capturing_env(agent, tmp_path, *, extra_os_env=None) -> dict:
+        from contextlib import ExitStack
+
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        captured: dict = {}
+        conn = TestACPEnvConflictSuppression._make_conn()
+
+        mock_process = MagicMock()
+        mock_process.stdin = MagicMock()
+        mock_process.stdout = MagicMock()
+
+        async def _fake_create_subprocess_exec(*_args, env=None, **_kwargs):
+            captured.update(env or {})
+            return mock_process
+
+        async def _fake_filter(_src, _dst):
+            return None
+
+        state = _make_state(tmp_path)
+        agent._executor = AsyncExecutor()
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
+                    new=_fake_create_subprocess_exec,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.ClientSideConnection",
+                    return_value=conn,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent._filter_jsonrpc_lines",
+                    new=_fake_filter,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openhands.sdk.agent.acp_agent.asyncio.StreamReader",
+                    return_value=MagicMock(),
+                )
+            )
+            if extra_os_env:
+                stack.enter_context(patch.dict("os.environ", extra_os_env, clear=False))
+            agent._start_acp_server(state)
+
+        return captured
+
+    def test_claude_config_dir_suppresses_api_key_from_acp_env(self, tmp_path):
+        """ANTHROPIC_API_KEY from acp_env is stripped when CLAUDE_CONFIG_DIR present."""
+        agent = _make_agent(
+            acp_env={
+                "CLAUDE_CONFIG_DIR": "/tmp/claude-creds",
+                "ANTHROPIC_API_KEY": "sk-conflict",
+                "ANTHROPIC_BASE_URL": "https://proxy.example.com",
+            }
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+
+        assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude-creds"
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+
+    def test_claude_config_dir_suppresses_api_key_from_os_environ(self, tmp_path):
+        """ANTHROPIC_API_KEY leaking in from os.environ is stripped too."""
+        agent = _make_agent(
+            acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
+        )
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            extra_os_env={
+                "ANTHROPIC_API_KEY": "sk-leaked",
+                "ANTHROPIC_BASE_URL": "https://proxy.example.com",
+            },
+        )
+
+        assert "CLAUDE_CONFIG_DIR" in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+
+    def test_claude_config_dir_suppresses_api_key_from_secrets(self, tmp_path):
+        """ANTHROPIC_API_KEY injected via agent_context.secrets is stripped too."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
+            agent_context=AgentContext(
+                secrets={
+                    "ANTHROPIC_API_KEY": StaticSecret(
+                        value=SecretStr("sk-from-secret")
+                    ),
+                    "ANTHROPIC_BASE_URL": StaticSecret(
+                        value=SecretStr("https://proxy.example.com")
+                    ),
+                }
+            ),
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+
+        assert "CLAUDE_CONFIG_DIR" in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+
+    def test_no_suppression_without_claude_config_dir(self, tmp_path):
+        """Without CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY passes through unchanged."""
+        agent = _make_agent(
+            acp_env={"ANTHROPIC_API_KEY": "sk-valid"},
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+
+        assert env.get("ANTHROPIC_API_KEY") == "sk-valid"
+        assert "CLAUDE_CONFIG_DIR" not in env

@@ -1,10 +1,14 @@
 import asyncio
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from openhands.agent_server.conversation_lease import (
+    ConversationLease,
+    ConversationOwnershipLostError,
+)
 from openhands.agent_server.models import (
     ConfirmationResponseRequest,
     EventPage,
@@ -20,15 +24,24 @@ from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
 )
-from openhands.sdk.event import AgentErrorEvent, StreamingDeltaEvent
+from openhands.sdk.event import (
+    AgentErrorEvent,
+    ObservationBaseEvent,
+    StreamingDeltaEvent,
+)
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from openhands.sdk.event.llm_completion_log import LLMCompletionLogEvent
+from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
+from openhands.sdk.git.utils import run_git_command, validate_git_repository
 from openhands.sdk.llm.streaming import LLMStreamChunk
 from openhands.sdk.security.analyzer import SecurityAnalyzerBase
 from openhands.sdk.security.confirmation_policy import ConfirmationPolicyBase
 from openhands.sdk.utils.async_utils import AsyncCallbackWrapper
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
+
+
+LEASE_RENEW_INTERVAL_SECONDS = 15.0
 
 
 logger = get_logger(__name__)
@@ -44,11 +57,15 @@ class EventService:
     stored: StoredConversation
     conversations_dir: Path
     cipher: Cipher | None = None
+    owner_instance_id: str = field(default_factory=lambda: uuid4().hex)
     _conversation: LocalConversation | None = field(default=None, init=False)
     _pub_sub: PubSub[Event] = field(default_factory=lambda: PubSub[Event](), init=False)
     _run_task: asyncio.Task | None = field(default=None, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
+    _lease: ConversationLease | None = field(default=None, init=False)
+    _lease_generation: int | None = field(default=None, init=False)
+    _lease_task: asyncio.Task | None = field(default=None, init=False)
 
     @property
     def conversation_dir(self):
@@ -64,14 +81,40 @@ class EventService:
         )
 
     async def save_meta(self):
-        meta_file = self.conversation_dir / "meta.json"
-        meta_file.write_text(
-            self.stored.model_dump_json(
-                context={
-                    "cipher": self.cipher,
-                }
+        with self._write_guard():
+            meta_file = self.conversation_dir / "meta.json"
+            meta_file.write_text(
+                self.stored.model_dump_json(
+                    context={
+                        "cipher": self.cipher,
+                    }
+                )
             )
-        )
+
+    def _write_guard(self):
+        if self._lease is None or self._lease_generation is None:
+            return nullcontext()
+        return self._lease.guarded_write(self._lease_generation)
+
+    async def _renew_lease_loop(self) -> None:
+        if self._lease is None or self._lease_generation is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(LEASE_RENEW_INTERVAL_SECONDS)
+                self._lease.renew(self._lease_generation)
+        except asyncio.CancelledError:
+            raise
+        except ConversationOwnershipLostError:
+            logger.warning(
+                "Conversation lease lost while renewing: %s",
+                self.stored.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to renew conversation lease for %s",
+                self.stored.id,
+            )
 
     def get_conversation(self):
         if not self._conversation:
@@ -460,15 +503,51 @@ class EventService:
         for llm in agent.get_all_llms():
             llm.telemetry.set_stats_update_callback(stats_callback)
 
+    @staticmethod
+    def _ensure_workspace_is_git_repo(working_dir: Path) -> None:
+        """Initialize the workspace as a git repo if it isn't already one.
+
+        The /api/git/changes endpoint expects a real repository to compute
+        changes against; without this, agent-created files never appear in
+        the Changes tab. We only run `git init` (no commit) — empty repos
+        are handled by `get_valid_ref()` via GIT_EMPTY_TREE_HASH, and
+        untracked files surface through `git ls-files --others`.
+        """
+        try:
+            validate_git_repository(working_dir)
+            return  # already a repo
+        except GitRepositoryError:
+            logger.debug(
+                "Workspace %s is not a git repository; running `git init`",
+                working_dir,
+            )
+
+        try:
+            run_git_command(["git", "init"], working_dir)
+        except GitCommandError as e:
+            # Don't block conversation startup if git is missing or init
+            # fails — the git router is defensive and will return [] anyway.
+            logger.warning(
+                "Failed to initialize git repository at %s: %s", working_dir, e
+            )
+
     async def start(self):
         # Store the main event loop for cross-thread communication
         self._main_loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
 
         # self.stored contains an Agent configuration we can instantiate
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
+        self._lease = ConversationLease(
+            conversation_dir=self.conversation_dir,
+            owner_instance_id=self.owner_instance_id,
+        )
+        lease_claim = self._lease.claim()
+        self._lease_generation = lease_claim.generation
         workspace = self.stored.workspace
         assert isinstance(workspace, LocalWorkspace)
-        Path(workspace.working_dir).mkdir(parents=True, exist_ok=True)
+        working_dir = Path(workspace.working_dir)
+        working_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_workspace_is_git_repo(working_dir)
         agent_cls = type(self.stored.agent)
         agent = agent_cls.model_validate(
             self.stored.agent.model_dump(context={"expose_secrets": True}),
@@ -540,6 +619,8 @@ class EventService:
         conversation.set_confirmation_policy(self.stored.confirmation_policy)
         conversation.set_security_analyzer(self.stored.security_analyzer)
         self._conversation = conversation
+        self._conversation._state.set_write_guard(self._write_guard)
+        self._lease_task = asyncio.create_task(self._renew_lease_loop())
 
         # Register state change callback to automatically publish updates
         self._conversation._state.set_on_state_change(self._conversation._on_event)
@@ -556,25 +637,35 @@ class EventService:
         # the pod during long conn.prompt() calls.
         self._setup_acp_activity_heartbeat(self._conversation.agent)
 
-        # If the execution_status was "running" while serialized, then the
-        # conversation can't possibly be running - something is wrong
+        # Any conversation loaded from disk with RUNNING status is stale. Active
+        # split-brain resumes are prevented earlier by the lease claim itself, so if
+        # we made it this far there is no live owner and the interrupted tool call
+        # should be surfaced back to the agent.
         state = self._conversation.state
         if state.execution_status == ConversationExecutionStatus.RUNNING:
             state.execution_status = ConversationExecutionStatus.ERROR
-            # Add error event for the first unmatched action to inform the agent
             unmatched_actions = ConversationState.get_unmatched_actions(state.events)
             if unmatched_actions:
                 first_action = unmatched_actions[0]
-                error_event = AgentErrorEvent(
-                    tool_name=first_action.tool_name,
-                    tool_call_id=first_action.tool_call_id,
-                    error=(
-                        "A restart occurred while this tool was in progress. "
-                        "This may indicate a fatal memory error or system crash. "
-                        "The tool execution was interrupted and did not complete."
-                    ),
+                # Skip if any observation-like event already exists for this
+                # tool_call_id, to avoid duplicate observations when an
+                # observation matches by tool_call_id but not action_id.
+                already_observed = any(
+                    isinstance(e, ObservationBaseEvent)
+                    and e.tool_call_id == first_action.tool_call_id
+                    for e in state.events
                 )
-                self._conversation._on_event(error_event)
+                if not already_observed:
+                    error_event = AgentErrorEvent(
+                        tool_name=first_action.tool_name,
+                        tool_call_id=first_action.tool_call_id,
+                        error=(
+                            "A restart occurred while this tool was in progress. "
+                            "This may indicate a fatal memory error or system crash. "
+                            "The tool execution was interrupted and did not complete."
+                        ),
+                    )
+                    self._conversation._on_event(error_event)
 
         # Publish initial state update
         await self._publish_state_update()
@@ -692,11 +783,39 @@ class EventService:
         )
 
     async def close(self):
+        if self._lease_task is not None:
+            self._lease_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._lease_task
+            self._lease_task = None
+
+        # Drain in-flight run before teardown so MCP close doesn't race
+        # with a tool call mid-step.
+        if self._run_task is not None and not self._run_task.done():
+            if self._conversation is not None:
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(None, self._conversation.pause)
+                except Exception:
+                    logger.warning(
+                        "Failed to pause conversation during close", exc_info=True
+                    )
+            try:
+                await asyncio.wait_for(self._run_task, timeout=10.0)
+            except Exception as exc:
+                logger.warning("Run task did not exit cleanly during close: %s", exc)
+            self._run_task = None
+
         await self._pub_sub.close()
         if self._conversation:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._conversation.close)
             self._conversation = None
+
+        if self._lease is not None and self._lease_generation is not None:
+            self._lease.release(self._lease_generation)
+        self._lease_generation = None
+        self._lease = None
 
     async def generate_title(
         self, llm: "LLM | None" = None, max_length: int = 50
@@ -789,7 +908,13 @@ class EventService:
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
-        await self.save_meta()
+        try:
+            await self.save_meta()
+        except ConversationOwnershipLostError:
+            logger.info(
+                "Skipping meta save after ownership loss for conversation %s",
+                self.stored.id,
+            )
         await self.close()
 
     def is_open(self) -> bool:
