@@ -37,14 +37,15 @@ Layout
 
 How to run
 ----------
-Whole suite (either form works)::
+The suite is a marker-based opt-in. Pass ``-m stress`` to override the
+``-m 'not stress'`` filter set in ``addopts``::
 
-    uv run pytest tests/agent_server/stress/
     uv run pytest -m stress
+    uv run pytest -m stress tests/agent_server/stress/test_conversation_listing.py
 
-Single test, with logs visible::
-
-    uv run pytest tests/agent_server/stress/test_conversation_listing.py -p no:logging
+A bare ``pytest tests/agent_server/stress/`` will collect-then-deselect
+because the addopts filter still applies — pass ``-m stress`` alongside
+the path if you want a path-scoped run.
 
 What you'll see
 ---------------

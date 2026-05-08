@@ -145,14 +145,17 @@ async def test_concurrent_conversations_isolated_and_fast(
         f"are running effectively in series — likely a global lock somewhere."
     )
 
-    # 6. Persistence sanity: there should be exactly n+1 conversation dirs
-    #    on disk (n + the reference). If we see more, conversations are
-    #    being duplicated / forked accidentally.
-    persist_dirs = list((tmp_path / "persist").iterdir())
-    assert len(persist_dirs) == n + 1, (
-        f"expected {n + 1} persisted conversation dirs (1 reference + {n} "
-        f"concurrent), found {len(persist_dirs)}. Names: "
-        f"{[p.name for p in persist_dirs]}."
+    # 6. Persistence sanity: the set of dirs on disk must match exactly the
+    #    set of conversation IDs we started. Asserting on the ID set (not
+    #    just the count) catches "right count, wrong IDs" — e.g. a
+    #    conversation failed to start but left a directory behind and a
+    #    retry succeeded with a different ID.
+    expected_ids = {ref_id, *(conv_id for conv_id, _llm in started)}
+    on_disk_ids = {UUID(d.name) for d in (tmp_path / "persist").iterdir() if d.is_dir()}
+    assert on_disk_ids == expected_ids, (
+        f"persisted dirs don't match started conversations. "
+        f"missing={expected_ids - on_disk_ids}, "
+        f"extra={on_disk_ids - expected_ids}."
     )
 
     # 7. Resource budget.

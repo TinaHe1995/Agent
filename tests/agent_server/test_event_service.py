@@ -2056,7 +2056,8 @@ class _WedgedSubscriber:
     reason=(
         "event_service.py:412 awaits subscriber(state_update_event) "
         "synchronously; a wedged WS client deadlocks the WS handler "
-        "(reachable from sockets.py:250)."
+        "(reachable from sockets.py:250). "
+        "Tracked in https://github.com/OpenHands/software-agent-sdk/issues/3118."
     ),
 )
 @pytest.mark.timeout(15)

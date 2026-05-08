@@ -58,6 +58,10 @@ class ResourceProbe:
         try:
             num_fds = self._proc.num_fds()
         except (AttributeError, psutil.AccessDenied):
+            # psutil exposes num_fds() only on POSIX; AttributeError covers
+            # Windows, AccessDenied covers sandboxed/non-owning processes.
+            # -1 is the sentinel for "unavailable" — peak_fds()/fd_delta()
+            # check it explicitly so FD assertions become no-ops there.
             num_fds = -1
         return Sample(
             t=asyncio.get_event_loop().time() - self._start_t,
@@ -80,6 +84,9 @@ class ResourceProbe:
         return max(s.rss_mb for s in self._samples)
 
     def peak_fds(self) -> int:
+        """Peak FD count across samples. Returns -1 on platforms where
+        psutil cannot read FDs (Windows; sandboxed processes); pair with
+        ``fd_delta`` rather than asserting on this directly."""
         return max(s.num_fds for s in self._samples)
 
     def peak_threads(self) -> int:
@@ -89,6 +96,10 @@ class ResourceProbe:
         return self.peak_rss_mb() - self.baseline.rss_mb
 
     def fd_delta(self) -> int:
+        """Peak-minus-baseline FD growth. Returns 0 on platforms where the
+        baseline read failed (-1 sentinel from ``_take``), so an
+        ``fd_delta() < budget`` assertion silently passes there rather than
+        firing on a missing measurement."""
         if self.baseline.num_fds < 0:
             return 0
         return self.peak_fds() - self.baseline.num_fds

@@ -99,7 +99,11 @@ async def start_conversation_with_test_llm(
     )
     info, _is_new = await conversation_service.start_conversation(request)
     event_service = await conversation_service.get_event_service(info.id)
-    assert event_service is not None
+    assert event_service is not None, (
+        f"start_conversation returned info.id={info.id} but "
+        f"get_event_service returned None — ConversationService invariant "
+        f"violation."
+    )
     conv = event_service.get_conversation()
     conv.switch_llm(parent_llm)
 

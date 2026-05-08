@@ -1266,7 +1266,8 @@ class TestWebhookSubscriberTimerBehavior:
         "try/except + logger.error (no re-raise), and "
         "conversation_service.py:862 fires asyncio.gather() on the webhook "
         "subscribes without awaiting. Both must be fixed for init errors "
-        "to surface."
+        "to surface. "
+        "Tracked in https://github.com/OpenHands/software-agent-sdk/issues/3121."
     ),
 )
 @pytest.mark.timeout(30)

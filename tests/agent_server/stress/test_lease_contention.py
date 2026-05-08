@@ -76,13 +76,25 @@ async def test_concurrent_start_of_same_conversation_yields_one_winner(
         await s.__aenter__()
     try:
         target = uuid4()
-        results = await asyncio.gather(
-            *[
-                _try_start(s, target, workspace_dir=workspace, usage_id=f"lc-{i}")
-                for i, s in enumerate(services)
-            ],
-            return_exceptions=False,
-        )
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[
+                        _try_start(
+                            s, target, workspace_dir=workspace, usage_id=f"lc-{i}"
+                        )
+                        for i, s in enumerate(services)
+                    ],
+                    return_exceptions=False,
+                ),
+                timeout=LEASE_CONTENTION.settle_timeout_s,
+            )
+        except TimeoutError:
+            pytest.fail(
+                f"contention did not settle within "
+                f"{LEASE_CONTENTION.settle_timeout_s}s; one of the {n} "
+                f"services is wedged on lease acquisition."
+            )
 
         winners = [(i, exc) for i, (ok, exc) in enumerate(results) if ok]
         losers = [(i, exc) for i, (ok, exc) in enumerate(results) if not ok]

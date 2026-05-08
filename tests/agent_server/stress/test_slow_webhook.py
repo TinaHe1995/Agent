@@ -295,7 +295,8 @@ async def failing_webhook_service(tmp_path: Path, always_fail_webhook_url: str):
     strict=True,
     reason=(
         "conversation_service.py:1059 extends failed batches back onto "
-        "self.queue without bound; sustained downstream failure → OOM."
+        "self.queue without bound; sustained downstream failure → OOM. "
+        "Tracked in https://github.com/OpenHands/software-agent-sdk/issues/3122."
     ),
 )
 async def test_webhook_queue_bounded_under_sustained_downstream_failure(

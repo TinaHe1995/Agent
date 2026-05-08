@@ -65,13 +65,17 @@ async def _seed_conversations(
     return set(ids)
 
 
-async def _walk_pages(client, *, page_size: int, sort_order: str) -> list[UUID]:
+async def _walk_pages(
+    client, *, page_size: int, sort_order: str
+) -> list[tuple[UUID, str]]:
     """Walk every page of /api/conversations/search.
 
-    Returns the IDs in order; callers can compare to seeded set for
-    correctness and inspect length to catch duplicates.
+    Returns ``(id, created_at)`` pairs in API-returned order. ``created_at``
+    is the raw ISO string from the response; callers compare it pairwise to
+    verify ``sort_order`` was actually honoured. UTC-only timestamps make
+    lexicographic comparison equivalent to chronological.
     """
-    seen: list[UUID] = []
+    seen: list[tuple[UUID, str]] = []
     page_id: str | None = None
     while True:
         params: dict[str, object] = {
@@ -84,7 +88,7 @@ async def _walk_pages(client, *, page_size: int, sort_order: str) -> list[UUID]:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         for item in body["items"]:
-            seen.append(UUID(item["id"]))
+            seen.append((UUID(item["id"]), item["created_at"]))
         page_id = body.get("next_page_id")
         if not page_id:
             break
@@ -149,13 +153,29 @@ async def test_pagination_is_correct_and_bounded(
 
     # 1. Correctness: paginated set == seeded set, no duplicates.
     paged = await _walk_pages(client, page_size=page_size, sort_order="CREATED_AT_DESC")
-    assert len(paged) == n, (
-        f"pagination returned {len(paged)} items, seeded {n}. "
+    paged_ids = [u for u, _ in paged]
+    assert len(paged_ids) == n, (
+        f"pagination returned {len(paged_ids)} items, seeded {n}. "
         f"Duplicates or missing pages?"
     )
-    assert set(paged) == seeded, (
+    assert set(paged_ids) == seeded, (
         "pagination returned a different set than was seeded. "
-        f"Diff: missing={seeded - set(paged)}, extra={set(paged) - seeded}."
+        f"Diff: missing={seeded - set(paged_ids)}, "
+        f"extra={set(paged_ids) - seeded}."
+    )
+
+    # 1b. Sort order: CREATED_AT_DESC must actually be descending. Without
+    # this, a regression that ignores sort_order would still pass set/count
+    # checks. created_at strings are UTC ISO so lexicographic == chronological.
+    timestamps = [t for _, t in paged]
+    first_break = next(
+        (i for i in range(len(timestamps) - 1) if timestamps[i] < timestamps[i + 1]),
+        -1,
+    )
+    assert first_break == -1, (
+        f"CREATED_AT_DESC did not return items in descending order. "
+        f"First disagreement at index {first_break}: "
+        f"{timestamps[first_break]} < {timestamps[first_break + 1]}."
     )
 
     # 2. Count endpoint matches.
@@ -175,22 +195,28 @@ async def test_pagination_is_correct_and_bounded(
     )
 
     # 4. Deep-page latency degradation: should be graceful, not a cliff.
-    if len(paged) >= page_size:
-        deep_page_id = await _find_last_page_id(
-            client, page_size=page_size, sort_order="CREATED_AT_DESC"
-        )
-        if deep_page_id is not None:
-            deep_samples = [
-                await _time_deep_page(client, page_size=page_size, page_id=deep_page_id)
-                for _ in range(10)
-            ]
-            p95_deep = statistics.quantiles(deep_samples, n=20)[-1]
-            ratio = p95_deep / max(p95_first, 1e-6)
-            assert ratio < CONVERSATION_LISTING.deep_page_factor, (
-                f"deep-page p95 ({p95_deep:.3f}s) is {ratio:.1f}× first-page "
-                f"({p95_first:.3f}s). Pagination likely re-scans from the "
-                f"start each call."
-            )
+    # With N=2000 and page_size=50 we expect ~40 pages, so _find_last_page_id
+    # must return a non-None cursor. None here means the API returned
+    # everything in one page (pagination broken) — assert loudly so the
+    # deep-page block doesn't silently no-op.
+    deep_page_id = await _find_last_page_id(
+        client, page_size=page_size, sort_order="CREATED_AT_DESC"
+    )
+    assert deep_page_id is not None, (
+        f"expected multi-page pagination for N={n} with page_size={page_size}, "
+        f"but the API returned everything in one page. Pagination is broken."
+    )
+    deep_samples = [
+        await _time_deep_page(client, page_size=page_size, page_id=deep_page_id)
+        for _ in range(10)
+    ]
+    p95_deep = statistics.quantiles(deep_samples, n=20)[-1]
+    ratio = p95_deep / max(p95_first, 1e-6)
+    assert ratio < CONVERSATION_LISTING.deep_page_factor, (
+        f"deep-page p95 ({p95_deep:.3f}s) is {ratio:.1f}× first-page "
+        f"({p95_first:.3f}s). Pagination likely re-scans from the start each "
+        f"call."
+    )
 
     # 5. RSS during a tight listing loop. Per-call slope is too noisy
     #    in-process (allocator behaviour, fragmentation), so we measure

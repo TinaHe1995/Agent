@@ -359,7 +359,8 @@ def test_get_home_returns_user_home(client):
     strict=True,
     reason=(
         "file_router.py:62-66 uses sync open()/f.write() inside an async "
-        "handler. On slow storage every chunk write blocks the event loop."
+        "handler. On slow storage every chunk write blocks the event loop. "
+        "Tracked in https://github.com/OpenHands/software-agent-sdk/issues/3119."
     ),
 )
 @pytest.mark.timeout(20)
