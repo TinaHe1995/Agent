@@ -55,9 +55,20 @@ async def test_high_volume_bash_output_is_bounded(
     health_lats: list[float] = []
     flood_deadline = time.monotonic() + duration + 5
     while time.monotonic() < flood_deadline:
+        # `limit=1, sort_order=TIMESTAMP_DESC` fetches only the latest
+        # event. The default page caps at 100; this test deliberately
+        # generates output that *could* exceed that under a per-byte/
+        # per-line regression, so a first-page fetch would miss the
+        # final BashOutput and the loop would time out for the wrong
+        # reason. The dedicated event-count assertion below paginates
+        # explicitly to catch the underlying regression.
         events_resp = await client.get(
             "/api/bash/bash_events/search",
-            params={"command_id__eq": str(cmd_id)},
+            params={
+                "command_id__eq": str(cmd_id),
+                "limit": 1,
+                "sort_order": "TIMESTAMP_DESC",
+            },
         )
         items = events_resp.json()["items"]
         final = next(

@@ -100,6 +100,13 @@ async def test_concurrent_conversations_isolated_and_fast(
     assert ref_status == ConversationExecutionStatus.FINISHED
     assert ref_llm.remaining_responses == 0
 
+    # Snapshot probe state between reference and concurrent runs so the
+    # RSS budget below measures the concurrent run only — see
+    # test_parallel_subagents.py for the same pattern.
+    pre_concurrent_idx = len(probe.samples)
+    assert pre_concurrent_idx > 0, "ResourceProbe yielded no samples?"
+    pre_concurrent_rss_mb = probe.samples[-1].rss_mb
+
     # 2. Now N concurrent conversations.
     started = await asyncio.gather(
         *[
@@ -158,10 +165,18 @@ async def test_concurrent_conversations_isolated_and_fast(
         f"extra={on_disk_ids - expected_ids}."
     )
 
-    # 7. Resource budget.
-    rss_growth = probe.rss_delta_mb() / max(probe.baseline.rss_mb, 1.0)
+    # 7. Resource budget. Compared against the snapshot taken between
+    #    the reference and concurrent runs, so the spike from the
+    #    reference run isn't attributed here.
+    concurrent_peak_rss_mb = max(
+        (s.rss_mb for s in probe.samples[pre_concurrent_idx:]),
+        default=pre_concurrent_rss_mb,
+    )
+    rss_growth = (concurrent_peak_rss_mb - pre_concurrent_rss_mb) / max(
+        pre_concurrent_rss_mb, 1.0
+    )
     assert rss_growth < CONCURRENT_CONVERSATIONS.rss_growth_factor, (
-        f"RSS grew {rss_growth:.2f}× baseline (budget < "
+        f"RSS grew {rss_growth:.2f}× during concurrent run (budget < "
         f"{CONCURRENT_CONVERSATIONS.rss_growth_factor}×). Conversation "
         f"teardown may not be releasing memory."
     )

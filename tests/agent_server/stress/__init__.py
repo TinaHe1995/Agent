@@ -13,6 +13,11 @@ The suite is excluded from default pytest runs via the ``stress`` marker
 ``make test``. Files are still collected, so import-time breakage in a
 stress test surfaces immediately.
 
+POSIX-only by construction: the suite uses ``psutil.num_fds()``, POSIX file
+locks, bash pipelines, and POSIX shell builtins. There are no Windows shims
+and the FD assertions silently no-op on platforms where psutil can't read
+FDs (see ``probe.py``). Don't try to run this on Windows.
+
 Layout
 ------
 - ``conftest.py``    Per-test ``ConversationService``/``BashEventService``

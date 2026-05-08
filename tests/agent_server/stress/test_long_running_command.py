@@ -69,13 +69,26 @@ async def test_long_running_bash_does_not_block_event_loop(
     while time.monotonic() < deadline:
         for _ in range(5):
             t0 = time.monotonic()
-            h_resp = await client.get("/health")
+            # Bound each request by the remaining wall-time so a hung
+            # /health can't bypass `deadline` (with a 0.1 s floor to
+            # avoid passing zero/negative on the boundary).
+            remaining = max(0.1, deadline - time.monotonic())
+            h_resp = await client.get("/health", timeout=remaining)
             health_lats.append(time.monotonic() - t0)
             assert h_resp.status_code == 200
 
+        # `limit=1, sort_order=TIMESTAMP_DESC` fetches just the latest
+        # event. The default page caps at 100; if a regression ever made
+        # bash emit per-line/per-byte (which is what test_high_volume_…
+        # asserts against), a first-page fetch could miss the final event
+        # and silently time out here.
         events = await client.get(
             "/api/bash/bash_events/search",
-            params={"command_id__eq": str(cmd_id)},
+            params={
+                "command_id__eq": str(cmd_id),
+                "limit": 1,
+                "sort_order": "TIMESTAMP_DESC",
+            },
         )
         items = events.json()["items"]
         # Final BashOutput carries exit_code != null.
@@ -153,9 +166,14 @@ async def test_bash_timeout_kills_process_cleanly(
     # Wait for the timeout to fire and the kill to propagate.
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
+        # See sibling test for why `limit=1, sort_order=TIMESTAMP_DESC`.
         events = await client.get(
             "/api/bash/bash_events/search",
-            params={"command_id__eq": str(cmd_id)},
+            params={
+                "command_id__eq": str(cmd_id),
+                "limit": 1,
+                "sort_order": "TIMESTAMP_DESC",
+            },
         )
         items = events.json()["items"]
         final = next(

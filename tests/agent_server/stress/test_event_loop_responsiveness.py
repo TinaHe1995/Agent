@@ -96,9 +96,17 @@ async def test_health_responsive_under_long_bash(
             latencies.append(time.monotonic() - t0)
             assert h_resp.status_code == 200
 
+        # `limit=1, sort_order=TIMESTAMP_DESC` so we read just the latest
+        # event regardless of how many the bash command emits — the default
+        # page caps at 100 and we don't want a multi-page-output regression
+        # to silently miss the final BashOutput here.
         events_resp = await client.get(
             "/api/bash/bash_events/search",
-            params={"command_id__eq": str(cmd_id)},
+            params={
+                "command_id__eq": str(cmd_id),
+                "limit": 1,
+                "sort_order": "TIMESTAMP_DESC",
+            },
         )
         assert events_resp.status_code == 200, events_resp.text
         final = next(
