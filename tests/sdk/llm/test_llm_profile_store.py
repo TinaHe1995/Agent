@@ -1,5 +1,6 @@
 import concurrent.futures
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -119,12 +120,26 @@ def test_save_creates_file(profile_store: LLMProfileStore, sample_llm: LLM) -> N
 
 @pytest.mark.parametrize(
     "name",
-    ["", ".json", ".", "..", "my/profile", "my//profile"],
+    [
+        "",
+        ".json",
+        ".",
+        "..",
+        "my/profile",
+        "my//profile",
+        ".leading-dot",
+        "-leading-dash",
+        "_leading_under",
+        "name with space",
+        "name@symbol",
+        "name$dollar",
+        "a" * 65,
+    ],
 )
 def test_save_with_invalid_profile_name(
     name: str, profile_store: LLMProfileStore, sample_llm: LLM
 ) -> None:
-    with pytest.raises(ValueError, match=f"Invalid profile name: {name!r}. "):
+    with pytest.raises(ValueError, match=re.escape(f"Invalid profile name: {name!r}.")):
         profile_store.save(name, sample_llm)
 
 
@@ -375,6 +390,137 @@ def test_full_workflow(profile_store: LLMProfileStore) -> None:
     # Delete
     profile_store.delete("workflow_profile")
     assert "workflow_profile.json" not in profile_store.list()
+
+
+# ── Rename ────────────────────────────────────────────────────────────────
+
+
+def test_rename_moves_file(profile_store: LLMProfileStore, sample_llm: LLM) -> None:
+    profile_store.save("old", sample_llm)
+    profile_store.rename("old", "new")
+
+    assert (profile_store.base_dir / "new.json").exists()
+    assert not (profile_store.base_dir / "old.json").exists()
+    assert profile_store.load("new").model == sample_llm.model
+
+
+def test_rename_preserves_secrets(
+    profile_store: LLMProfileStore, sample_llm_with_secrets: LLM
+) -> None:
+    profile_store.save("old", sample_llm_with_secrets, include_secrets=True)
+    profile_store.rename("old", "new")
+
+    loaded = profile_store.load("new")
+    assert isinstance(loaded.api_key, SecretStr)
+    assert loaded.api_key.get_secret_value() == "secret-api-key-12345"
+
+
+def test_rename_source_missing_raises(profile_store: LLMProfileStore) -> None:
+    with pytest.raises(FileNotFoundError, match="missing"):
+        profile_store.rename("missing", "anywhere")
+
+
+def test_rename_target_exists_raises(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("old", sample_llm)
+    profile_store.save("taken", sample_llm)
+
+    with pytest.raises(FileExistsError, match="taken"):
+        profile_store.rename("old", "taken")
+
+    # Both files still present (no partial state)
+    assert (profile_store.base_dir / "old.json").exists()
+    assert (profile_store.base_dir / "taken.json").exists()
+
+
+def test_rename_same_name_is_noop(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("same", sample_llm)
+    profile_store.rename("same", "same")
+    assert profile_store.list() == ["same.json"]
+
+
+def test_rename_invalid_name_raises(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("ok", sample_llm)
+    with pytest.raises(ValueError, match="Invalid profile name"):
+        profile_store.rename("ok", "../escape")
+    with pytest.raises(ValueError, match="Invalid profile name"):
+        profile_store.rename(".hidden", "ok2")
+
+
+# ── list_summaries ────────────────────────────────────────────────────────
+
+
+def test_list_summaries_empty(profile_store: LLMProfileStore) -> None:
+    assert profile_store.list_summaries() == []
+
+
+def test_list_summaries_returns_metadata(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("a", sample_llm)
+    profile_store.save("b", sample_llm)
+
+    summaries = profile_store.list_summaries()
+    assert len(summaries) == 2
+    by_name = {s["name"]: s for s in summaries}
+    assert by_name["a"]["model"] == sample_llm.model
+    assert by_name["a"]["api_key_set"] is False
+
+
+def test_list_summaries_api_key_set_with_secrets(
+    profile_store: LLMProfileStore, sample_llm_with_secrets: LLM
+) -> None:
+    profile_store.save("with_key", sample_llm_with_secrets, include_secrets=True)
+
+    [summary] = profile_store.list_summaries()
+    assert summary["api_key_set"] is True
+
+
+def test_list_summaries_api_key_redacted_means_not_set(
+    profile_store: LLMProfileStore, sample_llm_with_secrets: LLM
+) -> None:
+    """A profile saved without secrets stores '**********' on disk; not 'set'."""
+    profile_store.save("no_key", sample_llm_with_secrets, include_secrets=False)
+
+    [summary] = profile_store.list_summaries()
+    assert summary["api_key_set"] is False
+
+
+def test_list_summaries_skips_corrupted(
+    profile_store: LLMProfileStore, sample_llm: LLM
+) -> None:
+    profile_store.save("good", sample_llm)
+    (profile_store.base_dir / "bad.json").write_text("{ not valid json")
+
+    summaries = profile_store.list_summaries()
+    assert [s["name"] for s in summaries] == ["good"]
+
+
+def test_list_summaries_does_not_mutate_env(
+    profile_store: LLMProfileStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listing summaries must not run LLM validators (which set env vars)."""
+    llm = LLM(
+        usage_id="t",
+        model="bedrock/test",
+        aws_access_key_id="from-profile",
+    )
+    profile_store.save("aws", llm, include_secrets=True)
+
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    profile_store.list_summaries()
+
+    import os
+
+    assert os.environ.get("AWS_ACCESS_KEY_ID") is None
+
+
+# ── Misc ──────────────────────────────────────────────────────────────────
 
 
 def test_multiple_profiles(profile_store: LLMProfileStore) -> None:

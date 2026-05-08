@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from openhands.agent_server import profiles_router as profiles_router_module
 from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
 from openhands.sdk.llm import LLM
@@ -347,3 +348,202 @@ def test_invalid_profile_name_too_long(client):
         json={"llm": {"model": "gpt-4o"}},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("name", [".leading-dot", "-leading-dash", "_leading_under"])
+def test_invalid_profile_name_leading_non_alnum(client, name):
+    """Profile names must start with an alphanumeric character."""
+    response = client.post(
+        f"/api/profiles/{name}",
+        json={"llm": {"model": "gpt-4o"}},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("name", ["name@symbol", "name$dollar", "name space"])
+def test_invalid_profile_name_special_chars(client, name):
+    """Profile names with disallowed characters are rejected."""
+    response = client.post(
+        f"/api/profiles/{name}",
+        json={"llm": {"model": "gpt-4o"}},
+    )
+    assert response.status_code == 422
+
+
+# ── Profile Limit ──────────────────────────────────────────────────────────
+
+
+def test_save_profile_at_limit_returns_409(client, store, monkeypatch):
+    """POST /api/profiles/{name} returns 409 when MAX_PROFILES is reached."""
+    monkeypatch.setattr(profiles_router_module, "MAX_PROFILES", 2)
+
+    store.save("first", LLM(model="gpt-4o"))
+    store.save("second", LLM(model="gpt-4o"))
+
+    response = client.post(
+        "/api/profiles/third",
+        json={"llm": {"model": "gpt-4o"}},
+    )
+    assert response.status_code == 409
+    assert "limit" in response.json()["detail"].lower()
+
+
+def test_save_profile_at_limit_overwrite_allowed(client, store, monkeypatch):
+    """Overwriting an existing profile is allowed even at the limit."""
+    monkeypatch.setattr(profiles_router_module, "MAX_PROFILES", 2)
+
+    store.save("first", LLM(model="gpt-4o"))
+    store.save("second", LLM(model="gpt-4o"))
+
+    response = client.post(
+        "/api/profiles/first",
+        json={"llm": {"model": "claude-3-opus"}},
+    )
+    assert response.status_code == 201
+    assert store.load("first").model == "claude-3-opus"
+
+
+# ── Store Errors → HTTP ────────────────────────────────────────────────────
+
+
+def test_list_profiles_timeout_returns_503(client, monkeypatch):
+    """List endpoint surfaces TimeoutError as 503."""
+
+    def boom(self):
+        raise TimeoutError("locked")
+
+    monkeypatch.setattr(LLMProfileStore, "list_summaries", boom)
+
+    response = client.get("/api/profiles")
+    assert response.status_code == 503
+
+
+def test_get_profile_timeout_returns_503(client, store, monkeypatch):
+    """Get endpoint surfaces TimeoutError as 503."""
+    store.save("present", LLM(model="gpt-4o"))
+
+    def boom(self, name):
+        raise TimeoutError("locked")
+
+    monkeypatch.setattr(LLMProfileStore, "load", boom)
+
+    response = client.get("/api/profiles/present")
+    assert response.status_code == 503
+
+
+def test_delete_profile_invalid_internal_name_returns_400(client, store, monkeypatch):
+    """If the store raises ValueError, delete responds 400 instead of 500."""
+
+    def boom(self, name):
+        raise ValueError("Invalid profile name: 'x'.")
+
+    monkeypatch.setattr(LLMProfileStore, "delete", boom)
+
+    response = client.delete("/api/profiles/some-name")
+    assert response.status_code == 400
+
+
+def test_list_profiles_skips_corrupted(client, temp_profiles_dir):
+    """Corrupted profile files are skipped, not returned."""
+    (temp_profiles_dir / "good.json").write_text('{"model": "gpt-4o"}')
+    (temp_profiles_dir / "bad.json").write_text("{ not valid json")
+
+    response = client.get("/api/profiles")
+    assert response.status_code == 200
+
+    names = {p["name"] for p in response.json()["profiles"]}
+    assert names == {"good"}
+
+
+def test_list_profiles_api_key_set_for_redacted(client, store):
+    """A profile saved without secrets reports api_key_set=False."""
+    llm = LLM(model="gpt-4o", api_key="sk-secret-not-saved")
+    store.save("redacted", llm, include_secrets=False)
+
+    response = client.get("/api/profiles")
+    assert response.status_code == 200
+
+    profile = next(p for p in response.json()["profiles"] if p["name"] == "redacted")
+    assert profile["api_key_set"] is False
+
+
+# ── Malformed Bodies ───────────────────────────────────────────────────────
+
+
+def test_save_profile_missing_llm_field(client):
+    """Save without the required 'llm' field returns 422."""
+    response = client.post("/api/profiles/missing", json={})
+    assert response.status_code == 422
+
+
+def test_save_profile_wrong_type_for_llm(client):
+    """Save with 'llm' as a non-dict returns 422."""
+    response = client.post(
+        "/api/profiles/bad-llm",
+        json={"llm": "not-an-object"},
+    )
+    assert response.status_code == 422
+
+
+def test_rename_profile_missing_new_name(client, store):
+    """Rename without the required 'new_name' field returns 422."""
+    store.save("source", LLM(model="gpt-4o"))
+    response = client.post("/api/profiles/source/rename", json={})
+    assert response.status_code == 422
+
+
+def test_rename_profile_empty_new_name(client, store):
+    """Rename with empty 'new_name' returns 422."""
+    store.save("source", LLM(model="gpt-4o"))
+    response = client.post("/api/profiles/source/rename", json={"new_name": ""})
+    assert response.status_code == 422
+
+
+def test_get_profile_corrupted_returns_400(client, temp_profiles_dir):
+    """A corrupted profile JSON returns 400 from the load endpoint."""
+    (temp_profiles_dir / "broken.json").write_text("{ not valid json")
+    response = client.get("/api/profiles/broken")
+    assert response.status_code == 400
+    assert "broken" in response.json()["detail"].lower()
+
+
+def test_save_profile_timeout_returns_503(client, monkeypatch):
+    """Save endpoint surfaces TimeoutError as 503."""
+
+    def boom(self):
+        raise TimeoutError("locked")
+
+    monkeypatch.setattr(LLMProfileStore, "list", boom)
+
+    response = client.post(
+        "/api/profiles/anything",
+        json={"llm": {"model": "gpt-4o"}},
+    )
+    assert response.status_code == 503
+
+
+def test_rename_profile_timeout_returns_503(client, store, monkeypatch):
+    """Rename endpoint surfaces TimeoutError as 503."""
+    store.save("src", LLM(model="gpt-4o"))
+
+    def boom(self, old, new):
+        raise TimeoutError("locked")
+
+    monkeypatch.setattr(LLMProfileStore, "rename", boom)
+
+    response = client.post("/api/profiles/src/rename", json={"new_name": "dst"})
+    assert response.status_code == 503
+
+
+def test_get_profile_does_not_expose_api_key(client, store):
+    """Even when api_key is saved, GET response nulls it out."""
+    llm = LLM(model="gpt-4o", api_key="sk-very-secret")
+    store.save("secret-profile", llm, include_secrets=True)
+
+    response = client.get("/api/profiles/secret-profile")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["config"]["api_key"] is None
+    assert body["api_key_set"] is True
+    # And the secret string itself never appears in the response
+    assert "sk-very-secret" not in response.text
