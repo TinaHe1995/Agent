@@ -1,6 +1,8 @@
 """Secret sources and types for handling sensitive data."""
 
+import os
 from abc import ABC, abstractmethod
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import Field, SecretStr, field_serializer, field_validator
@@ -12,6 +14,18 @@ from openhands.sdk.utils.redact import is_secret_key
 
 
 logger = get_logger(__name__)
+
+_INTERNAL_SERVER_URL_ENV = "OH_INTERNAL_SERVER_URL"
+_DEFAULT_INTERNAL_SERVER_URL = "http://127.0.0.1:8000"
+
+
+def _resolve_lookup_secret_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.netloc or parsed.scheme:
+        return url
+
+    base_url = os.getenv(_INTERNAL_SERVER_URL_ENV, _DEFAULT_INTERNAL_SERVER_URL)
+    return urljoin(f"{base_url.rstrip('/')}/", url)
 
 
 class SecretSource(DiscriminatedUnionMixin, ABC):
@@ -52,6 +66,11 @@ class LookupSecret(SecretSource):
 
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("url")
+    @classmethod
+    def _normalize_url(cls, url: str) -> str:
+        return _resolve_lookup_secret_url(url)
 
     def get_value(self) -> str:
         response = httpx.get(self.url, headers=self.headers, timeout=30.0)

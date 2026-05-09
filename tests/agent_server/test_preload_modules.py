@@ -1,13 +1,14 @@
 """Tests for the --import-modules preloading helper."""
 
 import logging
+import os
 import sys
 import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openhands.agent_server.__main__ import preload_modules
+from openhands.agent_server.__main__ import _get_internal_server_url, preload_modules
 
 
 class TestPreloadModules:
@@ -111,6 +112,14 @@ class TestPreloadModules:
         )
 
 
+def test_get_internal_server_url_rewrites_wildcard_host():
+    assert _get_internal_server_url("0.0.0.0", 4321) == "http://127.0.0.1:4321"
+
+
+def test_get_internal_server_url_preserves_explicit_host():
+    assert _get_internal_server_url("localhost", 4321) == "http://localhost:4321"
+
+
 class TestMainCheckBrowserOrdering:
     """Verify --check-browser runs independently of --import-modules."""
 
@@ -141,3 +150,21 @@ class TestMainCheckBrowserOrdering:
             assert exc_info.value.code == 0
             # preload_modules must NOT have been called
             mock_preload.assert_not_called()
+
+    def test_main_sets_internal_server_url(self, monkeypatch):
+        monkeypatch.delenv("OH_INTERNAL_SERVER_URL", raising=False)
+
+        with (
+            patch("sys.argv", ["prog", "--host", "0.0.0.0", "--port", "4321"]),
+            patch("openhands.agent_server.__main__.preload_modules"),
+            patch("openhands.agent_server.__main__.LoggingServer") as mock_server_cls,
+        ):
+            mock_server_cls.return_value.run.side_effect = SystemExit(0)
+
+            from openhands.agent_server.__main__ import main
+
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert os.environ["OH_INTERNAL_SERVER_URL"] == "http://127.0.0.1:4321"

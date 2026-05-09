@@ -1,5 +1,7 @@
 """Tests for SecretSources class."""
 
+from unittest.mock import Mock, patch
+
 import pytest
 from pydantic import SecretStr
 
@@ -194,3 +196,30 @@ def test_lookup_secret_author_header_not_redacted():
 
     # But Authorization should be redacted
     assert serialized["headers"]["Authorization"] == "**********"
+
+
+def test_lookup_secret_relative_url_uses_current_server(monkeypatch):
+    monkeypatch.setenv("OH_INTERNAL_SERVER_URL", "http://127.0.0.1:4321")
+
+    secret = LookupSecret(url="/api/settings/secrets/OPENAI_API_KEY")
+
+    assert secret.url == "http://127.0.0.1:4321/api/settings/secrets/OPENAI_API_KEY"
+
+
+def test_lookup_secret_get_value_resolves_relative_url(monkeypatch):
+    monkeypatch.setenv("OH_INTERNAL_SERVER_URL", "http://127.0.0.1:4321")
+    response = Mock(text="resolved-secret")
+    response.raise_for_status = Mock()
+
+    with patch(
+        "openhands.sdk.secret.secrets.httpx.get", return_value=response
+    ) as mock_get:
+        secret = LookupSecret(url="api/settings/secrets/OPENAI_API_KEY")
+
+        assert secret.get_value() == "resolved-secret"
+
+    mock_get.assert_called_once_with(
+        "http://127.0.0.1:4321/api/settings/secrets/OPENAI_API_KEY",
+        headers={},
+        timeout=30.0,
+    )
