@@ -4,7 +4,10 @@ import asyncio
 import io
 import tempfile
 import time
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import UploadFile
@@ -230,6 +233,44 @@ def test_upload_file_with_special_characters_in_path(client, tmp_path):
     assert response.status_code == 200
     assert target_path.exists()
     assert target_path.read_bytes() == file_content
+
+
+def test_download_trajectory_uses_python_zipfile(client, monkeypatch, tmp_path):
+    """Trajectory downloads should not depend on an OS-level zip command."""
+    conversations_path = tmp_path / "conversations"
+    conversation_id = uuid4()
+    conversation_dir = conversations_path / conversation_id.hex
+    nested_dir = conversation_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    (conversation_dir / "meta.json").write_text("{}")
+    (nested_dir / "event.json").write_text('{"id": "event-1"}')
+
+    monkeypatch.setattr(
+        "openhands.agent_server.file_router.get_default_config",
+        lambda: Config(session_api_keys=[], conversations_path=conversations_path),
+    )
+
+    async def fail_if_shell_zip_is_used(*_args, **_kwargs):
+        raise AssertionError("download_trajectory must not shell out to zip")
+
+    monkeypatch.setattr(
+        file_router_module,
+        "bash_event_service",
+        SimpleNamespace(start_bash_command=fail_if_shell_zip_is_used),
+        raising=False,
+    )
+
+    response = client.get(f"/api/file/download-trajectory/{conversation_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.read(f"{conversation_id.hex}/meta.json") == b"{}"
+        assert archive.read(f"{conversation_id.hex}/nested/event.json") == (
+            b'{"id": "event-1"}'
+        )
+
+    assert not (conversations_path / f"{conversation_id.hex}.zip").exists()
 
 
 def test_download_file_with_special_characters_in_path(client, tmp_path):
