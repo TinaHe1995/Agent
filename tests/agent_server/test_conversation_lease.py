@@ -147,8 +147,8 @@ def test_claim_writes_owner_host_and_pid(tmp_path: Path) -> None:
     lease.claim()
     payload = _read_lease_payload(conversation_dir)
 
-    assert payload["owner_host"] == socket.gethostname()
-    assert payload["owner_pid"] == os.getpid()
+    assert payload.get("owner_host") == socket.gethostname()
+    assert payload.get("owner_pid") == os.getpid()
 
 
 def test_claim_takes_over_when_previous_owner_pid_is_dead(
@@ -189,7 +189,7 @@ def test_claim_takes_over_when_previous_owner_pid_is_dead(
     assert secondary_claim.takeover is True
     assert secondary_claim.generation == primary_claim.generation + 1
     assert new_payload["owner_instance_id"] == "secondary"
-    assert new_payload["owner_pid"] == os.getpid()
+    assert new_payload.get("owner_pid") == os.getpid()
 
 
 def test_claim_blocks_takeover_when_owner_is_on_a_different_host(

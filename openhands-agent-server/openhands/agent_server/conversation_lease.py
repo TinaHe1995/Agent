@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from filelock import FileLock
 
@@ -26,15 +26,15 @@ class LeaseClaim:
     takeover: bool
 
 
-class LeasePayload(TypedDict, total=False):
+class LeasePayload(TypedDict):
     owner_instance_id: str
     generation: int
     expires_at: float
     # Optional fields added for crash-recovery. They are absent in lease
     # files written by older versions of the agent server, so consumers
     # must treat them as optional.
-    owner_host: str
-    owner_pid: int
+    owner_host: NotRequired[str]
+    owner_pid: NotRequired[int]
 
 
 def _current_host() -> str:
