@@ -967,3 +967,168 @@ def test_activate_profile_invalid_name(client):
     # Hidden file attempt
     response = client.post("/api/profiles/.hidden/activate")
     assert response.status_code in (400, 404, 422)
+
+
+# ── Auto-Create Profile Tests ─────────────────────────────────────────────
+
+
+def test_list_profiles_auto_creates_profile_named_after_model(client):
+    """GET /api/profiles auto-creates profile named after model when API key is configured."""
+    # Configure LLM settings with API key (required for auto-creation)
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "gpt-4o", "api_key": "sk-auto-test", "temperature": 0.5}
+            }
+        },
+    )
+
+    # List profiles should auto-create a profile named after the model
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["profiles"]) == 1
+    assert body["profiles"][0]["name"] == "gpt-4o"  # Named after model
+    assert body["profiles"][0]["model"] == "gpt-4o"
+    assert body["profiles"][0]["api_key_set"] is True
+    assert body["active_profile"] == "gpt-4o"
+
+
+def test_list_profiles_auto_creates_profile_strips_provider_prefix(client):
+    """Auto-created profile strips provider prefix from model name."""
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "openai/gpt-4o-mini", "api_key": "sk-prefix-test"}
+            }
+        },
+    )
+
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Should use just "gpt-4o-mini" not "openai/gpt-4o-mini"
+    assert body["profiles"][0]["name"] == "gpt-4o-mini"
+    assert body["active_profile"] == "gpt-4o-mini"
+
+
+def test_list_profiles_auto_creates_profile_sanitizes_special_chars(client):
+    """Auto-created profile sanitizes special characters in model name."""
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "anthropic/claude-3.5-sonnet@beta", "api_key": "sk-special"}
+            }
+        },
+    )
+
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    # @ should be replaced with -
+    assert body["profiles"][0]["name"] == "claude-3.5-sonnet-beta"
+
+
+def test_list_profiles_no_auto_create_without_api_key(client):
+    """No auto-creation when agent_settings.llm has no API key."""
+    # Configure model but no API key
+    client.patch(
+        "/api/settings",
+        json={"agent_settings_diff": {"llm": {"model": "gpt-4o"}}},
+    )
+
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profiles"] == []
+    assert body["active_profile"] is None
+
+
+def test_list_profiles_no_auto_create_when_no_config(client):
+    """No auto-creation when using default settings (no explicit configuration)."""
+    # Don't configure anything - leave settings empty
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profiles"] == []
+    assert body["active_profile"] is None
+
+
+def test_list_profiles_no_auto_create_when_profiles_exist(client, store):
+    """No auto-creation when profiles already exist."""
+    # Create a profile first
+    llm = LLM(model="claude-3-opus")
+    store.save("existing-profile", llm)
+
+    # Configure different LLM in settings with API key
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "gpt-4o", "api_key": "sk-should-not-auto"}
+            }
+        },
+    )
+
+    response = client.get("/api/profiles")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Only the existing profile, no auto-created one
+    assert len(body["profiles"]) == 1
+    assert body["profiles"][0]["name"] == "existing-profile"
+
+
+def test_list_profiles_auto_create_is_idempotent(client):
+    """Multiple calls to list_profiles don't create duplicate profiles."""
+    # Configure LLM with API key
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "gpt-4o", "api_key": "sk-idempotent-test"}
+            }
+        },
+    )
+
+    # First call creates profile
+    response1 = client.get("/api/profiles")
+    assert response1.status_code == 200
+    assert len(response1.json()["profiles"]) == 1
+
+    # Second call should not create another
+    response2 = client.get("/api/profiles")
+    assert response2.status_code == 200
+    assert len(response2.json()["profiles"]) == 1
+    assert response2.json()["profiles"][0]["name"] == "gpt-4o"
+
+
+def test_auto_created_profile_persists(client, store):
+    """Auto-created profile is persisted and can be loaded."""
+    # Configure LLM with API key
+    client.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "gpt-4o", "api_key": "sk-persist-test", "temperature": 0.7}
+            }
+        },
+    )
+
+    # Trigger auto-creation
+    client.get("/api/profiles")
+
+    # Verify profile was saved with model name
+    loaded = store.load("gpt-4o")
+    assert loaded.model == "gpt-4o"
+    assert loaded.temperature == 0.7
+    assert loaded.api_key is not None
+    assert loaded.api_key.get_secret_value() == "sk-persist-test"
