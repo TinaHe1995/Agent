@@ -112,12 +112,17 @@ class TestPreloadModules:
         )
 
 
-def test_get_internal_server_url_rewrites_wildcard_host():
-    assert _get_internal_server_url("0.0.0.0", 4321) == "http://127.0.0.1:4321"
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]"])
+def test_get_internal_server_url_rewrites_wildcard_host(host):
+    assert _get_internal_server_url(host, 4321) == "http://127.0.0.1:4321"
 
 
 def test_get_internal_server_url_preserves_explicit_host():
     assert _get_internal_server_url("localhost", 4321) == "http://localhost:4321"
+
+
+def test_get_internal_server_url_brackets_ipv6_host():
+    assert _get_internal_server_url("fe80::1", 4321) == "http://[fe80::1]:4321"
 
 
 class TestMainCheckBrowserOrdering:

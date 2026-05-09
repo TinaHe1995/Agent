@@ -21,6 +21,20 @@ _INTERNAL_SERVER_URL_ENV = "OH_INTERNAL_SERVER_URL"
 
 
 def _get_internal_server_url(host: str, port: int) -> str:
+    """Build the current agent-server URL for local secret lookups.
+
+    Wildcard binds are rewritten to loopback so in-process callers can connect
+    back to the current server instance, and IPv6 literals are bracketed to
+    produce a valid URL.
+
+    Examples:
+        >>> _get_internal_server_url("0.0.0.0", 8000)
+        'http://127.0.0.1:8000'
+        >>> _get_internal_server_url("::", 8000)
+        'http://127.0.0.1:8000'
+        >>> _get_internal_server_url("fe80::1", 8000)
+        'http://[fe80::1]:8000'
+    """
     resolved_host = host
     if host in {"0.0.0.0", "::", "[::]"}:
         resolved_host = "127.0.0.1"
