@@ -353,7 +353,9 @@ class ActivateProfileResponse(BaseModel):
 
 
 @profiles_router.post("/{name}/activate", response_model=ActivateProfileResponse)
-async def activate_profile(request: Request, name: ProfileName) -> ActivateProfileResponse:
+async def activate_profile(
+    request: Request, name: ProfileName
+) -> ActivateProfileResponse:
     """Activate a saved LLM profile.
 
     This endpoint:
@@ -386,10 +388,12 @@ async def activate_profile(request: Request, name: ProfileName) -> ActivateProfi
     def apply_profile(settings: PersistedSettings) -> PersistedSettings:
         # Update the LLM configuration
         llm_dict = llm.model_dump(mode="json", context={"expose_secrets": "plaintext"})
-        settings.update({
-            "agent_settings_diff": {"llm": llm_dict},
-            "active_profile": name,
-        })
+        settings.update(
+            {
+                "agent_settings_diff": {"llm": llm_dict},
+                "active_profile": name,
+            }
+        )
         return settings
 
     try:

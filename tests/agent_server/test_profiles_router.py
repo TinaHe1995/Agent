@@ -36,7 +36,7 @@ def temp_settings_dir():
 
 @pytest.fixture
 def client(temp_profiles_dir, temp_settings_dir, monkeypatch):
-    """Create test client with isolated profiles and settings directories and NO cipher."""
+    """Create test client with isolated profiles/settings directories, no cipher."""
     # Reset store singletons to ensure clean state
     reset_stores()
 
@@ -1027,13 +1027,17 @@ def test_rename_inactive_profile_preserves_active_profile(client, store):
 
 
 def test_list_profiles_auto_creates_profile_named_after_model(client):
-    """GET /api/profiles auto-creates profile named after model when API key is configured."""
+    """Auto-creates profile named after model when API key is configured."""
     # Configure LLM settings with API key (required for auto-creation)
     client.patch(
         "/api/settings",
         json={
             "agent_settings_diff": {
-                "llm": {"model": "gpt-4o", "api_key": "sk-auto-test", "temperature": 0.5}
+                "llm": {
+                    "model": "gpt-4o",
+                    "api_key": "sk-auto-test",
+                    "temperature": 0.5,
+                }
             }
         },
     )
@@ -1076,7 +1080,10 @@ def test_list_profiles_auto_creates_profile_sanitizes_special_chars(client):
         "/api/settings",
         json={
             "agent_settings_diff": {
-                "llm": {"model": "anthropic/claude-3.5-sonnet@beta", "api_key": "sk-special"}
+                "llm": {
+                    "model": "anthropic/claude-3.5-sonnet@beta",
+                    "api_key": "sk-special",
+                }
             }
         },
     )
@@ -1172,7 +1179,11 @@ def test_auto_created_profile_persists(client, store):
         "/api/settings",
         json={
             "agent_settings_diff": {
-                "llm": {"model": "gpt-4o", "api_key": "sk-persist-test", "temperature": 0.7}
+                "llm": {
+                    "model": "gpt-4o",
+                    "api_key": "sk-persist-test",
+                    "temperature": 0.7,
+                }
             }
         },
     )
