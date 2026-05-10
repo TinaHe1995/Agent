@@ -31,7 +31,8 @@ def _mock_browser_executor_init():
     def fake_init(self, **_kwargs):
         self.full_output_save_dir = None
         self._initialized = False
-        self._cleanup_initiated = False
+        # Toolset tests never allocate browser resources; keep close() a no-op.
+        self._cleanup_initiated = True
         self._action_timeout_seconds = 30.0
         self._async_executor = MagicMock()
         self._async_executor.close = MagicMock()
@@ -188,9 +189,7 @@ def test_browser_toolset_shared_executor_reset():
         tools1 = BrowserToolSet.create(conv_state=conv_state)
         executor1 = tools1[0].executor
 
-        # Reset the singleton without leaving the discarded executor for GC.
-        assert isinstance(executor1, BrowserToolExecutor)
-        executor1.close()
+        # Reset the singleton
         BrowserToolSet._shared_executor = None
 
         tools2 = BrowserToolSet.create(conv_state=conv_state)
