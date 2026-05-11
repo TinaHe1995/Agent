@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -688,6 +689,8 @@ class TestEventServiceSendMessage:
         conversation.run = MagicMock()
 
         event_service._conversation = conversation
+        # Simulate conversation already running to test the ValueError path
+        event_service._run_task = asyncio.create_task(asyncio.sleep(10))
         message = Message(role="user", content=[])
 
         # Call send_message with run=True — should silently skip run
@@ -698,6 +701,11 @@ class TestEventServiceSendMessage:
         # and raises ValueError (caught by send_message) — so
         # conversation.run is never invoked.
         conversation.run.assert_not_called()
+
+        # Clean up the simulated running task
+        event_service._run_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await event_service._run_task
 
     @pytest.mark.asyncio
     async def test_send_message_with_run_true_agent_idle(self, event_service):
