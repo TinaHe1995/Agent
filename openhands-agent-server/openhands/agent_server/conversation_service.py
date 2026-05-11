@@ -171,15 +171,15 @@ def _prepare_request_workspace(
     if worktree is None:
         return request
 
-    workspace, source_workspace, worktree_root, branch = worktree
+    new_workspace, source_workspace, worktree_root, branch = worktree
     agent = _append_worktree_guidance(
         request.agent,
         source_workspace=source_workspace,
         worktree_root=worktree_root,
-        workspace_dir=Path(workspace.working_dir),
+        workspace_dir=Path(new_workspace.working_dir),
         branch=branch,
     )
-    return request.model_copy(update={"workspace": workspace, "agent": agent})
+    return request.model_copy(update={"workspace": new_workspace, "agent": agent})
 
 
 logger = logging.getLogger(__name__)
@@ -282,7 +282,7 @@ def _register_agent_definitions(
                 f"Failed to register agent definition "
                 f"'{agent_def.name}' ({context}): {e}"
             )
-    logger.info(
+    logger.debug(
         f"Registered {registered}/{len(agent_defs)} agent definition(s) ({context})"
     )
 
@@ -919,7 +919,7 @@ class ConversationService:
                             )
                             # Continue even if some tools fail to register
                     if stored.tool_module_qualnames:
-                        logger.info(
+                        logger.debug(
                             f"Dynamically registered "
                             f"{len(stored.tool_module_qualnames)} tools when "
                             f"resuming conversation {stored.id}: "
@@ -936,7 +936,7 @@ class ConversationService:
                 conversation_id = (
                     stored.id if stored is not None else conversation_dir.name
                 )
-                logger.info(
+                logger.debug(
                     "Skipping active conversation %s owned by %s until %s",
                     conversation_id,
                     exc.owner_instance_id,
@@ -993,28 +993,32 @@ class ConversationService:
             cipher=self.cipher,
             owner_instance_id=self.owner_instance_id,
         )
-        # Create subscribers...
-        await event_service.subscribe_to_events(_EventSubscriber(service=event_service))
-        if stored.autotitle and stored.title is None:
-            await event_service.subscribe_to_events(
-                AutoTitleSubscriber(service=event_service)
-            )
-        asyncio.gather(
-            *[
-                event_service.subscribe_to_events(
-                    WebhookSubscriber(
-                        conversation_id=stored.id,
-                        service=event_service,
-                        spec=webhook_spec,
-                        session_api_key=self.session_api_key,
-                    )
-                )
-                for webhook_spec in self.webhook_specs
-            ]
-        )
 
         try:
             await event_service.start()
+            # Register subscribers after start() so subscribe_to_events runs
+            # its initial-state push synchronously and any failure surfaces to
+            # the caller instead of being silently logged on a later publish.
+            await event_service.subscribe_to_events(
+                _EventSubscriber(service=event_service)
+            )
+            if stored.autotitle and stored.title is None:
+                await event_service.subscribe_to_events(
+                    AutoTitleSubscriber(service=event_service)
+                )
+            await asyncio.gather(
+                *[
+                    event_service.subscribe_to_events(
+                        WebhookSubscriber(
+                            conversation_id=stored.id,
+                            service=event_service,
+                            spec=webhook_spec,
+                            session_api_key=self.session_api_key,
+                        )
+                    )
+                    for webhook_spec in self.webhook_specs
+                ]
+            )
             # Save metadata immediately after successful start to ensure persistence
             # even if the system is not shut down gracefully
             await event_service.save_meta()
@@ -1195,8 +1199,15 @@ class WebhookSubscriber(Subscriber):
                         f"Failed to post events to webhook {events_url} "
                         f"after {self.spec.num_retries + 1} attempts"
                     )
-                    # Re-queue events for potential retry later
                     self.queue.extend(events_to_post)
+                    overflow = len(self.queue) - self.spec.max_queue_size
+                    if overflow > 0:
+                        del self.queue[:overflow]
+                        logger.warning(
+                            f"Webhook queue exceeded max_queue_size="
+                            f"{self.spec.max_queue_size}; dropped {overflow} "
+                            f"oldest event(s) for {events_url}."
+                        )
 
     def _cancel_flush_timer(self):
         """Cancel the current flush timer if it exists."""
