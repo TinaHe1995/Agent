@@ -60,8 +60,11 @@ def test_switch_llm_tool_switches_conversation_profile(profile_store):
     assert isinstance(observation, SwitchLLMObservation)
     assert not observation.is_error
     assert observation.profile_name == "fast"
+    assert observation.reason == "Need a faster profile."
     assert observation.active_model == "fast-model"
     assert "active model 'fast-model'" in observation.text
+    assert "Reason: Need a faster profile." in observation.text
+    assert "Need a faster profile." in observation.visualize.plain
     assert conversation.agent.llm.model == "fast-model"
     assert conversation.state.agent.llm.model == "fast-model"
 
@@ -77,7 +80,34 @@ def test_switch_llm_tool_reports_missing_profile(profile_store):
     assert isinstance(observation, SwitchLLMObservation)
     assert observation.is_error
     assert observation.profile_name == "missing"
+    assert observation.reason == "Try another model."
     assert observation.active_model is None
     assert "was not found" in observation.text
+    assert conversation.agent.llm.model == "default-model"
+    assert conversation.state.agent.llm.model == "default-model"
+
+
+def test_switch_llm_tool_reports_unexpected_profile_load_error(
+    profile_store, monkeypatch: pytest.MonkeyPatch
+):
+    conversation = _make_conversation()
+
+    def _raise_permission_error(profile_name: str) -> None:
+        raise PermissionError(f"Cannot read {profile_name}")
+
+    monkeypatch.setattr(conversation, "switch_profile", _raise_permission_error)
+
+    observation = conversation.execute_tool(
+        "switch_llm",
+        SwitchLLMAction(profile_name="fast", reason="Need access to Claude."),
+    )
+
+    assert isinstance(observation, SwitchLLMObservation)
+    assert observation.is_error
+    assert observation.profile_name == "fast"
+    assert observation.reason == "Need access to Claude."
+    assert observation.active_model is None
+    assert "PermissionError" in observation.text
+    assert "Cannot read fast" in observation.text
     assert conversation.agent.llm.model == "default-model"
     assert conversation.state.agent.llm.model == "default-model"

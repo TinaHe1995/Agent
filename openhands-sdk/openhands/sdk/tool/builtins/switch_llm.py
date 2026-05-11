@@ -46,6 +46,10 @@ class SwitchLLMObservation(Observation):
     profile_name: str = Field(
         description="Name of the profile that the tool attempted to activate."
     )
+    reason: str | None = Field(
+        default=None,
+        description="Reason the agent gave for attempting this LLM profile switch.",
+    )
     active_model: str | None = Field(
         default=None,
         description="Model configured by the activated profile, when available.",
@@ -61,6 +65,9 @@ class SwitchLLMObservation(Observation):
         content.append(f": {self.profile_name}")
         if self.active_model:
             content.append(f" ({self.active_model})")
+        if self.reason:
+            content.append("\nReason: ", style="bold")
+            content.append(self.reason)
         return content
 
 
@@ -93,6 +100,7 @@ class SwitchLLMExecutor(ToolExecutor):
                 text="Cannot switch LLM profile without an active conversation.",
                 is_error=True,
                 profile_name=action.profile_name,
+                reason=action.reason,
             )
 
         try:
@@ -102,22 +110,35 @@ class SwitchLLMExecutor(ToolExecutor):
                 text=f"LLM profile '{action.profile_name}' was not found.",
                 is_error=True,
                 profile_name=action.profile_name,
+                reason=action.reason,
             )
         except ValueError as exc:
             return SwitchLLMObservation.from_text(
                 text=str(exc),
                 is_error=True,
                 profile_name=action.profile_name,
+                reason=action.reason,
+            )
+        except Exception as exc:
+            return SwitchLLMObservation.from_text(
+                text=(
+                    f"Failed to switch LLM profile '{action.profile_name}': "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                is_error=True,
+                profile_name=action.profile_name,
+                reason=action.reason,
             )
 
         active_model = conversation.agent.llm.model
         return SwitchLLMObservation.from_text(
             text=(
                 f"Switched LLM profile to '{action.profile_name}' "
-                f"with active model '{active_model}'. Future agent steps will "
-                "use this profile."
+                f"with active model '{active_model}'. Reason: {action.reason} "
+                "Future agent steps will use this profile."
             ),
             profile_name=action.profile_name,
+            reason=action.reason,
             active_model=active_model,
         )
 
