@@ -110,6 +110,105 @@ class SettingsSchema(BaseModel):
 CriticMode = Literal["finish_and_message", "all_actions"]
 SecurityAnalyzerType = Literal["llm", "none"]
 
+PlanLevel = Literal["none", "some", "lots"]
+"""How much research the agent should do before starting work.
+
+``none``
+    Jump right into working as soon as you can.
+``some`` (default)
+    Look around a bit before you start working.
+``lots``
+    Do extensive research before you start working.
+"""
+
+VerifyLevel = Literal["none", "some", "lots"]
+"""How much testing / QA the agent should do when finishing.
+
+``none``
+    Don't run any tests, lint, etc. when you're done.
+``some`` (default)
+    Run basic linting and only run affected / new tests, do basic QA
+    that won't take too much time.
+``lots``
+    Run the full test suite, do any QA you can to ensure it's working.
+"""
+
+SaveMode = Literal["worktree", "local", "push", "pr", "pr_ready", "merge"]
+"""How the agent should deliver its work when done.
+
+``worktree`` (default)
+    Keep your work on the local worktree / workspace.
+``local``
+    When done, move your branch over to the main workspace.
+``push``
+    When done, push your changes to the remote.
+``pr``
+    When done, open a pull request.
+``pr_ready``
+    When done, open a pull request and keep working until CI passes
+    and review feedback has been addressed.
+``merge``
+    When done, open a pull request and keep working until it's
+    mergeable, then merge it.
+"""
+
+
+class AgentControls(BaseModel):
+    """High-level controls that govern how the agent approaches a task.
+
+    The three controls — :attr:`plan`, :attr:`verify`, and :attr:`save` — are
+    workflow knobs the user can dial in for a conversation. Defaults are
+    persisted in agent-server settings; the user can change them mid-
+    conversation by sending a message to the agent, which should then honor
+    the new values for the rest of the conversation.
+    """
+
+    plan: PlanLevel = Field(
+        default="some",
+        description=(
+            "How much research/analysis to do before starting work. "
+            "``none`` = jump in immediately, ``some`` = look around a bit, "
+            "``lots`` = do extensive research."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Plan",
+                prominence=SettingProminence.MAJOR,
+            ).model_dump()
+        },
+    )
+    verify: VerifyLevel = Field(
+        default="some",
+        description=(
+            "How much testing/QA to do when finishing. "
+            "``none`` = skip tests/lint, ``some`` = basic lint and affected "
+            "tests, ``lots`` = full test suite."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Verify",
+                prominence=SettingProminence.MAJOR,
+            ).model_dump()
+        },
+    )
+    save: SaveMode = Field(
+        default="worktree",
+        description=(
+            "How to deliver the work when done. "
+            "``worktree`` = keep on the local worktree, ``local`` = move "
+            "branch into main workspace, ``push`` = push to remote, "
+            "``pr`` = open a pull request, ``pr_ready`` = open a PR and "
+            "iterate until CI / review pass, ``merge`` = open a PR and "
+            "merge once mergeable."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Save",
+                prominence=SettingProminence.MAJOR,
+            ).model_dump()
+        },
+    )
+
 
 class CondenserSettings(BaseModel):
     enabled: bool = Field(
@@ -299,7 +398,7 @@ def _default_llm_settings() -> LLM:
 _RequestT = TypeVar("_RequestT")
 
 AGENT_SETTINGS_SCHEMA_VERSION = 2
-CONVERSATION_SETTINGS_SCHEMA_VERSION = 1
+CONVERSATION_SETTINGS_SCHEMA_VERSION = 2
 
 
 class AgentSettingsBase(BaseModel):
@@ -440,12 +539,28 @@ def _migrate_conversation_settings_v0_to_v1(
     return migrated
 
 
+def _migrate_conversation_settings_v1_to_v2(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Add the ``controls`` block introduced in v1.20.0.
+
+    Pre-existing persisted payloads simply pick up the default controls
+    (``plan='some'``, ``verify='some'``, ``save='worktree'``) — they match
+    OpenHands' prior implicit behavior, so no field-level migration is
+    needed.
+    """
+    migrated = dict(payload)
+    migrated["schema_version"] = 2
+    return migrated
+
+
 _AGENT_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_agent_settings_v0_to_v1,
     1: _migrate_agent_settings_v1_to_v2,
 }
 _CONVERSATION_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_conversation_settings_v0_to_v1,
+    1: _migrate_conversation_settings_v1_to_v2,
 }
 
 
@@ -547,6 +662,20 @@ class ConversationSettings(BaseModel):
             ).model_dump(),
         },
     )
+    controls: AgentControls = Field(
+        default_factory=AgentControls,
+        description=(
+            "Workflow controls (Plan / Verify / Save) that govern how the agent "
+            "approaches a task. Defaults set here apply to every new conversation; "
+            "the user can change them mid-conversation by sending a message."
+        ),
+        json_schema_extra={
+            SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
+                key="controls",
+                label="Controls",
+            ).model_dump()
+        },
+    )
 
     @classmethod
     def export_schema(cls) -> SettingsSchema:
@@ -587,6 +716,21 @@ class ConversationSettings(BaseModel):
             return LLMSecurityAnalyzer()
         return None
 
+    @staticmethod
+    def _agent_supports_controls(agent: Any) -> bool:
+        """Return ``True`` when ``agent`` renders its own system prompt.
+
+        ACP agents delegate to an external subprocess that owns the system
+        prompt, so injecting controls into ``system_prompt_kwargs`` has no
+        effect there. We detect them by the presence of ``acp_command``,
+        which is unique to :class:`ACPAgent`.
+        """
+        if not isinstance(getattr(agent, "system_prompt_kwargs", None), dict):
+            return False
+        if hasattr(agent, "acp_command"):
+            return False
+        return True
+
     def _start_request_kwargs(self, **kwargs: Any) -> dict[str, Any]:
         payload = dict(kwargs)
 
@@ -597,6 +741,19 @@ class ConversationSettings(BaseModel):
         # ``self.agent_settings.create_agent()`` directly.
         if "agent" not in payload and self.agent_settings is not None:
             payload["agent"] = self.agent_settings.create_agent()
+
+        # --- controls (Plan / Verify / Save) --------------------------------
+        # Inject the workflow controls into the agent's system_prompt_kwargs
+        # so the rendered system prompt reflects the current values. ACP
+        # agents own their own prompt, so we skip them — the controls remain
+        # available on ConversationSettings for callers that want to read
+        # them directly.
+        agent = payload.get("agent")
+        if agent is not None and self._agent_supports_controls(agent):
+            new_kwargs = {**agent.system_prompt_kwargs, "controls": self.controls}
+            payload["agent"] = agent.model_copy(
+                update={"system_prompt_kwargs": new_kwargs}
+            )
 
         # --- secrets (from agent's context) ---------------------------------
         # ACPAgent may carry prompt-only context, but its execution context is

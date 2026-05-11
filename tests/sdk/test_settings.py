@@ -147,7 +147,7 @@ def test_conversation_settings_export_schema_groups_sections() -> None:
 
     assert schema.model_name == "ConversationSettings"
     section_keys = [section.key for section in schema.sections]
-    assert section_keys == ["general", "verification"]
+    assert section_keys == ["general", "verification", "controls"]
 
     sections = {s.key: s for s in schema.sections}
     general_fields = {f.key: f for f in sections["general"].fields}
@@ -168,6 +168,29 @@ def test_conversation_settings_export_schema_groups_sections() -> None:
     assert verification_fields["security_analyzer"].default == "llm"
     assert verification_fields["security_analyzer"].choices[0].value == "llm"
     assert verification_fields["security_analyzer"].depends_on == ["confirmation_mode"]
+
+    controls_fields = {f.key: f for f in sections["controls"].fields}
+    assert set(controls_fields) == {
+        "controls.plan",
+        "controls.verify",
+        "controls.save",
+    }
+    assert controls_fields["controls.plan"].default == "some"
+    assert {c.value for c in controls_fields["controls.plan"].choices} == {
+        "none",
+        "some",
+        "lots",
+    }
+    assert controls_fields["controls.verify"].default == "some"
+    assert controls_fields["controls.save"].default == "worktree"
+    assert {c.value for c in controls_fields["controls.save"].choices} == {
+        "worktree",
+        "local",
+        "push",
+        "pr",
+        "pr_ready",
+        "merge",
+    }
 
 
 def test_conversation_settings_model_dump_roundtrip() -> None:
@@ -386,13 +409,27 @@ def test_agent_settings_from_persisted_rejects_newer_schema_version() -> None:
 def test_conversation_settings_from_persisted_migrates_v0_payload() -> None:
     settings = ConversationSettings.from_persisted({"max_iterations": 42})
 
-    assert settings.schema_version == 1
+    assert settings.schema_version == 2
     assert settings.max_iterations == 42
+    # v0 -> v2 migration leaves the new controls block at defaults.
+    assert settings.controls.plan == "some"
+    assert settings.controls.verify == "some"
+    assert settings.controls.save == "worktree"
+
+
+def test_conversation_settings_from_persisted_migrates_v1_payload() -> None:
+    settings = ConversationSettings.from_persisted(
+        {"schema_version": 1, "max_iterations": 99}
+    )
+
+    assert settings.schema_version == 2
+    assert settings.max_iterations == 99
+    assert settings.controls.plan == "some"
 
 
 def test_conversation_settings_from_persisted_rejects_newer_schema_version() -> None:
-    with pytest.raises(ValueError, match="newer than supported version 1"):
-        ConversationSettings.from_persisted({"schema_version": 2})
+    with pytest.raises(ValueError, match="newer than supported version 2"):
+        ConversationSettings.from_persisted({"schema_version": 3})
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +793,97 @@ def test_conversation_settings_agent_settings_field_accepts_both_variants() -> N
         agent_settings=ACPAgentSettings(acp_command=["x"]),
     )
     assert isinstance(acp_conv.agent_settings, ACPAgentSettings)
+
+
+# ---------------------------------------------------------------------------
+# AgentControls
+# ---------------------------------------------------------------------------
+
+
+def test_agent_controls_defaults_match_spec() -> None:
+    from openhands.sdk import AgentControls
+
+    controls = AgentControls()
+    assert controls.plan == "some"
+    assert controls.verify == "some"
+    assert controls.save == "worktree"
+
+
+def test_agent_controls_validates_options() -> None:
+    from pydantic import ValidationError
+
+    from openhands.sdk import AgentControls
+
+    AgentControls(plan="lots", verify="none", save="pr_ready")
+
+    with pytest.raises(ValidationError):
+        AgentControls(plan="aggressive")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        AgentControls(save="rebase")  # type: ignore[arg-type]
+
+
+def test_conversation_settings_carries_controls_default() -> None:
+    settings = ConversationSettings()
+    assert settings.controls.plan == "some"
+    assert settings.controls.verify == "some"
+    assert settings.controls.save == "worktree"
+
+
+def test_conversation_settings_create_request_injects_controls_into_prompt() -> None:
+    from openhands.sdk import AgentControls
+
+    settings = ConversationSettings(
+        controls=AgentControls(plan="lots", verify="none", save="pr"),
+    )
+    workspace = LocalWorkspace(working_dir="/tmp")
+    agent = OpenHandsAgentSettings(llm=LLM(model="test-model")).create_agent()
+
+    request = settings.create_request(
+        StartConversationRequest,
+        agent=agent,
+        workspace=workspace,
+    )
+
+    # The agent on the request should have controls in its system_prompt_kwargs.
+    assert isinstance(request.agent, Agent)
+    assert request.agent.system_prompt_kwargs.get("controls") == AgentControls(
+        plan="lots", verify="none", save="pr"
+    )
+
+    # And the rendered system prompt should advertise the values.
+    rendered = request.agent.static_system_message
+    assert "<CONTROLS>" in rendered
+    assert "Currently selected: `lots`" in rendered
+    assert "Currently selected: `none`" in rendered
+    assert "Currently selected: `pr`" in rendered
+
+
+def test_conversation_settings_create_request_skips_controls_for_acp() -> None:
+    """ACP agents own their own prompt, so we don't inject controls there."""
+    from openhands.sdk import AgentControls
+
+    settings = ConversationSettings(
+        controls=AgentControls(plan="lots", verify="lots", save="merge"),
+    )
+    workspace = LocalWorkspace(working_dir="/tmp")
+    agent = ACPAgent(acp_command=["echo", "test"])
+
+    request = settings.create_request(
+        StartACPConversationRequest,
+        agent=agent,
+        workspace=workspace,
+    )
+
+    # ACP agent's system_prompt_kwargs is left untouched.
+    assert request.agent.system_prompt_kwargs == {}
+
+
+def test_default_system_prompt_omits_controls_section_when_unset() -> None:
+    """An ``Agent`` built without controls should not advertise a CONTROLS block."""
+    agent = OpenHandsAgentSettings(llm=LLM(model="test-model")).create_agent()
+
+    rendered = agent.static_system_message
+    assert "<CONTROLS>" not in rendered
 
 
 # ---------------------------------------------------------------------------
