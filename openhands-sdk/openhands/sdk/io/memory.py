@@ -3,6 +3,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Final
 
 from openhands.sdk.io.base import FileStore
 from openhands.sdk.io.cache import MemoryLRUCache
@@ -11,8 +12,8 @@ from openhands.sdk.logger import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_MAX_SIZE = 500
-_DEFAULT_MAX_MEMORY = 20 * 1024 * 1024  # 20 MB
+_DEFAULT_MAX_SIZE: Final = 500
+_DEFAULT_MAX_MEMORY: Final = 20 * 1024 * 1024  # 20 MB
 
 
 class InMemoryFileStore(FileStore):
