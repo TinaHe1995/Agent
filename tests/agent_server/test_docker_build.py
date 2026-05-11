@@ -372,6 +372,20 @@ def test_versioned_tags_use_sdk_version_for_semver_git_tags():
     assert opts.versioned_tags == ["1-python", "1.2-python", "1.2.3-python"]
 
 
+def test_versioned_tags_semver_git_tag_strips_v_when_sdk_version_unknown():
+    """Semver git tags still produce bare semver even if sdk_version is unknown."""
+    from openhands.agent_server.docker.build import BuildOptions
+
+    opts = BuildOptions(
+        custom_tags="python",
+        git_ref="refs/tags/v1.2.3",
+        sdk_version="unknown",
+        include_versioned_tag=True,
+    )
+
+    assert opts.versioned_tags == ["1-python", "1.2-python", "1.2.3-python"]
+
+
 def test_versioned_tags_fallback_to_sdk_version_aliases():
     """Test versioned_tags fall back to the SDK version when no git tag exists."""
     from openhands.agent_server.docker.build import BuildOptions
