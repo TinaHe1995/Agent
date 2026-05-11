@@ -171,15 +171,15 @@ def _prepare_request_workspace(
     if worktree is None:
         return request
 
-    workspace, source_workspace, worktree_root, branch = worktree
+    new_workspace, source_workspace, worktree_root, branch = worktree
     agent = _append_worktree_guidance(
         request.agent,
         source_workspace=source_workspace,
         worktree_root=worktree_root,
-        workspace_dir=Path(workspace.working_dir),
+        workspace_dir=Path(new_workspace.working_dir),
         branch=branch,
     )
-    return request.model_copy(update={"workspace": workspace, "agent": agent})
+    return request.model_copy(update={"workspace": new_workspace, "agent": agent})
 
 
 logger = logging.getLogger(__name__)
@@ -282,7 +282,7 @@ def _register_agent_definitions(
                 f"Failed to register agent definition "
                 f"'{agent_def.name}' ({context}): {e}"
             )
-    logger.info(
+    logger.debug(
         f"Registered {registered}/{len(agent_defs)} agent definition(s) ({context})"
     )
 
@@ -919,7 +919,7 @@ class ConversationService:
                             )
                             # Continue even if some tools fail to register
                     if stored.tool_module_qualnames:
-                        logger.info(
+                        logger.debug(
                             f"Dynamically registered "
                             f"{len(stored.tool_module_qualnames)} tools when "
                             f"resuming conversation {stored.id}: "
@@ -936,7 +936,7 @@ class ConversationService:
                 conversation_id = (
                     stored.id if stored is not None else conversation_dir.name
                 )
-                logger.info(
+                logger.debug(
                     "Skipping active conversation %s owned by %s until %s",
                     conversation_id,
                     exc.owner_instance_id,
