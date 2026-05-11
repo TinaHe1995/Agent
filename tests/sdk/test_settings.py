@@ -817,9 +817,7 @@ def test_openhands_agent_settings_mcp_config_redacts_env_and_headers() -> None:
     assert leaky["headers"]["Authorization"] == "Bearer tok-mcp-secret"
 
 
-def test_openhands_agent_settings_mcp_config_encrypts_env_and_headers_with_cipher() -> (  # noqa: E501
-    None
-):
+def test_mcp_config_encrypts_env_and_headers_with_cipher() -> None:
     """When a cipher is in the serialization context (the on-disk persistence
     path), MCP ``env`` / ``headers`` values must be encrypted per-value with
     that cipher — the same way other secret fields are persisted.

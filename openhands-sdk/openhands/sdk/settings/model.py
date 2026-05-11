@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Mapping
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+)
 from uuid import UUID
 
-from cryptography.fernet import InvalidToken
 from fastmcp.mcp_config import MCPConfig
 from pydantic import (
     BaseModel,
@@ -30,8 +39,12 @@ from openhands.sdk.logger import get_logger
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.subagent.schema import AgentDefinition
 from openhands.sdk.tool import Tool
-from openhands.sdk.utils.cipher import Cipher
-from openhands.sdk.utils.pydantic_secrets import MissingCipherError, serialize_secret
+from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
+from openhands.sdk.utils.pydantic_secrets import (
+    MissingCipherError,
+    resolve_expose_mode,
+    serialize_secret,
+)
 from openhands.sdk.utils.redact import sanitize_dict
 from openhands.sdk.workspace import LocalWorkspace
 
@@ -59,11 +72,9 @@ def _walk_mcp_secret_values(
     config: dict[str, Any],
     transform: Callable[[str], str],
 ) -> dict[str, Any]:
-    """Apply ``transform`` to every string value inside ``env`` / ``headers``
-    dicts of each MCP server in ``config`` (a dumped ``MCPConfig`` dict).
-
-    Mutates and returns ``config``.
-    """
+    """Return a copy of ``config`` with ``transform`` applied to every string
+    value inside each MCP server's ``env`` / ``headers``. Does not mutate input."""
+    config = copy.deepcopy(config)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         return config
@@ -81,31 +92,24 @@ def _walk_mcp_secret_values(
     return config
 
 
-# Fernet tokens always begin with the URL-safe base64 of version byte 0x80,
-# i.e. "gAAAAA". Gate decryption attempts on this prefix so genuine plaintext
-# values (legacy on-disk data from before per-value MCP encryption) pass
-# through untouched — and we don't spam the cipher's failure log.
-_FERNET_TOKEN_PREFIX = "gAAAAA"
-
-
 def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
     """Decrypt ``value`` with ``cipher``; return the original string if the
     value isn't a Fernet token (legacy plaintext) or fails to decrypt
     (cipher mismatch / corruption — logged once).
     """
-    if not value.startswith(_FERNET_TOKEN_PREFIX):
+    if not value.startswith(FERNET_TOKEN_PREFIX):
         # Not encrypted (legacy plaintext) — passes through quietly so the
         # next save can re-encrypt it.
         return value
-    try:
-        return cipher._get_fernet().decrypt(value.encode()).decode()
-    except InvalidToken:
+    decrypted = cipher.try_decrypt_str(value)
+    if decrypted is None:
         logger.warning(
             "MCP env/headers value looks encrypted but could not be "
             "decrypted (cipher mismatch or corruption); leaving the "
             "ciphertext in place."
         )
         return value
+    return decrypted
 
 
 SettingsValueType = Literal[
@@ -861,30 +865,23 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             return {}
         dumped = value.model_dump(exclude_none=True, exclude_defaults=True)
         ctx = info.context or {}
-        expose_mode = ctx.get("expose_secrets")
-        cipher: Cipher | None = ctx.get("cipher")
+        mode = resolve_expose_mode(ctx)
 
-        # Plaintext: caller explicitly asked for raw values (backend trusted
-        # path; e.g. ``X-Expose-Secrets: plaintext``).
-        if expose_mode == "plaintext" or expose_mode is True:
+        if mode == "plaintext":
             return dumped
 
-        # Encrypted: encrypt every ``env`` / ``headers`` value with the
-        # cipher. Triggered by either an explicit
-        # ``expose_secrets="encrypted"`` request (frontend-safe round trip)
-        # or the presence of a ``cipher`` (the on-disk persistence path —
-        # ``FileSettingsStore.save`` passes only ``{"cipher": cipher}``).
-        if expose_mode == "encrypted" or cipher is not None:
+        if mode == "encrypted":
+            cipher: Cipher | None = ctx.get("cipher")
             if cipher is None:
                 raise MissingCipherError(
                     "Cannot encrypt MCP env/headers: no cipher configured. "
                     "Set OH_SECRET_KEY environment variable."
                 )
+            # cipher.encrypt returns None only for None input; SecretStr(v) never is.
             return _walk_mcp_secret_values(
-                dumped, lambda v: cipher.encrypt(SecretStr(v)) or ""
+                dumped, lambda v: cast(str, cipher.encrypt(SecretStr(v)))
             )
 
-        # Default REST response: redact ``env`` / ``headers`` values.
         return sanitize_dict(dumped)
 
     def create_agent(self) -> Agent:
