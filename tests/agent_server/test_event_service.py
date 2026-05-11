@@ -364,7 +364,7 @@ class TestEventServiceSearchEvents:
             )
             for i in range(total)
         ]
-        wrapper = _CountingEvents(events)
+        wrapper = _CountingEvents(cast(list[Event], events))
 
         conversation = MagicMock(spec=Conversation)
         state = MagicMock(spec=ConversationState)
