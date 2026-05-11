@@ -12,7 +12,7 @@ from openhands.sdk.logger import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_MAX_SIZE: Final = 500
+_DEFAULT_MAX_SIZE: Final = 100_000
 _DEFAULT_MAX_MEMORY: Final = 20 * 1024 * 1024  # 20 MB
 
 
