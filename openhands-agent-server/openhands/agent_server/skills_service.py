@@ -608,14 +608,19 @@ def service_get_marketplace_catalog(
     installed_skills = service_list_installed_skills(installed_dir=installed_dir)
     installed_names = {skill.name for skill in installed_skills}
 
-    # Build catalog from plugins and skills, deduplicating by name
+    # Build catalog from plugins and skills.
+    # Plugins take priority: if a name appears in both plugins and skills,
+    # the plugin version is used (since plugins are added first).
     catalog_dict: dict[str, MarketplaceSkillInfo] = {}
 
     for plugin in marketplace.plugins:
         # Resolve source URL
         source, ref, subpath = marketplace.resolve_plugin_source(plugin)
 
-        # Build full source string
+        # Build full source string for marketplace catalog.
+        # Format: "github:owner/repo@ref/path" - the SDK's install_skill
+        # can parse this format, so frontends can pass it directly to the
+        # install endpoint's source field.
         if ref:
             source = f"{source}@{ref}"
         if subpath:
