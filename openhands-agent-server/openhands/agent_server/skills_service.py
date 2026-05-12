@@ -22,8 +22,16 @@ from pathlib import Path
 
 from openhands.sdk.logger import get_logger
 from openhands.sdk.skills import (
+    InstalledSkillInfo,
     Skill,
+    disable_skill,
+    enable_skill,
+    get_installed_skill,
+    install_skill,
+    list_installed_skills,
     load_available_skills,
+    uninstall_skill,
+    update_skill,
 )
 from openhands.sdk.skills.skill import (
     DEFAULT_MARKETPLACE_PATH,
@@ -386,3 +394,148 @@ def sync_public_skills() -> tuple[bool, str]:
     except Exception as e:
         logger.warning(f"Failed to sync skills repository: {e}")
         return (False, f"Sync failed: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Installed Skills Management (CRUD Operations)
+# ---------------------------------------------------------------------------
+
+
+def service_install_skill(
+    source: str,
+    ref: str | None = None,
+    repo_path: str | None = None,
+    force: bool = False,
+    installed_dir: Path | None = None,
+) -> InstalledSkillInfo:
+    """Install a skill from a source.
+
+    Args:
+        source: Skill source - git URL, GitHub shorthand, or local path.
+            Supports formats like:
+            - GitHub URL: https://github.com/OpenHands/extensions/tree/main/skills/github
+            - GitHub shorthand: github:OpenHands/extensions/skills/github
+            - Local path: /path/to/skill
+        ref: Optional branch, tag, or commit to install.
+        repo_path: Subdirectory path within the repository (for monorepos).
+        force: If True, overwrite existing installation.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        InstalledSkillInfo with details about the installation.
+
+    Raises:
+        FileExistsError: If skill is already installed and force=False.
+        SkillFetchError: If fetching the skill source fails.
+        SkillValidationError: If the skill is invalid.
+    """
+    return install_skill(
+        source=source,
+        ref=ref,
+        repo_path=repo_path,
+        force=force,
+        installed_dir=installed_dir,
+    )
+
+
+def service_uninstall_skill(
+    name: str,
+    installed_dir: Path | None = None,
+) -> bool:
+    """Uninstall a skill by name.
+
+    Args:
+        name: Name of the skill to uninstall.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        True if the skill was uninstalled, False if it wasn't installed.
+    """
+    return uninstall_skill(name=name, installed_dir=installed_dir)
+
+
+def service_enable_skill(
+    name: str,
+    installed_dir: Path | None = None,
+) -> bool:
+    """Enable an installed skill by name.
+
+    Args:
+        name: Name of the skill to enable.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        True if the skill was enabled, False if it wasn't found.
+    """
+    return enable_skill(name=name, installed_dir=installed_dir)
+
+
+def service_disable_skill(
+    name: str,
+    installed_dir: Path | None = None,
+) -> bool:
+    """Disable an installed skill by name.
+
+    Args:
+        name: Name of the skill to disable.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        True if the skill was disabled, False if it wasn't found.
+    """
+    return disable_skill(name=name, installed_dir=installed_dir)
+
+
+def service_list_installed_skills(
+    installed_dir: Path | None = None,
+) -> list[InstalledSkillInfo]:
+    """List all installed skills.
+
+    Self-healing: reconciles metadata with what is on disk.
+
+    Args:
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        List of InstalledSkillInfo objects for all installed skills.
+    """
+    return list_installed_skills(installed_dir=installed_dir)
+
+
+def service_get_installed_skill(
+    name: str,
+    installed_dir: Path | None = None,
+) -> InstalledSkillInfo | None:
+    """Get information about a specific installed skill.
+
+    Args:
+        name: Name of the skill to get.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        InstalledSkillInfo if found, None otherwise.
+    """
+    return get_installed_skill(name=name, installed_dir=installed_dir)
+
+
+def service_update_skill(
+    name: str,
+    installed_dir: Path | None = None,
+) -> InstalledSkillInfo | None:
+    """Update an installed skill to the latest version.
+
+    Args:
+        name: Name of the skill to update.
+        installed_dir: Directory for installed skills.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        Updated InstalledSkillInfo if successful, None if skill not found.
+    """
+    return update_skill(name=name, installed_dir=installed_dir)

@@ -6,13 +6,25 @@ Business logic is delegated to skills_service.py.
 
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from openhands.agent_server.skills_service import (
     ExposedUrlData,
     load_all_skills,
+    service_disable_skill,
+    service_enable_skill,
+    service_get_installed_skill,
+    service_install_skill,
+    service_list_installed_skills,
+    service_uninstall_skill,
+    service_update_skill,
     sync_public_skills,
+)
+from openhands.sdk.skills import (
+    InstalledSkillInfo,
+    SkillFetchError,
+    SkillValidationError,
 )
 from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
 
@@ -112,6 +124,90 @@ class SyncResponse(BaseModel):
     message: str
 
 
+# ---------------------------------------------------------------------------
+# Installed Skills Management Models
+# ---------------------------------------------------------------------------
+
+
+class InstallSkillRequest(BaseModel):
+    """Request body for installing a skill."""
+
+    source: str = Field(
+        description=(
+            "Skill source - git URL, GitHub shorthand, or local path. "
+            "Examples: "
+            "'https://github.com/OpenHands/extensions/tree/main/skills/github', "
+            "'github:OpenHands/extensions/skills/github', "
+            "'/path/to/skill'"
+        )
+    )
+    ref: str | None = Field(
+        default=None,
+        description="Optional branch, tag, or commit to install",
+    )
+    repo_path: str | None = Field(
+        default=None,
+        description="Subdirectory path within the repository (for monorepos)",
+    )
+    force: bool = Field(
+        default=False,
+        description="If true, overwrite existing installation",
+    )
+
+
+class InstalledSkillResponse(BaseModel):
+    """Response containing installed skill information."""
+
+    name: str = Field(description="Skill name")
+    version: str = Field(default="", description="Skill version")
+    description: str = Field(default="", description="Skill description")
+    enabled: bool = Field(default=True, description="Whether the skill is enabled")
+    source: str = Field(description="Original source (e.g., 'github:owner/repo')")
+    resolved_ref: str | None = Field(
+        default=None, description="Resolved git commit SHA"
+    )
+    repo_path: str | None = Field(
+        default=None, description="Subdirectory path within the repository"
+    )
+    installed_at: str = Field(description="ISO 8601 timestamp of installation")
+    install_path: str = Field(description="Path where the skill is installed")
+
+
+class InstalledSkillsListResponse(BaseModel):
+    """Response containing list of installed skills."""
+
+    skills: list[InstalledSkillResponse]
+
+
+class UpdateSkillStateRequest(BaseModel):
+    """Request body for updating skill state (enable/disable)."""
+
+    enabled: bool = Field(description="Whether to enable or disable the skill")
+
+
+class UpdateSkillStateResponse(BaseModel):
+    """Response from skill state update operation."""
+
+    success: bool
+    name: str
+    enabled: bool
+
+
+class UninstallSkillResponse(BaseModel):
+    """Response from skill uninstall operation."""
+
+    success: bool
+    message: str
+
+
+class UpdateSkillResponse(BaseModel):
+    """Response from skill update operation."""
+
+    success: bool
+    message: str
+    skill: InstalledSkillResponse | None = None
+
+
 @skills_router.post("", response_model=SkillsResponse)
 def get_skills(request: SkillsRequest) -> SkillsResponse:
     """Load and merge skills from all configured sources.
@@ -189,4 +285,196 @@ def sync_skills() -> SyncResponse:
     return SyncResponse(
         status="success" if success else "error",
         message=message,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Installed Skills Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+def _info_to_response(info: InstalledSkillInfo) -> InstalledSkillResponse:
+    """Convert an InstalledSkillInfo to an InstalledSkillResponse."""
+    return InstalledSkillResponse(
+        name=info.name,
+        version=info.version,
+        description=info.description,
+        enabled=info.enabled,
+        source=info.source,
+        resolved_ref=info.resolved_ref,
+        repo_path=info.repo_path,
+        installed_at=info.installed_at,
+        install_path=str(info.install_path),
+    )
+
+
+@skills_router.post("/install", response_model=InstalledSkillResponse)
+def install_skill_endpoint(request: InstallSkillRequest) -> InstalledSkillResponse:
+    """Install a skill from a source.
+
+    Installs a skill from a git URL, GitHub shorthand, or local path into
+    the user's installed skills directory (~/.openhands/skills/installed/).
+
+    Args:
+        request: InstallSkillRequest containing source and options.
+
+    Returns:
+        InstalledSkillResponse with details about the installation.
+
+    Raises:
+        HTTPException 409: If skill is already installed and force=False.
+        HTTPException 400: If fetching the skill source fails.
+        HTTPException 422: If the skill is invalid.
+    """
+    try:
+        info = service_install_skill(
+            source=request.source,
+            ref=request.ref,
+            repo_path=request.repo_path,
+            force=request.force,
+        )
+        return _info_to_response(info)
+    except FileExistsError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Skill already installed. Use force=true to overwrite. {e}",
+        )
+    except SkillFetchError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to fetch skill source: {e}",
+        )
+    except SkillValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid skill: {e}",
+        )
+
+
+@skills_router.get("/installed", response_model=InstalledSkillsListResponse)
+def list_installed_skills_endpoint() -> InstalledSkillsListResponse:
+    """List all installed skills.
+
+    Returns a list of all skills installed in the user's installed skills
+    directory (~/.openhands/skills/installed/).
+
+    Returns:
+        InstalledSkillsListResponse containing list of installed skills.
+    """
+    skills = service_list_installed_skills()
+    return InstalledSkillsListResponse(
+        skills=[_info_to_response(info) for info in skills]
+    )
+
+
+@skills_router.get("/installed/{skill_name}", response_model=InstalledSkillResponse)
+def get_installed_skill_endpoint(skill_name: str) -> InstalledSkillResponse:
+    """Get information about a specific installed skill.
+
+    Args:
+        skill_name: Name of the skill to get.
+
+    Returns:
+        InstalledSkillResponse with skill details.
+
+    Raises:
+        HTTPException 404: If the skill is not installed.
+    """
+    info = service_get_installed_skill(name=skill_name)
+    if info is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{skill_name}' is not installed",
+        )
+    return _info_to_response(info)
+
+
+@skills_router.patch("/installed/{skill_name}", response_model=UpdateSkillStateResponse)
+def update_skill_state_endpoint(
+    skill_name: str, request: UpdateSkillStateRequest
+) -> UpdateSkillStateResponse:
+    """Enable or disable an installed skill.
+
+    Args:
+        skill_name: Name of the skill to update.
+        request: UpdateSkillStateRequest with enabled state.
+
+    Returns:
+        UpdateSkillStateResponse indicating success and new state.
+
+    Raises:
+        HTTPException 404: If the skill is not installed.
+    """
+    if request.enabled:
+        success = service_enable_skill(name=skill_name)
+    else:
+        success = service_disable_skill(name=skill_name)
+
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{skill_name}' is not installed",
+        )
+
+    return UpdateSkillStateResponse(
+        success=True,
+        name=skill_name,
+        enabled=request.enabled,
+    )
+
+
+@skills_router.delete("/installed/{skill_name}", response_model=UninstallSkillResponse)
+def uninstall_skill_endpoint(skill_name: str) -> UninstallSkillResponse:
+    """Uninstall a skill by name.
+
+    Removes a skill from the user's installed skills directory.
+
+    Args:
+        skill_name: Name of the skill to uninstall.
+
+    Returns:
+        UninstallSkillResponse indicating success.
+
+    Raises:
+        HTTPException 404: If the skill is not installed.
+    """
+    success = service_uninstall_skill(name=skill_name)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{skill_name}' is not installed",
+        )
+    return UninstallSkillResponse(
+        success=True,
+        message=f"Skill '{skill_name}' uninstalled",
+    )
+
+
+@skills_router.post(
+    "/installed/{skill_name}/update", response_model=UpdateSkillResponse
+)
+def update_skill_endpoint(skill_name: str) -> UpdateSkillResponse:
+    """Update an installed skill to the latest version.
+
+    Re-fetches the skill from its original source and updates the installation.
+
+    Args:
+        skill_name: Name of the skill to update.
+
+    Returns:
+        UpdateSkillResponse with updated skill information.
+
+    Raises:
+        HTTPException 404: If the skill is not installed.
+    """
+    info = service_update_skill(name=skill_name)
+    if info is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{skill_name}' is not installed",
+        )
+    return UpdateSkillResponse(
+        success=True,
+        message=f"Skill '{skill_name}' updated",
+        skill=_info_to_response(info),
     )
