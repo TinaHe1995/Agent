@@ -19,8 +19,8 @@ from openhands.agent_server.conversation_lease import (
 )
 from openhands.agent_server.conversation_service import (
     AutoTitleSubscriber,
-    ConversationContractMismatchError,
     ConversationService,
+    _get_worktree_start_point,
 )
 from openhands.agent_server.event_service import EventService
 from openhands.agent_server.models import (
@@ -791,7 +791,7 @@ class TestConversationServiceCountConversations:
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_count_acp_conversations_includes_legacy_and_acp(
+    async def test_count_conversations_includes_regular_and_acp(
         self, conversation_service
     ):
         legacy_conversation = StoredConversation(
@@ -827,8 +827,7 @@ class TestConversationServiceCountConversations:
             )
             conversation_service._event_services[stored_conv.id] = mock_service
 
-        assert await conversation_service.count_conversations() == 1
-        assert await conversation_service.count_acp_conversations() == 2
+        assert await conversation_service.count_conversations() == 2
 
 
 class TestConversationServiceStartConversation:
@@ -1134,6 +1133,116 @@ class TestConversationServiceStartConversation:
         assert stored.agent.agent_context is None
         assert not (worktree_root / str(conversation_id)).exists()
 
+    def test_get_worktree_start_point_prefers_origin_default_branch(self, tmp_path):
+        """With an ``origin`` remote, fetch first and return ``origin/<default>``.
+
+        Local ``main``/``master`` should not influence the choice when a remote
+        default branch is available.
+        """
+        upstream = tmp_path / "upstream.git"
+        run_git_command(["git", "init", "--bare", "-b", "trunk", str(upstream)])
+
+        repo_dir = tmp_path / "repo"
+        _init_git_repo(repo_dir)
+        # Rename the local default to "trunk" and publish it so origin/HEAD
+        # resolves to origin/trunk (not main/master).
+        run_git_command(["git", "branch", "-m", "main", "trunk"], repo_dir)
+        run_git_command(
+            ["git", "remote", "add", "origin", str(upstream)],
+            repo_dir,
+        )
+        run_git_command(["git", "push", "-u", "origin", "trunk"], repo_dir)
+        run_git_command(
+            ["git", "remote", "set-head", "origin", "trunk"],
+            repo_dir,
+        )
+        # Create a local "main" branch that we expect to be IGNORED in favor of
+        # the remote default, so this test fails if we silently fall through.
+        run_git_command(["git", "branch", "main"], repo_dir)
+
+        # Add a new upstream commit; the start point must reflect this commit,
+        # proving we fetched before resolving.
+        clone_dir = tmp_path / "publisher"
+        run_git_command(
+            ["git", "clone", str(upstream), str(clone_dir)],
+        )
+        (clone_dir / "remote.txt").write_text("remote\n")
+        run_git_command(["git", "add", "remote.txt"], clone_dir)
+        run_git_command(
+            [
+                "git",
+                "-c",
+                "user.name=OpenHands Test",
+                "-c",
+                "user.email=openhands@example.com",
+                "commit",
+                "-m",
+                "remote update",
+            ],
+            clone_dir,
+        )
+        run_git_command(["git", "push", "origin", "trunk"], clone_dir)
+        remote_tip = run_git_command(
+            ["git", "--no-pager", "rev-parse", "trunk"], clone_dir
+        )
+
+        start_point = _get_worktree_start_point(repo_dir)
+
+        assert start_point == "origin/trunk"
+        resolved = run_git_command(
+            ["git", "--no-pager", "rev-parse", start_point], repo_dir
+        )
+        assert resolved == remote_tip
+
+    def test_get_worktree_start_point_falls_back_to_local_main(self, tmp_path):
+        """No ``origin`` remote → fall back to local ``main``."""
+        repo_dir = tmp_path / "repo"
+        _init_git_repo(repo_dir)  # creates local "main"
+        # Move HEAD off main so we prove main is selected by policy, not because
+        # it happens to be the current branch.
+        run_git_command(["git", "checkout", "-b", "feature/x"], repo_dir)
+
+        assert _get_worktree_start_point(repo_dir) == "main"
+
+    def test_get_worktree_start_point_falls_back_to_master(self, tmp_path):
+        """No remote and no local ``main`` → fall back to local ``master``."""
+        repo_dir = tmp_path / "repo"
+        _init_git_repo(repo_dir)
+        run_git_command(["git", "branch", "-m", "main", "master"], repo_dir)
+        # Detach so neither main nor master is the current branch.
+        run_git_command(["git", "checkout", "--detach"], repo_dir)
+
+        assert _get_worktree_start_point(repo_dir) == "master"
+
+    def test_get_worktree_start_point_tolerates_fetch_failure(self, tmp_path):
+        """If ``git fetch origin`` fails, fall back to cached refs.
+
+        Simulate an unreachable remote by pointing ``origin`` at a non-existent
+        path; we still expect to resolve to ``origin/<default>`` using cached
+        refs that were set up before the remote URL was broken.
+        """
+        upstream = tmp_path / "upstream.git"
+        run_git_command(["git", "init", "--bare", "-b", "main", str(upstream)])
+
+        repo_dir = tmp_path / "repo"
+        _init_git_repo(repo_dir)
+        run_git_command(
+            ["git", "remote", "add", "origin", str(upstream)],
+            repo_dir,
+        )
+        run_git_command(["git", "push", "-u", "origin", "main"], repo_dir)
+        run_git_command(
+            ["git", "remote", "set-head", "origin", "main"],
+            repo_dir,
+        )
+        # Break the remote URL so fetch fails, but origin/HEAD is still cached.
+        run_git_command(
+            ["git", "remote", "set-url", "origin", str(tmp_path / "does-not-exist")],
+            repo_dir,
+        )
+
+        assert _get_worktree_start_point(repo_dir) == "origin/main"
+
     @pytest.mark.asyncio
     async def test_start_conversation_with_custom_id(self, conversation_service):
         """Test that conversations can be started with a custom conversation_id."""
@@ -1291,14 +1400,11 @@ class TestConversationServiceStartConversation:
                 mock_start.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_start_conversation_rejects_existing_acp_conversation_id(
+    async def test_start_conversation_returns_existing_acp_conversation(
         self, conversation_service
     ):
         custom_id = uuid4()
-
-        mock_event_service = AsyncMock(spec=EventService)
-        mock_event_service.is_open.return_value = True
-        mock_event_service.stored = StoredConversation(
+        stored = StoredConversation(
             id=custom_id,
             agent=ACPAgent(acp_command=["echo", "test"]),
             workspace=LocalWorkspace(working_dir="workspace/project"),
@@ -1307,6 +1413,16 @@ class TestConversationServiceStartConversation:
             metrics=None,
             created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
             updated_at=datetime(2025, 1, 1, 12, 30, 0, tzinfo=UTC),
+        )
+        mock_event_service = AsyncMock(spec=EventService)
+        mock_event_service.is_open.return_value = True
+        mock_event_service.stored = stored
+        mock_event_service.get_state.return_value = ConversationState(
+            id=stored.id,
+            agent=stored.agent,
+            workspace=stored.workspace,
+            execution_status=ConversationExecutionStatus.IDLE,
+            confirmation_policy=stored.confirmation_policy,
         )
         conversation_service._event_services[custom_id] = mock_event_service
 
@@ -1318,15 +1434,20 @@ class TestConversationServiceStartConversation:
                 conversation_id=custom_id,
             )
 
+            # Reattaching by conversation_id returns the stored conversation contract
+            # so callers can resume ACP conversations through the unified endpoint
+            # even if the new request carries a regular Agent config.
             with patch.object(
                 conversation_service, "_start_event_service"
             ) as mock_start:
-                with pytest.raises(
-                    ConversationContractMismatchError,
-                    match="only available through the ACP conversation contract",
-                ):
-                    await conversation_service.start_conversation(request)
+                (
+                    conversation_info,
+                    is_new,
+                ) = await conversation_service.start_conversation(request)
 
+                assert is_new is False
+                assert isinstance(conversation_info, ACPConversationInfo)
+                assert conversation_info.agent.kind == "ACPAgent"
                 mock_start.assert_not_called()
 
     @pytest.mark.asyncio
