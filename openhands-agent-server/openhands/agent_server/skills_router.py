@@ -15,6 +15,7 @@ from openhands.agent_server.skills_service import (
     service_disable_skill,
     service_enable_skill,
     service_get_installed_skill,
+    service_get_marketplace_catalog,
     service_install_skill,
     service_list_installed_skills,
     service_uninstall_skill,
@@ -206,6 +207,21 @@ class UpdateSkillResponse(BaseModel):
     success: bool
     message: str
     skill: InstalledSkillResponse | None = None
+
+
+class MarketplaceSkillItem(BaseModel):
+    """A skill entry in the marketplace catalog."""
+
+    name: str = Field(description="Skill name")
+    description: str | None = Field(default=None, description="Skill description")
+    source: str = Field(description="Source URL or path for installation")
+    installed: bool = Field(description="Whether the skill is currently installed")
+
+
+class MarketplaceCatalogResponse(BaseModel):
+    """Response containing the marketplace catalog."""
+
+    skills: list[MarketplaceSkillItem]
 
 
 @skills_router.post("", response_model=SkillsResponse)
@@ -477,4 +493,31 @@ def update_skill_endpoint(skill_name: str) -> UpdateSkillResponse:
         success=True,
         message=f"Skill '{skill_name}' updated",
         skill=_info_to_response(info),
+    )
+
+
+@skills_router.get("/marketplace", response_model=MarketplaceCatalogResponse)
+def get_marketplace_catalog() -> MarketplaceCatalogResponse:
+    """Get the marketplace catalog with installation status.
+
+    Returns a list of available skills from the OpenHands extensions
+    repository marketplace, along with their installation status.
+
+    This enables frontend applications to display a "Marketplace" tab
+    with installable skills.
+
+    Returns:
+        MarketplaceCatalogResponse containing list of available skills.
+    """
+    catalog = service_get_marketplace_catalog()
+    return MarketplaceCatalogResponse(
+        skills=[
+            MarketplaceSkillItem(
+                name=item.name,
+                description=item.description,
+                source=item.source,
+                installed=item.installed,
+            )
+            for item in catalog
+        ]
     )

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
-from openhands.agent_server.skills_service import SkillLoadResult
+from openhands.agent_server.skills_service import MarketplaceSkillInfo, SkillLoadResult
 from openhands.sdk.skills import (
     InstalledSkillInfo,
     KeywordTrigger,
@@ -617,3 +617,76 @@ class TestUpdateSkillEndpoint:
             response = client.post("/api/skills/installed/nonexistent/update")
 
             assert response.status_code == 404
+
+
+class TestMarketplaceCatalogEndpoint:
+    """Tests for GET /skills/marketplace endpoint."""
+
+    def test_get_marketplace_catalog_empty(self, client):
+        """Test getting marketplace when no skills are available."""
+        with patch(
+            "openhands.agent_server.skills_router.service_get_marketplace_catalog"
+        ) as mock_catalog:
+            mock_catalog.return_value = []
+
+            response = client.get("/api/skills/marketplace")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["skills"] == []
+
+    def test_get_marketplace_catalog_with_skills(self, client):
+        """Test getting marketplace with available skills."""
+        with patch(
+            "openhands.agent_server.skills_router.service_get_marketplace_catalog"
+        ) as mock_catalog:
+            mock_catalog.return_value = [
+                MarketplaceSkillInfo(
+                    name="github",
+                    description="GitHub integration skill",
+                    source="github:OpenHands/extensions/skills/github",
+                    installed=True,
+                ),
+                MarketplaceSkillInfo(
+                    name="docker",
+                    description="Docker management skill",
+                    source="github:OpenHands/extensions/skills/docker",
+                    installed=False,
+                ),
+            ]
+
+            response = client.get("/api/skills/marketplace")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data["skills"]) == 2
+
+            # Check first skill
+            assert data["skills"][0]["name"] == "github"
+            assert data["skills"][0]["description"] == "GitHub integration skill"
+            assert data["skills"][0]["installed"] is True
+
+            # Check second skill
+            assert data["skills"][1]["name"] == "docker"
+            assert data["skills"][1]["installed"] is False
+
+    def test_get_marketplace_catalog_skill_without_description(self, client):
+        """Test marketplace skill with no description."""
+        with patch(
+            "openhands.agent_server.skills_router.service_get_marketplace_catalog"
+        ) as mock_catalog:
+            mock_catalog.return_value = [
+                MarketplaceSkillInfo(
+                    name="minimal-skill",
+                    description=None,
+                    source="github:owner/repo",
+                    installed=False,
+                ),
+            ]
+
+            response = client.get("/api/skills/marketplace")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data["skills"]) == 1
+            assert data["skills"][0]["description"] is None

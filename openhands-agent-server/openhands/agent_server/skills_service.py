@@ -44,6 +44,7 @@ from openhands.sdk.skills.utils import (
     update_skills_repository,
 )
 from openhands.sdk.utils import sanitized_env
+from openhands.sdk.utils.path import to_posix_path
 
 
 logger = get_logger(__name__)
@@ -539,3 +540,105 @@ def service_update_skill(
         Updated InstalledSkillInfo if successful, None if skill not found.
     """
     return update_skill(name=name, installed_dir=installed_dir)
+
+
+@dataclass
+class MarketplaceSkillInfo:
+    """Information about a skill in the marketplace catalog."""
+
+    name: str
+    description: str | None
+    source: str
+    installed: bool
+
+
+def service_get_marketplace_catalog(
+    marketplace_path: str = DEFAULT_MARKETPLACE_PATH,
+    installed_dir: Path | None = None,
+) -> list[MarketplaceSkillInfo]:
+    """Get the marketplace catalog with installation status.
+
+    Loads the marketplace JSON from the public extensions repository and
+    enriches each entry with installation status.
+
+    Args:
+        marketplace_path: Relative path to marketplace JSON file.
+            Defaults to marketplaces/default.json.
+        installed_dir: Directory for installed skills to check status.
+            Defaults to ~/.openhands/skills/installed/.
+
+    Returns:
+        List of MarketplaceSkillInfo with skill details and installation status.
+    """
+    from openhands.sdk.marketplace import Marketplace
+
+    # Ensure the public skills repository is cloned/updated
+    cache_dir = get_skills_cache_dir()
+    repo_path = update_skills_repository(
+        PUBLIC_SKILLS_REPO, PUBLIC_SKILLS_BRANCH, cache_dir
+    )
+
+    if repo_path is None:
+        logger.warning("Failed to access public skills repository")
+        return []
+
+    # Load the marketplace manifest
+    marketplace_file = repo_path / marketplace_path
+    if not marketplace_file.exists():
+        logger.warning(f"Marketplace file not found: {marketplace_file}")
+        return []
+
+    try:
+        marketplace = Marketplace.load(repo_path)
+    except (FileNotFoundError, ValueError) as e:
+        # Fallback to loading from specific path
+        try:
+            import json
+
+            with open(marketplace_file, encoding="utf-8") as f:
+                data = json.load(f)
+            marketplace = Marketplace.model_validate(
+                {**data, "path": to_posix_path(repo_path)}
+            )
+        except Exception as e2:
+            logger.warning(f"Failed to load marketplace: {e}, {e2}")
+            return []
+
+    # Get installed skill names for status check
+    installed_skills = service_list_installed_skills(installed_dir=installed_dir)
+    installed_names = {skill.name for skill in installed_skills}
+
+    # Build catalog from plugins (skills listed in marketplace)
+    catalog: list[MarketplaceSkillInfo] = []
+
+    for plugin in marketplace.plugins:
+        # Resolve source URL
+        source, ref, subpath = marketplace.resolve_plugin_source(plugin)
+
+        # Build full source string
+        if ref:
+            source = f"{source}@{ref}"
+        if subpath:
+            source = f"{source}/{subpath}"
+
+        catalog.append(
+            MarketplaceSkillInfo(
+                name=plugin.name,
+                description=plugin.description,
+                source=source,
+                installed=plugin.name in installed_names,
+            )
+        )
+
+    # Also include standalone skills from the marketplace
+    for skill_entry in marketplace.skills:
+        catalog.append(
+            MarketplaceSkillInfo(
+                name=skill_entry.name,
+                description=skill_entry.description,
+                source=skill_entry.source,
+                installed=skill_entry.name in installed_names,
+            )
+        )
+
+    return catalog
