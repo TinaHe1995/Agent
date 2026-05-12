@@ -4,9 +4,9 @@ This module defines the HTTP API endpoints for skill operations.
 Business logic is delegated to skills_service.py.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from openhands.agent_server.skills_service import (
@@ -31,6 +31,18 @@ from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
 
 
 skills_router = APIRouter(prefix="/skills", tags=["Skills"])
+
+# Validated skill name path parameter
+# Prevents empty strings, path traversal, and invalid characters
+SkillNamePath = Annotated[
+    str,
+    Path(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+        description="Skill name (alphanumeric, hyphens, underscores)",
+    ),
+]
 
 
 class ExposedUrl(BaseModel):
@@ -134,13 +146,14 @@ class InstallSkillRequest(BaseModel):
     """Request body for installing a skill."""
 
     source: str = Field(
+        min_length=1,
         description=(
             "Skill source - git URL, GitHub shorthand, or local path. "
             "Examples: "
             "'https://github.com/OpenHands/extensions/tree/main/skills/github', "
             "'github:OpenHands/extensions/skills/github', "
             "'/path/to/skill'"
-        )
+        ),
     )
     ref: str | None = Field(
         default=None,
@@ -189,7 +202,6 @@ class UpdateSkillStateRequest(BaseModel):
 class UpdateSkillStateResponse(BaseModel):
     """Response from skill state update operation."""
 
-    success: bool
     name: str
     enabled: bool
 
@@ -197,14 +209,12 @@ class UpdateSkillStateResponse(BaseModel):
 class UninstallSkillResponse(BaseModel):
     """Response from skill uninstall operation."""
 
-    success: bool
     message: str
 
 
 class UpdateSkillResponse(BaseModel):
     """Response from skill update operation."""
 
-    success: bool
     message: str
     skill: InstalledSkillResponse | None = None
 
@@ -350,20 +360,20 @@ def install_skill_endpoint(request: InstallSkillRequest) -> InstalledSkillRespon
             force=request.force,
         )
         return _info_to_response(info)
-    except FileExistsError as e:
+    except FileExistsError:
         raise HTTPException(
             status_code=409,
-            detail=f"Skill already installed. Use force=true to overwrite. {e}",
+            detail="Skill already installed. Use force=true to overwrite.",
         )
-    except SkillFetchError as e:
+    except SkillFetchError:
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to fetch skill source: {e}",
+            detail="Failed to fetch skill source. Check that the source is valid.",
         )
-    except SkillValidationError as e:
+    except SkillValidationError:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid skill: {e}",
+            detail="Invalid skill. Ensure the source contains a valid SKILL.md.",
         )
 
 
@@ -384,7 +394,7 @@ def list_installed_skills_endpoint() -> InstalledSkillsListResponse:
 
 
 @skills_router.get("/installed/{skill_name}", response_model=InstalledSkillResponse)
-def get_installed_skill_endpoint(skill_name: str) -> InstalledSkillResponse:
+def get_installed_skill_endpoint(skill_name: SkillNamePath) -> InstalledSkillResponse:
     """Get information about a specific installed skill.
 
     Args:
@@ -407,7 +417,7 @@ def get_installed_skill_endpoint(skill_name: str) -> InstalledSkillResponse:
 
 @skills_router.patch("/installed/{skill_name}", response_model=UpdateSkillStateResponse)
 def update_skill_state_endpoint(
-    skill_name: str, request: UpdateSkillStateRequest
+    skill_name: SkillNamePath, request: UpdateSkillStateRequest
 ) -> UpdateSkillStateResponse:
     """Enable or disable an installed skill.
 
@@ -416,7 +426,7 @@ def update_skill_state_endpoint(
         request: UpdateSkillStateRequest with enabled state.
 
     Returns:
-        UpdateSkillStateResponse indicating success and new state.
+        UpdateSkillStateResponse indicating new state.
 
     Raises:
         HTTPException 404: If the skill is not installed.
@@ -433,14 +443,13 @@ def update_skill_state_endpoint(
         )
 
     return UpdateSkillStateResponse(
-        success=True,
         name=skill_name,
         enabled=request.enabled,
     )
 
 
 @skills_router.delete("/installed/{skill_name}", response_model=UninstallSkillResponse)
-def uninstall_skill_endpoint(skill_name: str) -> UninstallSkillResponse:
+def uninstall_skill_endpoint(skill_name: SkillNamePath) -> UninstallSkillResponse:
     """Uninstall a skill by name.
 
     Removes a skill from the user's installed skills directory.
@@ -449,7 +458,7 @@ def uninstall_skill_endpoint(skill_name: str) -> UninstallSkillResponse:
         skill_name: Name of the skill to uninstall.
 
     Returns:
-        UninstallSkillResponse indicating success.
+        UninstallSkillResponse with uninstall message.
 
     Raises:
         HTTPException 404: If the skill is not installed.
@@ -461,7 +470,6 @@ def uninstall_skill_endpoint(skill_name: str) -> UninstallSkillResponse:
             detail=f"Skill '{skill_name}' is not installed",
         )
     return UninstallSkillResponse(
-        success=True,
         message=f"Skill '{skill_name}' uninstalled",
     )
 
@@ -469,7 +477,7 @@ def uninstall_skill_endpoint(skill_name: str) -> UninstallSkillResponse:
 @skills_router.post(
     "/installed/{skill_name}/update", response_model=UpdateSkillResponse
 )
-def update_skill_endpoint(skill_name: str) -> UpdateSkillResponse:
+def update_skill_endpoint(skill_name: SkillNamePath) -> UpdateSkillResponse:
     """Update an installed skill to the latest version.
 
     Re-fetches the skill from its original source and updates the installation.
@@ -490,7 +498,6 @@ def update_skill_endpoint(skill_name: str) -> UpdateSkillResponse:
             detail=f"Skill '{skill_name}' is not installed",
         )
     return UpdateSkillResponse(
-        success=True,
         message=f"Skill '{skill_name}' updated",
         skill=_info_to_response(info),
     )

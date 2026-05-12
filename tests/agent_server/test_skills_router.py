@@ -525,7 +525,6 @@ class TestUpdateSkillStateEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["success"] is True
             assert data["name"] == "test-skill"
             assert data["enabled"] is True
 
@@ -543,7 +542,6 @@ class TestUpdateSkillStateEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["success"] is True
             assert data["enabled"] is False
 
     def test_update_skill_state_not_found(self, client):
@@ -575,7 +573,6 @@ class TestUninstallSkillEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["success"] is True
             assert "uninstalled" in data["message"].lower()
 
     def test_uninstall_skill_not_found(self, client):
@@ -604,7 +601,6 @@ class TestUpdateSkillEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["success"] is True
             assert data["skill"]["name"] == "test-skill"
 
     def test_update_skill_not_found(self, client):

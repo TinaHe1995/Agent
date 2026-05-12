@@ -14,13 +14,17 @@ Precedence (later overrides earlier):
 sandbox < public < user < org < project
 """
 
+import json
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from openhands.sdk.logger import get_logger
+from openhands.sdk.marketplace import Marketplace
 from openhands.sdk.skills import (
     InstalledSkillInfo,
     Skill,
@@ -570,8 +574,6 @@ def service_get_marketplace_catalog(
     Returns:
         List of MarketplaceSkillInfo with skill details and installation status.
     """
-    from openhands.sdk.marketplace import Marketplace
-
     # Ensure the public skills repository is cloned/updated
     cache_dir = get_skills_cache_dir()
     repo_path = update_skills_repository(
@@ -593,14 +595,12 @@ def service_get_marketplace_catalog(
     except (FileNotFoundError, ValueError) as e:
         # Fallback to loading from specific path
         try:
-            import json
-
             with open(marketplace_file, encoding="utf-8") as f:
                 data = json.load(f)
             marketplace = Marketplace.model_validate(
                 {**data, "path": to_posix_path(repo_path)}
             )
-        except Exception as e2:
+        except (json.JSONDecodeError, ValidationError, OSError) as e2:
             logger.warning(f"Failed to load marketplace: {e}, {e2}")
             return []
 
@@ -608,8 +608,8 @@ def service_get_marketplace_catalog(
     installed_skills = service_list_installed_skills(installed_dir=installed_dir)
     installed_names = {skill.name for skill in installed_skills}
 
-    # Build catalog from plugins (skills listed in marketplace)
-    catalog: list[MarketplaceSkillInfo] = []
+    # Build catalog from plugins and skills, deduplicating by name
+    catalog_dict: dict[str, MarketplaceSkillInfo] = {}
 
     for plugin in marketplace.plugins:
         # Resolve source URL
@@ -621,24 +621,21 @@ def service_get_marketplace_catalog(
         if subpath:
             source = f"{source}/{subpath}"
 
-        catalog.append(
-            MarketplaceSkillInfo(
-                name=plugin.name,
-                description=plugin.description,
-                source=source,
-                installed=plugin.name in installed_names,
-            )
+        catalog_dict[plugin.name] = MarketplaceSkillInfo(
+            name=plugin.name,
+            description=plugin.description,
+            source=source,
+            installed=plugin.name in installed_names,
         )
 
-    # Also include standalone skills from the marketplace
+    # Also include standalone skills from the marketplace (if not already present)
     for skill_entry in marketplace.skills:
-        catalog.append(
-            MarketplaceSkillInfo(
+        if skill_entry.name not in catalog_dict:
+            catalog_dict[skill_entry.name] = MarketplaceSkillInfo(
                 name=skill_entry.name,
                 description=skill_entry.description,
                 source=skill_entry.source,
                 installed=skill_entry.name in installed_names,
             )
-        )
 
-    return catalog
+    return list(catalog_dict.values())
