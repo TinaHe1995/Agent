@@ -3,12 +3,12 @@ from __future__ import annotations
 from abc import ABC
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, TypeAlias
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
-from openhands.sdk import LLM, Agent
+from openhands.sdk import LLM
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.conversation_stats import ConversationStats
 from openhands.sdk.conversation.request import (  # re-export for backward compat
@@ -189,35 +189,22 @@ class _ConversationInfoBase(BaseModel):
 class ConversationInfo(_ConversationInfoBase):
     """Information about a conversation running locally without a Runtime sandbox."""
 
-    agent: Agent = Field(
-        ...,
-        description=(
-            "The legacy v1 agent configuration. "
-            "This schema remains pinned to the standard Agent contract."
-        ),
-    )
-
-
-class ACPConversationInfo(_ConversationInfoBase):
-    """Conversation info that supports ACP-capable agent configs."""
-
     agent: AgentBase = Field(
         ...,
-        description=(
-            "The agent running in the conversation. "
-            "Supports both Agent and ACPAgent payloads."
-        ),
+        description="The agent running in the conversation.",
     )
 
 
 class ConversationPage(BaseModel):
-    items: list[ACPConversationInfo | ConversationInfo]
+    items: list[ConversationInfo]
     next_page_id: str | None = None
 
 
-class ACPConversationPage(BaseModel):
-    items: list[ACPConversationInfo]
-    next_page_id: str | None = None
+# Deprecated compatibility aliases for the old ACP-specific response names.
+# Keep runtime assignment aliases so existing imports still resolve to the
+# canonical Pydantic models; PEP 695 ``type`` aliases would not preserve that.
+ACPConversationInfo: TypeAlias = ConversationInfo  # noqa: UP040
+ACPConversationPage: TypeAlias = ConversationPage  # noqa: UP040
 
 
 class ConversationResponse(BaseModel):
