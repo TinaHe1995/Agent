@@ -10,6 +10,9 @@ from .acp_providers import (
     get_acp_provider,
 )
 from .api_models import (
+    MCPServerListResponse,
+    MCPServerResponse,
+    MCPServerSummary,
     SecretCreateRequest,
     SecretItemResponse,
     SecretsListResponse,
@@ -88,6 +91,9 @@ __all__ = [
     "CondenserSettings",
     "ConversationSettings",
     "LLMAgentSettings",
+    "MCPServerListResponse",
+    "MCPServerResponse",
+    "MCPServerSummary",
     "OpenHandsAgentSettings",
     "SETTINGS_METADATA_KEY",
     "SETTINGS_SECTION_METADATA_KEY",
