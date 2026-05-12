@@ -5,16 +5,16 @@ description = "OpenHands Agent Server - REST/WebSocket interface for OpenHands A
 
 requires-python = ">=3.12"
 dependencies = [
-  "aiosqlite>=0.19",
-  "alembic>=1.13",
-  "docker>=7.1,<8",
-  "fastapi>=0.104",
-  "openhands-sdk",
-  "pydantic>=2",
-  "sqlalchemy>=2",
-  "uvicorn>=0.31.1",
-  "websockets>=12",
-  "wsproto>=1.2.0",
+  "aiosqlite==0.21.0",
+  "alembic==1.17.0",
+  "docker==7.1.0",
+  "fastapi==0.129.0",
+  "openhands-sdk==1.22.0",
+  "pydantic==2.12.5",
+  "sqlalchemy==2.0.44",
+  "uvicorn==0.37.0",
+  "websockets==15.0.1",
+  "wsproto==1.2.0",
 ]
 
 [project.urls]
@@ -24,7 +24,7 @@ Documentation = "https://docs.openhands.dev/sdk"
 "Bug Tracker" = "https://github.com/OpenHands/software-agent-sdk/issues"
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools==80.9.0", "wheel==0.46.3"]
 build-backend = "setuptools.build_meta"
 
 
