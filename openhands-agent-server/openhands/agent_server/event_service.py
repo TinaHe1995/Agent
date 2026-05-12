@@ -381,11 +381,9 @@ class EventService:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
-            try:
+            # Already running or inactive — message was sent, skip run.
+            with suppress(ValueError):
                 await self.run()
-            except ValueError:
-                # Already running or inactive — message was sent, skip run.
-                pass
 
     async def subscribe_to_events(self, subscriber: Subscriber[Event]) -> UUID:
         subscriber_id = self._pub_sub.subscribe(subscriber)
