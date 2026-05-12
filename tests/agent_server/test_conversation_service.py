@@ -1752,7 +1752,7 @@ class TestConversationServiceUpdateConversation:
             assert result is True
             mock_notify.assert_called_once()
             conversation_info = mock_notify.call_args[0][0]
-            assert isinstance(conversation_info, ConversationInfo)
+            assert isinstance(conversation_info, ACPConversationInfo)
             assert conversation_info.agent.kind == "ACPAgent"
 
     @pytest.mark.asyncio
