@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from openhands.agent_server.config import Config, WebhookSpec
 from openhands.agent_server.conversation_lease import ConversationLeaseHeldError
 from openhands.agent_server.event_service import EventService
+from openhands.agent_server.extra_python_path import apply_extra_python_path_from_env
 from openhands.agent_server.models import (
     ConversationInfo,
     ConversationPage,
@@ -555,6 +556,11 @@ class ConversationService:
         if request.tool_module_qualnames:
             import importlib
 
+            # Defensive: ensure OH_EXTRA_PYTHON_PATH directories are on sys.path
+            # in case the env was changed in-process after server startup.
+            # Idempotent — already-present paths are skipped.
+            apply_extra_python_path_from_env()
+
             for tool_name, module_qualname in request.tool_module_qualnames.items():
                 try:
                     # Import the module to trigger tool auto-registration
@@ -878,6 +884,7 @@ class ConversationService:
                 )
                 # Dynamically register tools when resuming persisted conversations
                 if stored.tool_module_qualnames:
+                    apply_extra_python_path_from_env()
                     for (
                         tool_name,
                         module_qualname,

@@ -10,6 +10,10 @@ from types import FrameType
 import uvicorn
 from uvicorn import Config
 
+from openhands.agent_server.extra_python_path import (
+    OH_EXTRA_PYTHON_PATH_ENV,
+    apply_extra_python_path,
+)
 from openhands.agent_server.logging_config import LOGGING_CONFIG
 from openhands.sdk.logger import DEBUG, get_logger
 
@@ -171,6 +175,16 @@ def main() -> None:
             "(e.g. 'myapp.tools,myapp.plugins')"
         ),
     )
+    parser.add_argument(
+        "--extra-python-path",
+        type=str,
+        default=os.environ.get(OH_EXTRA_PYTHON_PATH_ENV),
+        help=(
+            "OS-pathsep-separated directories to prepend to sys.path before "
+            "importing custom tools. Lets PyInstaller frozen binaries pick up "
+            f"external .py files. Defaults to {OH_EXTRA_PYTHON_PATH_ENV}."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -180,6 +194,10 @@ def main() -> None:
             sys.exit(0)
         else:
             sys.exit(1)
+
+    # Extend sys.path BEFORE any user-module imports so both --import-modules
+    # and later tool_module_qualnames imports can resolve external .py files.
+    apply_extra_python_path(args.extra_python_path)
 
     # Import user modules after early-exit checks
     preload_modules(args.import_modules)
