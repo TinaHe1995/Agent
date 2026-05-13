@@ -360,6 +360,7 @@ class ConversationService:
     _hydration_locks: dict[UUID, asyncio.Lock] = field(
         default_factory=dict, init=False
     )
+    _hydration_locks_guard: asyncio.Lock | None = field(default=None, init=False)
     _conversation_webhook_subscribers: list["ConversationWebhookSubscriber"] = field(
         default_factory=list, init=False
     )
@@ -759,12 +760,12 @@ class ConversationService:
     async def delete_conversation(self, conversation_id: UUID) -> bool:
         if self._event_services is None:
             raise ValueError("inactive_service")
-        event_service = await self.get_event_service(conversation_id)
+
+        event_service = self._event_services.pop(conversation_id, None)
+
         if event_service is not None:
-            self._event_services.pop(conversation_id, None)
-        if self._stored_conversations is not None:
-            self._stored_conversations.pop(conversation_id, None)
-        if event_service:
+            if self._stored_conversations is not None:
+                self._stored_conversations.pop(conversation_id, None)
             # Notify conversation webhooks about the stopped conversation before closing
             try:
                 state = await event_service.get_state()
@@ -799,7 +800,31 @@ class ConversationService:
 
             logger.info(f"Successfully deleted conversation {conversation_id}")
             return True
-        return False
+
+        stored = self._get_stored_conversation(conversation_id)
+        if stored is None:
+            return False
+
+        if self._stored_conversations is not None:
+            self._stored_conversations.pop(conversation_id, None)
+
+        conversation_dir = self.conversations_dir / conversation_id.hex
+        try:
+            state = await self._get_conversation_state(stored, None)
+            conversation_info = _compose_webhook_conversation_info(stored, state)
+            conversation_info.execution_status = ConversationExecutionStatus.DELETING
+            await self._notify_conversation_webhooks(conversation_info)
+        except Exception as e:
+            logger.warning(
+                f"Failed to notify webhooks for conversation {conversation_id}: {e}"
+            )
+
+        safe_rmtree(
+            conversation_dir,
+            f"conversation directory for {conversation_id}",
+        )
+        logger.info(f"Successfully deleted conversation {conversation_id}")
+        return True
 
     async def update_conversation(
         self, conversation_id: UUID, request: UpdateConversationRequest
@@ -1105,14 +1130,26 @@ class ConversationService:
         if existing is not None:
             return existing
 
-        lock = self._hydration_locks.setdefault(stored.id, asyncio.Lock())
-        async with lock:
-            existing = event_services.get(stored.id)
-            if existing is not None:
-                return existing
+        guard = self._hydration_locks_guard
+        if guard is None:
+            raise ValueError("inactive_service")
 
-            self._prepare_stored_conversation_for_resume(stored)
-            return await self._start_event_service(stored)
+        async with guard:
+            if stored.id not in self._hydration_locks:
+                self._hydration_locks[stored.id] = asyncio.Lock()
+            lock = self._hydration_locks[stored.id]
+
+        async with lock:
+            try:
+                existing = event_services.get(stored.id)
+                if existing is not None:
+                    return existing
+
+                self._prepare_stored_conversation_for_resume(stored)
+                return await self._start_event_service(stored)
+            finally:
+                async with guard:
+                    self._hydration_locks.pop(stored.id, None)
 
     def _prepare_stored_conversation_for_resume(
         self, stored: StoredConversation
@@ -1147,6 +1184,7 @@ class ConversationService:
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
         self._event_services = {}
         self._stored_conversations = {}
+        self._hydration_locks_guard = asyncio.Lock()
 
         # Initialize conversation webhook subscribers
         self._conversation_webhook_subscribers = [
@@ -1166,6 +1204,7 @@ class ConversationService:
         self._event_services = None
         self._stored_conversations = None
         self._hydration_locks.clear()
+        self._hydration_locks_guard = None
         # This stops conversations and saves meta
         await asyncio.gather(
             *[

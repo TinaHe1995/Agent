@@ -246,11 +246,10 @@ async def test_stale_owner_cannot_append_after_lease_takeover(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_restart_resumes_conversations_after_non_graceful_shutdown(tmp_path):
-    """Reproduces the crash-recovery bug: after a non-graceful shutdown the lease
-    file is left on disk pointing at a still-future expires_at. A fresh server
-    started before the TTL elapses must still pick up the conversation rather
-    than skipping it for up to the full TTL window.
+async def test_restart_orphan_lease_allows_lazy_hydration_before_ttl(tmp_path):
+    """Crash recovery + lazy startup: forged lease expires_at is still future, but
+    dead PID allows takeover. Server must not eager-load; first access still
+    hydrates so the conversation is usable.
     """
     conversations_dir = tmp_path / "conversations"
     workspace_dir = tmp_path / "workspace"
@@ -339,6 +338,31 @@ async def test_get_event_service_hydrates_persisted_conversation_once(tmp_path):
         assert first is not None
         assert second is first
         assert mock_start.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_persisted_conversation_does_not_hydrate(tmp_path):
+    conversations_dir = tmp_path / "conversations"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+    )
+
+    async with ConversationService(conversations_dir=conversations_dir) as primary:
+        conversation_info, _ = await primary.start_conversation(request)
+        cid = conversation_info.id
+
+    async with ConversationService(conversations_dir=conversations_dir) as svc:
+        with patch.object(svc, "_start_event_service") as mock_start:
+            deleted = await svc.delete_conversation(cid)
+        assert deleted is True
+        mock_start.assert_not_called()
+        assert cid not in svc._event_services
+        assert not (conversations_dir / cid.hex).exists()
 
 
 class TestConversationServiceSearchConversations:
