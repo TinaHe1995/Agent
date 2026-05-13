@@ -20,6 +20,7 @@ from openhands.sdk.conversation.types import (
     ConversationTokenCallbackType,
 )
 from openhands.sdk.event.llm_convertible import MessageEvent, SystemPromptEvent
+from openhands.sdk.io import InMemoryFileStore
 from openhands.sdk.llm import LLM, Message, TextContent
 from openhands.sdk.llm.llm_registry import RegistryEvent
 from openhands.sdk.security.confirmation_policy import AlwaysConfirm
@@ -1340,8 +1341,6 @@ def test_context_manager_batches_saves() -> None:
         persistence_dir="/tmp/test/.state",
         agent=agent,
     )
-
-    from openhands.sdk.io import InMemoryFileStore
 
     fs = InMemoryFileStore()
     state._fs = fs
