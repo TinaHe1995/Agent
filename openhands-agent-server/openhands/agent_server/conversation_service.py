@@ -1047,6 +1047,25 @@ class ConversationService:
             return None
         return stored
 
+    def _discover_stored_conversations_on_disk(
+        self, seen: set[UUID]
+    ) -> list[tuple[StoredConversation, None]]:
+        """Dirs under ``conversations_dir`` with valid ``meta.json``, excluding *seen*."""
+        rows: list[tuple[StoredConversation, None]] = []
+        if not self.conversations_dir.exists():
+            return rows
+        for conversation_dir in self.conversations_dir.iterdir():
+            if not conversation_dir.is_dir():
+                continue
+            stored = self._load_stored_conversation(conversation_dir)
+            if stored is None or stored.id in seen:
+                continue
+            if self._stored_conversations is not None:
+                self._stored_conversations[stored.id] = stored
+            rows.append((stored, None))
+            seen.add(stored.id)
+        return rows
+
     def _iter_known_conversations(
         self,
     ) -> list[tuple[StoredConversation, EventService | None]]:
@@ -1065,18 +1084,7 @@ class ConversationService:
                     known.append((stored, None))
                     seen.add(stored.id)
 
-        if self.conversations_dir.exists():
-            for conversation_dir in self.conversations_dir.iterdir():
-                if not conversation_dir.is_dir():
-                    continue
-                stored = self._load_stored_conversation(conversation_dir)
-                if stored is None or stored.id in seen:
-                    continue
-                if self._stored_conversations is not None:
-                    self._stored_conversations[stored.id] = stored
-                known.append((stored, None))
-                seen.add(stored.id)
-
+        known.extend(self._discover_stored_conversations_on_disk(seen))
         return known
 
     async def _get_conversation_state(
