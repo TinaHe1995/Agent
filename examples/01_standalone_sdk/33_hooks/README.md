@@ -4,7 +4,7 @@ This folder demonstrates the OpenHands hooks system.
 
 ## Example
 
-- **33_hooks.py** - Complete hooks demo showing all four hook types
+- **main.py** - Complete hooks demo showing all four hook types
 
 ## Scripts
 
@@ -24,7 +24,7 @@ export LLM_MODEL="gpt-5.5"  # optional
 export LLM_BASE_URL="https://your-endpoint"  # optional
 
 # Run example
-python 33_hooks.py
+python main.py
 ```
 
 ## Hook Types
