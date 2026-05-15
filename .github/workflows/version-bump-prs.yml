@@ -289,7 +289,7 @@ jobs:
                   echo "📝 Regenerating uv.lock..."
                   # Unset UV_EXCLUDE_NEWER: setup-uv sets a 7-day freshness guardrail that
                   # would reject just-published packages. This step intentionally consumes them.
-                  UV_EXCLUDE_NEWER="" uv lock --no-cache
+                  env -u UV_EXCLUDE_NEWER uv lock --no-cache
                   echo "✅ Updated uv.lock"
 
                   # 3. Update the version in sandbox_spec_service.py
