@@ -482,9 +482,6 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             return data
         d = dict(data)
 
-        if "model" not in d:
-            d["model"] = cls.model_fields["model"].get_default()
-
         model_val = d.get("model")
         if not model_val:
             raise ValueError("model must be specified in LLM")
