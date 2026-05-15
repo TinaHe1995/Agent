@@ -246,19 +246,20 @@ class ToolShieldLLMSecurityAnalyzer(SecurityAnalyzerBase):
         shouldn't happen per the prompt spec but can in practice), we take
         the **last** one as the final verdict.
 
-        On parse failure, returns ``HIGH`` as the conservative fallback --
-        a mangled guardrail response should not silently allow the action.
-        The caller logs the parse failure so operators can distinguish a
-        real HIGH from a parse error.
+        On parse failure, returns ``UNKNOWN`` (consistent with the
+        infrastructure-error path and with ``GraySwanAnalyzer``).
+        ``ConfirmRisky`` with ``confirm_unknown=True`` still pauses for
+        user confirmation, so the conservative posture is preserved
+        without distorting ensemble fusion that takes ``max(concrete)``.
         """
         matches = _RISK_RE.findall(text)
         if matches:
             return _RISK_MAP[matches[-1].upper()]
         logger.warning(
             "Guardrail output did not contain a parseable RISK label; "
-            "defaulting to HIGH (conservative)"
+            "returning UNKNOWN (ConfirmRisky will apply its fallback)"
         )
-        return SecurityRisk.HIGH
+        return SecurityRisk.UNKNOWN
 
     def security_risk(self, action: ActionEvent) -> SecurityRisk:
         """Evaluate ``action`` against the guardrail LLM."""

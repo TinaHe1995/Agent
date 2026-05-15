@@ -169,16 +169,18 @@ class TestParseRisk:
             ToolShieldLLMSecurityAnalyzer._parse_risk(text) == SecurityRisk.HIGH
         )
 
-    def test_no_label_falls_back_to_high(self):
-        """Conservative fallback: mangled output shouldn't allow the action."""
+    def test_no_label_falls_back_to_unknown(self):
+        """Parse failure returns UNKNOWN, consistent with the
+        infrastructure-error path and with GraySwanAnalyzer.
+        ConfirmRisky.confirm_unknown=True still pauses for confirmation."""
         assert (
             ToolShieldLLMSecurityAnalyzer._parse_risk("This looks suspicious.")
-            == SecurityRisk.HIGH
+            == SecurityRisk.UNKNOWN
         )
 
-    def test_empty_text_falls_back_to_high(self):
+    def test_empty_text_falls_back_to_unknown(self):
         assert (
-            ToolShieldLLMSecurityAnalyzer._parse_risk("") == SecurityRisk.HIGH
+            ToolShieldLLMSecurityAnalyzer._parse_risk("") == SecurityRisk.UNKNOWN
         )
 
 
@@ -276,13 +278,17 @@ class TestSecurityRisk:
             analyzer.security_risk(_make_action_event()) == SecurityRisk.UNKNOWN
         )
 
-    def test_returns_high_on_unparseable_output(self):
-        """Guardrail responded but without a parseable label."""
+    def test_returns_unknown_on_unparseable_output(self):
+        """Parse failure now returns UNKNOWN (consistent with the
+        infrastructure-error path and with GraySwanAnalyzer).
+        ConfirmRisky.confirm_unknown=True still pauses for confirmation."""
         analyzer = _make_analyzer()
         _patch_completion(analyzer, _mock_llm_response(
             "I'm not sure what to do."
         ))
-        assert analyzer.security_risk(_make_action_event()) == SecurityRisk.HIGH
+        assert (
+            analyzer.security_risk(_make_action_event()) == SecurityRisk.UNKNOWN
+        )
 
     def test_action_content_reaches_the_llm(self):
         """Regression for the repr(action) bug."""
