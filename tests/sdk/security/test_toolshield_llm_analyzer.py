@@ -550,3 +550,62 @@ class TestToolShieldHelpers:
         assert _experience_name_from_server_name("filesystem-mcp") == "filesystem-mcp"
         assert _experience_name_from_server_name("Postgres") == "postgres-mcp"
         assert _experience_name_from_server_name("server name") == "server-name-mcp"
+
+    # ----------------------------------------------------------------------
+    # auto_detect_safety_experiences -- mocked tests covering all three
+    # behavior paths so CI never has to TCP-probe localhost.
+    # ----------------------------------------------------------------------
+
+    def test_auto_detect_loads_experiences_for_detected_server(self):
+        """When toolshield.mcp_scan returns a recognized server, the helper
+        loads its bundled experience."""
+        from openhands.sdk.security import toolshield_helpers as th
+
+        fake_servers = [{
+            "port": 9090,
+            "path": "/sse",
+            "name": "filesystem",
+            "version": "1.0",
+            "url": "http://localhost:9090/sse",
+        }]
+        with patch.object(th.asyncio, "run", return_value=fake_servers):
+            result = th.auto_detect_safety_experiences(
+                port_range=(9090, 9090), model="claude-sonnet-4.5"
+            )
+        # The bundled filesystem-mcp.json + always-active terminal-mcp
+        # should both contribute -- so the rendered string is non-empty
+        # and references both tools.
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert "filesystem" in result.lower()
+        assert "terminal" in result.lower()
+
+    def test_auto_detect_falls_back_to_default_seed_when_nothing_detected(self):
+        """No networked servers + fallback_to_default=True -> default seed."""
+        from openhands.sdk.security import toolshield_helpers as th
+
+        with patch.object(th.asyncio, "run", return_value=[]):
+            result = th.auto_detect_safety_experiences(
+                port_range=(60000, 60001),
+                fallback_to_default=True,
+            )
+        # Default seed loads terminal + filesystem; non-empty
+        assert len(result) > 100
+        assert "terminal" in result.lower()
+
+    def test_auto_detect_handles_already_inside_event_loop(self):
+        """If we're called from inside a running event loop, ``asyncio.run``
+        raises RuntimeError. The helper must catch it and return just the
+        always-active tools so the analyzer doesn't crash."""
+        from openhands.sdk.security import toolshield_helpers as th
+
+        with patch.object(
+            th.asyncio,
+            "run",
+            side_effect=RuntimeError(
+                "asyncio.run() cannot be called from a running event loop"
+            ),
+        ):
+            result = th.detect_active_mcp_tools(port_range=(8000, 8001))
+        # Per the helper's contract, falls back to ALWAYS_ACTIVE_TOOLS
+        assert result == list(th.ALWAYS_ACTIVE_TOOLS)
