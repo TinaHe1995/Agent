@@ -597,3 +597,58 @@ class TestToolShieldHelpers:
             result = th.detect_active_mcp_tools(port_range=(8000, 8001))
         # Per the helper's contract, falls back to ALWAYS_ACTIVE_TOOLS
         assert result == list(th.ALWAYS_ACTIVE_TOOLS)
+
+
+# ---------------------------------------------------------------------------
+# ConfirmRisky integration
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmRiskyIntegration:
+    """End-to-end verification that the analyzer's output drives the
+    ``ConfirmRisky`` policy correctly. The Conversation state machine
+    relies on ``ConfirmRisky.should_confirm(risk)`` returning True to
+    transition into ``WAITING_FOR_CONFIRMATION`` -- so if our analyzer +
+    ConfirmRisky combination produces the right ``should_confirm`` answer
+    for every risk level, the conversation-level pause behavior follows.
+    """
+
+    def _confirm(self, llm_output: str) -> bool:
+        """Run the analyzer end-to-end on a mocked LLM response, then ask
+        the default ConfirmRisky policy whether to pause."""
+        from openhands.sdk.security import ConfirmRisky
+
+        analyzer = _make_analyzer()
+        _patch_completion(analyzer, _mock_llm_response(llm_output))
+        risk = analyzer.security_risk(_make_action_event())
+        return ConfirmRisky().should_confirm(risk)
+
+    def test_high_pauses_conversation(self):
+        """A HIGH verdict must cause ConfirmRisky to pause."""
+        assert self._confirm("RISK: HIGH\nDestructive.") is True
+
+    def test_low_does_not_pause(self):
+        """A LOW verdict proceeds without confirmation."""
+        assert self._confirm("RISK: LOW\nBenign.") is False
+
+    def test_medium_does_not_pause_at_default_high_threshold(self):
+        """ConfirmRisky's default threshold is HIGH, so MEDIUM passes."""
+        assert self._confirm("RISK: MEDIUM\nPotentially concerning.") is False
+
+    def test_unknown_pauses_when_confirm_unknown_true(self):
+        """Parse failure -> UNKNOWN. With ConfirmRisky.confirm_unknown=True
+        (the default), the conversation pauses -- preserving the
+        conservative posture without forcing HIGH semantics."""
+        # Output without a parseable RISK: label -> UNKNOWN
+        assert self._confirm("I'm not sure what to do.") is True
+
+    def test_unknown_does_not_pause_when_confirm_unknown_false(self):
+        """Sanity: callers who opt out of UNKNOWN-pausing get the
+        permissive behavior."""
+        from openhands.sdk.security import ConfirmRisky
+
+        analyzer = _make_analyzer()
+        _patch_completion(analyzer, _mock_llm_response("I'm not sure."))
+        risk = analyzer.security_risk(_make_action_event())
+        policy = ConfirmRisky(confirm_unknown=False)
+        assert policy.should_confirm(risk) is False
