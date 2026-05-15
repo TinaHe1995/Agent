@@ -287,9 +287,10 @@ jobs:
                   fi
 
                   echo "📝 Regenerating uv.lock..."
-                  # Unset UV_EXCLUDE_NEWER: setup-uv sets a 7-day freshness guardrail that
-                  # would reject just-published packages. This step intentionally consumes them.
-                  env -u UV_EXCLUDE_NEWER uv lock --no-cache
+                  # Pass --exclude-newer=now to override the 7-day freshness guardrail that
+                  # setup-uv writes into ~/.config/uv/uv.toml. A CLI flag takes precedence
+                  # over the config file, and "now" allows just-published packages through.
+                  uv lock --no-cache --exclude-newer "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                   echo "✅ Updated uv.lock"
 
                   # 3. Update the version in sandbox_spec_service.py
