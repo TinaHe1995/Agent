@@ -85,15 +85,11 @@ class TestMCPToolExecutorSecretExpansion:
         # Verify that the action data was expanded
         expanded_action = captured_args.get("action")
         assert expanded_action is not None
-        # These assertions will FAIL until the fix is implemented
         assert expanded_action.data["customer_id"] == "expanded-customer"
         assert expanded_action.data["api_key"] == "expanded-api-key"
 
     def test_executor_expands_braced_var_with_default(self):
-        """Test that ${VAR:-default} syntax works correctly.
-
-        Currently FAILING: MCPToolExecutor doesn't support variable expansion at all.
-        """
+        """Test that ${VAR:-default} syntax works correctly."""
         action = MCPToolAction(
             data={
                 "existing": "${CUSTOMER_ID:-fallback}",
@@ -125,10 +121,7 @@ class TestMCPToolExecutorSecretExpansion:
         assert expanded_action.data["missing"] == "default-value"
 
     def test_executor_expands_nested_data_structures(self):
-        """Test that secrets are expanded in nested dicts and lists.
-
-        Currently FAILING: MCPToolExecutor doesn't traverse nested structures.
-        """
+        """Test that secrets are expanded in nested dicts and lists."""
         action = MCPToolAction(
             data={
                 "auth": {

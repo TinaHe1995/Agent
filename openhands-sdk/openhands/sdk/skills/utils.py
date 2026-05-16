@@ -97,12 +97,8 @@ def expand_variable_references(
             return os.environ[var_name]
 
         # Apply default only if expand_defaults is True and we have a default
-        if support_unbraced:
-            if expand_defaults and default_value is not None:
-                return default_value
-        else:
-            if expand_defaults and default_value is not None:
-                return default_value
+        if expand_defaults and default_value is not None:
+            return default_value
 
         # Return original if not found (preserves placeholder)
         return match.group(0)
