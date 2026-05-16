@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -37,6 +38,7 @@ from openhands.sdk.tool import (
     resolve_tool,
 )
 from openhands.sdk.tool.builtins import InvokeSkillTool
+from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 from openhands.sdk.utils.models import DiscriminatedUnionMixin, get_handler_class_name
 
 
@@ -46,9 +48,44 @@ if TYPE_CHECKING:
         ConversationCallbackType,
         ConversationTokenCallbackType,
     )
-    from openhands.sdk.utils.cipher import Cipher
 
 logger = get_logger(__name__)
+
+
+def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
+    if not value.startswith(FERNET_TOKEN_PREFIX):
+        return value
+    decrypted = cipher.try_decrypt_str(value)
+    if decrypted is None:
+        logger.warning(
+            "MCP env/headers value looks encrypted but could not be decrypted "
+            "(cipher mismatch or corruption); leaving the ciphertext in place."
+        )
+        return value
+    return decrypted
+
+
+def _decrypt_mcp_secret_values(
+    config: dict[str, Any], cipher: Cipher
+) -> dict[str, Any]:
+    config = copy.deepcopy(config)
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return config
+    for server in servers.values():
+        if not isinstance(server, dict):
+            continue
+        for key in ("env", "headers"):
+            mapping = server.get(key)
+            if not isinstance(mapping, dict):
+                continue
+            server[key] = {
+                name: _decrypt_mcp_value_or_keep(cipher, value)
+                if isinstance(value, str)
+                else value
+                for name, value in mapping.items()
+            }
+    return config
 
 
 class AgentBase(DiscriminatedUnionMixin, ABC):
@@ -217,20 +254,23 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         """
         if not isinstance(data, dict):
             return data
-        # - Empty config: omit (default value, nothing to protect)
+        cipher: Cipher | None = info.context.get("cipher") if info.context else None
         encrypted = data.pop("encrypted_mcp_config", None)
         if encrypted is None:
+            mcp_config = data.get("mcp_config")
+            if isinstance(mcp_config, dict) and cipher is not None:
+                data = dict(data)
+                data["mcp_config"] = _decrypt_mcp_secret_values(mcp_config, cipher)
             return data
 
         # If no cipher in context, we can't decrypt - the encrypted value is lost
-        if not info.context or not info.context.get("cipher"):
+        if cipher is None:
             logger.warning(
                 "Found encrypted_mcp_config but no cipher in context - "
                 "MCP configuration will be lost. Provide a cipher to preserve it."
             )
             return data
 
-        cipher: Cipher = info.context["cipher"]
         decrypted = cipher.decrypt(encrypted)
         if decrypted is None:
             logger.warning(
