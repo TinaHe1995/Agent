@@ -124,3 +124,49 @@ class SecretCreateRequest(BaseModel):
     name: str
     value: SecretStr
     description: str | None = None
+
+
+# ── MCP Server CRUD API Models ────────────────────────────────────────────
+
+
+class MCPServerSummary(BaseModel):
+    """Single-server summary returned by ``GET /api/settings/mcp-servers``.
+
+    The list view never carries ``env`` or ``headers`` values — clients that
+    need the full configuration (including secrets, modulated by
+    ``X-Expose-Secrets``) should call ``GET /api/settings/mcp-servers/{name}``.
+
+    ``transport_kind`` is the high-level shape of the server config
+    (``"stdio"`` for command-launched local processes, ``"remote"`` for
+    HTTP/SSE endpoints). ``transport`` is the more specific value reported by
+    the underlying ``fastmcp`` server model when present (e.g. ``"http"``,
+    ``"sse"``, ``"stdio"``); it's exposed for clients that want to display it
+    without having to fetch each server.
+    """
+
+    name: str
+    transport_kind: str
+    transport: str | None = None
+    description: str | None = None
+    icon: str | None = None
+
+
+class MCPServerListResponse(BaseModel):
+    """Response model for ``GET /api/settings/mcp-servers``."""
+
+    servers: list[MCPServerSummary]
+
+
+class MCPServerResponse(BaseModel):
+    """Response model for ``GET/PUT/PATCH /api/settings/mcp-servers/{name}``.
+
+    ``config`` carries the raw ``fastmcp`` server-config dict (i.e. the
+    ``MCPConfig.mcpServers[name]`` payload). It's kept as ``dict[str, Any]``
+    so the server controls secret serialization via context the same way
+    ``SettingsResponse.agent_settings`` does — typed Pydantic fields would
+    lose the ``X-Expose-Secrets`` modulation during FastAPI's automatic JSON
+    serialization.
+    """
+
+    name: str
+    config: dict[str, Any]
