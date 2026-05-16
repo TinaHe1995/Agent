@@ -16,6 +16,7 @@ from openhands.sdk.logger import get_logger
 from openhands.sdk.mcp.client import MCPClient
 from openhands.sdk.mcp.definition import MCPToolAction, MCPToolObservation
 from openhands.sdk.observability.laminar import observe
+from openhands.sdk.skills.utils import expand_variable_references
 from openhands.sdk.tool import (
     Action,
     Observation,
@@ -28,13 +29,6 @@ from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
 
 logger = get_logger(__name__)
-
-# Regex pattern for environment variable references:
-# - $VAR or ${VAR} - simple variable reference
-# - ${VAR:-default} - variable with default value
-SECRET_VAR_PATTERN = re.compile(
-    r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}|\$([a-zA-Z_][a-zA-Z0-9_]*)"
-)
 
 
 def expand_secrets_in_data(
@@ -55,39 +49,19 @@ def expand_secrets_in_data(
     Returns:
         Data dictionary with secret references expanded.
     """
-
-    def replace_var(match: re.Match) -> str:
-        # Group 1: braced variable name (from ${VAR} or ${VAR:-default})
-        # Group 2: default value (from ${VAR:-default})
-        # Group 3: unbraced variable name (from $VAR)
-        braced_var = match.group(1)
-        default_value = match.group(2)
-        unbraced_var = match.group(3)
-
-        var_name = braced_var or unbraced_var
-
-        # Look up the secret
-        secret_value = get_secret(var_name)
-        if secret_value is not None:
-            return secret_value
-
-        # Apply default if available (only for braced syntax)
-        if default_value is not None:
-            return default_value
-
-        # Return original if not found (preserves placeholder)
-        return match.group(0)
-
-    def expand_value(value: Any) -> Any:
-        if isinstance(value, str):
-            return SECRET_VAR_PATTERN.sub(replace_var, value)
-        if isinstance(value, dict):
-            return {k: expand_value(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [expand_value(item) for item in value]
-        return value
-
-    return expand_value(data)
+    # Use the shared expansion function with runtime tool settings:
+    # - support_unbraced=True (support $VAR syntax like shell/terminal)
+    # - check_env=False (only use secrets, not env vars)
+    result = expand_variable_references(
+        data,
+        get_secret=get_secret,
+        check_env=False,
+        expand_defaults=True,
+        support_unbraced=True,
+    )
+    if not isinstance(result, dict):
+        return data  # Return original if expansion failed
+    return result
 
 
 # Default timeout for MCP tool execution in seconds
