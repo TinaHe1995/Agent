@@ -213,17 +213,27 @@ class TestLLM(LLM):
     ) -> LLMResponse:
         """Async variant that delegates to the synchronous :meth:`completion`.
 
+        Runs the sync call in an executor so the event loop is not
+        blocked, even though the underlying ``deque.popleft()`` is
+        effectively instantaneous.
+
         ``on_token`` is accepted for API compatibility but not forwarded
         because :meth:`completion` ignores it and the type union
         (sync | async callback) is not assignable to the sync-only
         signature.
         """
-        return self.completion(
-            messages=messages,
-            tools=tools,
-            _return_metrics=_return_metrics,
-            add_security_risk_prediction=add_security_risk_prediction,
-            **kwargs,
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.completion(
+                messages=messages,
+                tools=tools,
+                _return_metrics=_return_metrics,
+                add_security_risk_prediction=add_security_risk_prediction,
+                **kwargs,
+            ),
         )
 
     def responses(

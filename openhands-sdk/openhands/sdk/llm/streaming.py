@@ -18,8 +18,12 @@ AnyTokenCallbackType = TokenCallbackType | AsyncTokenCallbackType
 async def _invoke_token_callback(
     cb: AnyTokenCallbackType, chunk: LLMStreamChunk
 ) -> None:
-    """Invoke a token callback, awaiting if it is a coroutine function."""
-    if asyncio.iscoroutinefunction(cb):
-        await cb(chunk)
-    else:
-        cb(chunk)  # type: ignore[arg-type]
+    """Invoke a token callback, awaiting if it returns a coroutine.
+
+    Handles both plain coroutine functions **and** callable objects
+    whose ``__call__`` is async (``asyncio.iscoroutinefunction`` does
+    not detect the latter).
+    """
+    result = cb(chunk)  # type: ignore[arg-type]
+    if asyncio.iscoroutine(result):
+        await result

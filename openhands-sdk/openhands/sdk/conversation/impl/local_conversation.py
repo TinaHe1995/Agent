@@ -895,16 +895,17 @@ class LocalConversation(BaseConversation):
                         )
                         break
         except Exception as e:
-            self._state.execution_status = ConversationExecutionStatus.ERROR
+            with self._state:
+                self._state.execution_status = ConversationExecutionStatus.ERROR
 
-            # Add an error event
-            self._on_event(
-                ConversationErrorEvent(
-                    source="environment",
-                    code=e.__class__.__name__,
-                    detail=str(e),
+                # Add an error event
+                self._on_event(
+                    ConversationErrorEvent(
+                        source="environment",
+                        code=e.__class__.__name__,
+                        detail=str(e),
+                    )
                 )
-            )
 
             # Re-raise with conversation id and persistence dir for better UX
             raise ConversationRunError(
