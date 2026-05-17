@@ -1,37 +1,40 @@
 """
-Async LLM cancellation — instant interrupt of in-flight completions.
+Async interrupt demo — cancel during LLM reasoning *or* tool execution.
 
-Demonstrates ``conversation.interrupt()``, which cancels an LLM call
-*while the model is still generating tokens*.  The cancellation is
-instant because the asyncio task driving ``arun()`` is cancelled at
-the very next ``await`` boundary — typically inside the streaming
-HTTP read.
+The task is designed to give two windows where ``interrupt()`` can fire:
 
-Contrast with ``conversation.pause()`` where the pause cannot take
-effect until the current blocking LLM call finishes.
+1. **During LLM completion** — the model must reason about how to write
+   the script and then run it, which takes several seconds of generation.
+2. **During a long-running terminal command** — the agent runs a shell
+   script that sleeps for 30 seconds, giving plenty of time to interrupt
+   while a tool call is in-flight.
+
+Press **Ctrl-C** at any point, or let the auto-timer fire after a
+configurable delay (default 8 s).  The conversation transitions to
+``PAUSED`` and can be resumed later with another ``arun()`` / ``run()``.
 
 Usage:
     LLM_API_KEY=... python examples/01_standalone_sdk/50_async_cancellation.py
 
-    # Press Ctrl-C at any time to interrupt, or wait for the auto timer.
+    # Override the auto-interrupt delay:
+    AUTO_CANCEL_SECONDS=12 LLM_API_KEY=... python examples/...
 """
 
 import asyncio
 import os
 import signal
-import sys
 import time
 
 from pydantic import SecretStr
 
-from openhands.sdk import LLM, Agent, Conversation
-from openhands.sdk.llm.streaming import ModelResponseStream
+from openhands.sdk import LLM, Agent, Conversation, Event
+from openhands.sdk.event import ActionEvent, ObservationEvent
 from openhands.sdk.tool import Tool
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 
 
-# ── LLM (streaming enabled so we see tokens arrive) ─────────────────
+# ── Configuration ────────────────────────────────────────────────────
 api_key = os.getenv("LLM_API_KEY")
 assert api_key, "Set LLM_API_KEY in your environment."
 
@@ -43,7 +46,6 @@ llm = LLM(
     api_key=SecretStr(api_key),
     base_url=base_url,
     usage_id="async-cancel-demo",
-    stream=True,
 )
 
 # ── Agent & conversation ─────────────────────────────────────────────
@@ -55,61 +57,53 @@ agent = Agent(
     ],
 )
 
-token_count = 0
+# ── Live event log ───────────────────────────────────────────────────
+phase = "llm"  # tracks which phase we're in for the status line
 
 
-def on_token(chunk: ModelResponseStream) -> None:
-    """Print streaming tokens and count them."""
-    global token_count
-    for choice in chunk.choices:
-        delta = choice.delta
-        if delta is not None:
-            text = getattr(delta, "content", None) or ""
-            reasoning = getattr(delta, "reasoning_content", None) or ""
-            fragment = text or reasoning
-            if fragment:
-                token_count += 1
-                sys.stdout.write(fragment)
-                sys.stdout.flush()
+def on_event(event: Event) -> None:
+    """Print a one-liner for each event so the user can see progress."""
+    global phase
+    if isinstance(event, ActionEvent):
+        phase = "tool"
+        print(f"  🔧 Agent calls: {event.tool_name}")
+    elif isinstance(event, ObservationEvent):
+        text = str(event.observation)[:120] if event.observation else ""
+        print(f"  📋 Result: {text}")
 
 
 conversation = Conversation(
     agent=agent,
     workspace=os.getcwd(),
-    token_callbacks=[on_token],
+    callbacks=[on_event],
 )
 
-# Give the model a task that requires extended reasoning and generation
-# so the LLM call is visibly in-flight when we interrupt.
+# Ask the agent to do something that naturally produces TWO blocking
+# phases: first a long LLM completion (reasoning + generation), then
+# a long-running terminal command (sleep 30).
 conversation.send_message(
-    "Write a thorough, multi-page technical deep-dive (at least 2000 words) "
-    "comparing every major sorting algorithm: bubble sort, selection sort, "
-    "insertion sort, merge sort, quick sort, heap sort, radix sort, counting "
-    "sort, Tim sort, and shell sort.  For each algorithm, include:\n"
-    "  1. Pseudocode\n"
-    "  2. Time complexity analysis (best / average / worst)\n"
-    "  3. Space complexity\n"
-    "  4. When you would choose it in practice\n"
-    "  5. A worked example with the input [38, 27, 43, 3, 9, 82, 10]\n\n"
-    "Write the full analysis into a file called sorting_deep_dive.md."
+    "Please do the following:\n"
+    "1. Write a bash script called countdown.sh that prints the numbers "
+    "30 down to 1, sleeping 1 second between each number.\n"
+    "2. Run the script with `bash countdown.sh` and wait for it to finish.\n"
+    "3. After the script completes, create a file called done.txt with "
+    "the text 'Countdown complete!'."
 )
 
 
-# ── Interruption machinery ──────────────────────────────────────────
-AUTO_CANCEL_SECONDS = float(os.getenv("AUTO_CANCEL_SECONDS", "5"))
+# ── Interruption machinery ───────────────────────────────────────────
+AUTO_CANCEL_SECONDS = float(os.getenv("AUTO_CANCEL_SECONDS", "8"))
 
 
 def _request_interrupt(source: str) -> None:
-    """Interrupt the conversation from any context."""
-    print(f"\n\n{'=' * 60}")
+    print(f"\n{'=' * 60}")
     print(f"⚡ Interrupt requested ({source})")
-    print(f"   Tokens received before interrupt: {token_count}")
+    print(f"   Current phase: {phase}")
     print(f"{'=' * 60}\n")
     conversation.interrupt()
 
 
 async def _auto_interrupt_timer() -> None:
-    """Fire after AUTO_CANCEL_SECONDS to show programmatic interruption."""
     await asyncio.sleep(AUTO_CANCEL_SECONDS)
     _request_interrupt(f"auto-timer after {AUTO_CANCEL_SECONDS}s")
 
@@ -127,33 +121,37 @@ async def main() -> None:
         pass  # Windows — KeyboardInterrupt will still work
 
     print("=" * 60)
-    print("Async LLM Interrupt Demo")
+    print("Async Interrupt Demo")
     print("=" * 60)
     print(f"Model          : {model}")
     print(f"Auto-interrupt : {AUTO_CANCEL_SECONDS}s  (or press Ctrl-C)")
+    print()
+    print("The agent will first reason + generate code (window 1),")
+    print("then run a 30-second countdown script (window 2).")
+    print("Interrupt at any time to cancel instantly.")
     print("=" * 60)
     print()
 
-    # ── Launch arun() alongside the interrupt timer ──────────────────
+    # ── Run with interrupt timer ─────────────────────────────────────
     timer_task = asyncio.create_task(_auto_interrupt_timer())
     wall_start = time.monotonic()
 
-    # arun() catches CancelledError internally and returns cleanly
-    # with status=PAUSED, so no CancelledError propagates here.
     await conversation.arun()
 
     timer_task.cancel()
-    elapsed_ms = (time.monotonic() - wall_start) * 1000
+    elapsed = time.monotonic() - wall_start
 
+    # ── Summary ──────────────────────────────────────────────────────
+    status = conversation.state.execution_status
     print()
     print("─" * 60)
-    print(f"Conversation status : {conversation.state.execution_status}")
-    print(f"Wall time           : {elapsed_ms:.0f} ms")
-    print(f"Tokens streamed     : {token_count}")
+    print(f"Status    : {status}")
+    print(f"Wall time : {elapsed:.1f}s")
+    print(f"Phase     : interrupted during {phase}")
     print()
-    print("With pause(), the LLM HTTP call must finish before the")
-    print("pause takes effect.  With interrupt(), the asyncio task")
-    print("is cancelled at the next await boundary — instantly.")
+    if str(status) == "paused":
+        print("The conversation is paused — you could resume it with")
+        print("another arun() or run() call to let the agent continue.")
     print("─" * 60)
 
     cost = llm.metrics.accumulated_cost
