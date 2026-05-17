@@ -726,7 +726,7 @@ def test_llm_completion_function_call_vs_non_function_call_mode(mock_completion)
     assert non_native_call_kwargs.get("tools") is None
 
 
-@patch("openhands.sdk.llm.llm.litellm_completion")
+@patch("openhands.sdk.llm.llm.litellm_acompletion")
 def test_llm_streaming_preserves_cache_read_tokens(mock_completion):
     """Test that cache_read_tokens from prompt_tokens_details survive streaming.
 
@@ -741,7 +741,7 @@ def test_llm_streaming_preserves_cache_read_tokens(mock_completion):
     This test creates realistic streaming chunks (as sent by a LiteLLM proxy)
     including a usage-only final chunk with cached_tokens=4000 and lets the
     real stream_chunk_builder reassemble them.  It verifies:
-    1. stream_options={"include_usage": True} is passed to litellm_completion
+    1. stream_options={"include_usage": True} is passed to litellm_acompletion
     2. cache_read_tokens is correctly reported in the response metrics
     """
     # --- Simulate chunks as sent by a LiteLLM proxy ---
@@ -789,8 +789,13 @@ def test_llm_streaming_preserves_cache_read_tokens(mock_completion):
         ),
     )
 
+    # Create async iterator for the stream (acompletion returns async-iterable)
+    async def async_stream():
+        for chunk in [content_chunk, finish_chunk, usage_chunk]:
+            yield chunk
+
     mock_stream = MagicMock(spec=CustomStreamWrapper)
-    mock_stream.__iter__.return_value = iter([content_chunk, finish_chunk, usage_chunk])
+    mock_stream.__aiter__ = lambda self: async_stream().__aiter__()
     mock_completion.return_value = mock_stream
 
     llm = LLM(

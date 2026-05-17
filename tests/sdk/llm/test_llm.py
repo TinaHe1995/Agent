@@ -1162,7 +1162,7 @@ def test_conversation_stats_restore_then_track():
 
     stats = ConversationStats(usage_to_metrics={"agent": saved_metrics})
 
-    with patch("openhands.sdk.llm.llm.litellm_completion"):
+    with patch("openhands.sdk.llm.llm.litellm_acompletion"):
         llm = LLM(
             model="openai/gpt-4o",
             api_key=SecretStr("test-key"),
