@@ -742,7 +742,7 @@ class EventService:
                     # loop is free during LLM I/O. Fall back to thread-pool
                     # execution for backward compatibility.
                     arun = getattr(conversation, "arun", None)
-                    if arun is not None:
+                    if arun is not None and asyncio.iscoroutinefunction(arun):
                         await conversation.arun()
                     else:
                         await loop.run_in_executor(self._run_executor, conversation.run)
