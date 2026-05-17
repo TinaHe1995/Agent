@@ -24,6 +24,8 @@ from openhands.agent_server.skills_service import (
     sync_public_skills,
 )
 from openhands.sdk.extensions.fetch import ExtensionFetchError
+from openhands.sdk.git.exceptions import GitError
+from openhands.sdk.logger import get_logger
 from openhands.sdk.skills import (
     InstalledSkillInfo,
     SkillFetchError,
@@ -33,6 +35,7 @@ from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
 from openhands.sdk.skills.utils import SKILL_NAME_PATTERN
 
 
+logger = get_logger(__name__)
 skills_router = APIRouter(prefix="/skills", tags=["Skills"])
 
 # Validated skill name path parameter
@@ -274,18 +277,39 @@ def get_skills(request: SkillsRequest) -> SkillsResponse:
         org_repo_url = request.org_config.org_repo_url
         org_name = request.org_config.org_name
 
-    # Call the service
-    result = load_all_skills(
-        load_public=request.load_public,
-        load_user=request.load_user,
-        load_project=request.load_project,
-        load_org=request.load_org,
-        project_dir=request.project_dir,
-        org_repo_url=org_repo_url,
-        org_name=org_name,
-        sandbox_exposed_urls=sandbox_urls,
-        marketplace_path=request.marketplace_path,
-    )
+    # Call the service.
+    #
+    # Skills loading is best-effort: it pulls from several independent sources
+    # (public, user, project, org, sandbox), and the consumer (the SDK's
+    # RemoteWorkspace.load_skills_from_agent_server) expects this endpoint to
+    # succeed even when some sources fail. The service layer already catches
+    # most failure modes per-source, but git-related errors from the project
+    # workspace are an explicit known case: when the workspace isn't a git
+    # repository (e.g. the request arrives before EventService.start has had
+    # a chance to `git init` the workspace), any git invocation triggered by
+    # project-skill discovery raises GitError. We mirror git_router's
+    # defensive pattern and degrade to an empty response with a warning log,
+    # so the agent still gets public/user/org skills and the SDK consumer
+    # doesn't blow up over workspace state it has no way to control.
+    try:
+        result = load_all_skills(
+            load_public=request.load_public,
+            load_user=request.load_user,
+            load_project=request.load_project,
+            load_org=request.load_org,
+            project_dir=request.project_dir,
+            org_repo_url=org_repo_url,
+            org_name=org_name,
+            sandbox_exposed_urls=sandbox_urls,
+            marketplace_path=request.marketplace_path,
+        )
+    except GitError as e:
+        logger.warning(
+            "Skills loading failed due to workspace git state (%s); "
+            "returning empty skills",
+            e,
+        )
+        return SkillsResponse(skills=[], sources={})
 
     # Convert Skill objects to SkillInfo for response
     skills_info = [

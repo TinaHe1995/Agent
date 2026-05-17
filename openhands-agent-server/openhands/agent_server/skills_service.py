@@ -24,6 +24,7 @@ from time import monotonic
 
 from pydantic import BaseModel, ValidationError
 
+from openhands.sdk.git.exceptions import GitError
 from openhands.sdk.logger import get_logger
 from openhands.sdk.marketplace import Marketplace
 from openhands.sdk.skills import (
@@ -362,12 +363,31 @@ def load_all_skills(
     skill_lists.append(org_skills)
 
     # 5. Load project skills (highest precedence)
-    project_skills = load_available_skills(
-        work_dir=project_dir if load_project else None,
-        include_user=False,
-        include_project=load_project,
-        include_public=False,
-    )
+    #
+    # Project-skill discovery walks the workspace directory and may, in some
+    # code paths, invoke git (e.g. to resolve a repo root or read repo state).
+    # When the workspace isn't a git repository yet — for example, when this
+    # endpoint is called before a conversation has been created, so
+    # EventService._ensure_workspace_is_git_repo hasn't run — that git call
+    # raises GitError. Skills loading is best-effort, so we mirror the
+    # defensive pattern used by git_router._get_git_changes: log and return
+    # empty project skills rather than letting the request 500. This keeps
+    # the agent usable (with public/user/org skills only) instead of failing
+    # the entire load_skills_from_agent_server call.
+    project_skills: dict[str, Skill] = {}
+    try:
+        project_skills = load_available_skills(
+            work_dir=project_dir if load_project else None,
+            include_user=False,
+            include_project=load_project,
+            include_public=False,
+        )
+    except GitError as e:
+        logger.warning(
+            "Project skills unavailable (workspace git state error at %s): %s",
+            project_dir,
+            e,
+        )
     sources["project"] = len(project_skills)
     skill_lists.append(list(project_skills.values()))
 

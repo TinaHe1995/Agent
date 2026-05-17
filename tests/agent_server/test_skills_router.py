@@ -10,6 +10,7 @@ from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
 from openhands.agent_server.skills_service import MarketplaceSkillInfo, SkillLoadResult
 from openhands.sdk.extensions.fetch import ExtensionFetchError
+from openhands.sdk.git.exceptions import GitRepositoryError
 from openhands.sdk.skills import (
     InstalledSkillInfo,
     KeywordTrigger,
@@ -63,6 +64,36 @@ class TestGetSkillsEndpoint:
             assert "sources" in data
             assert len(data["skills"]) == 1
             assert data["skills"][0]["name"] == "test-skill"
+
+    def test_get_skills_returns_empty_response_on_git_error(self, client):
+        """The /skills endpoint must degrade to an empty 200 when the
+        underlying service raises a GitError.
+
+        Regression for the prompt-preset failure mode where the workspace is
+        not yet a git repository (EventService.start has not run) and the
+        SDK's RemoteWorkspace.load_skills_from_agent_server would otherwise
+        receive a 500 it has no sensible way to recover from.
+        """
+        with patch("openhands.agent_server.skills_router.load_all_skills") as mock_load:
+            mock_load.side_effect = GitRepositoryError(
+                "fatal: not a git repository (or any of the parent "
+                "directories): .git",
+                command="git rev-parse",
+                exit_code=128,
+            )
+
+            response = client.post(
+                "/api/skills",
+                json={
+                    "project_dir": "/workspace/myproject",
+                    "load_project": True,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["skills"] == []
+            assert data["sources"] == {}
 
     def test_get_skills_with_project_dir(self, client):
         """Test skills request with project directory."""

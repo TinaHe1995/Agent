@@ -14,6 +14,7 @@ from openhands.agent_server.skills_service import (
     merge_skills,
     sync_public_skills,
 )
+from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.skills import Skill
 
 
@@ -330,6 +331,73 @@ class TestLoadAllSkills:
             )
 
             assert result.sources["sdk_base"] == 1
+
+    def test_load_all_skills_swallows_git_repository_error_for_project_dir(self):
+        """Project skills load must not 500 when the workspace isn't a git repo.
+
+        Regression for the prompt-preset failure mode where
+        load_skills_from_agent_server is called before EventService.start()
+        has had a chance to `git init` the workspace. The endpoint should
+        degrade gracefully: other sources are returned, project sources are
+        empty, and no exception escapes.
+        """
+        user_skill = Skill(name="user1", content="user-content", trigger=None)
+
+        # First call (sdk_base / public+user) returns a skill; second call
+        # (project) raises GitRepositoryError, simulating a workspace that
+        # isn't a git repo.
+        with patch(
+            self._PATCH_TARGET,
+            side_effect=[
+                {"user1": user_skill},
+                GitRepositoryError(
+                    "fatal: not a git repository (or any of the parent "
+                    "directories): .git",
+                    command="git rev-parse",
+                    exit_code=128,
+                ),
+            ],
+        ):
+            result = load_all_skills(
+                load_public=True,
+                load_user=True,
+                load_project=True,
+                load_org=False,
+                project_dir="/workspace",
+            )
+
+        assert isinstance(result, SkillLoadResult)
+        assert result.sources["sdk_base"] == 1
+        assert result.sources["project"] == 0
+        assert [s.name for s in result.skills] == ["user1"]
+
+    def test_load_all_skills_swallows_git_command_error_for_project_dir(self):
+        """Project skills load must not 500 on arbitrary git command failures."""
+        user_skill = Skill(name="user1", content="user-content", trigger=None)
+
+        with patch(
+            self._PATCH_TARGET,
+            side_effect=[
+                {"user1": user_skill},
+                GitCommandError(
+                    "git command failed",
+                    command=["git", "rev-parse", "HEAD"],
+                    exit_code=128,
+                    stderr="fatal: not a git repository",
+                ),
+            ],
+        ):
+            result = load_all_skills(
+                load_public=True,
+                load_user=True,
+                load_project=True,
+                load_org=False,
+                project_dir="/workspace",
+            )
+
+        assert result.sources["sdk_base"] == 1
+        assert result.sources["project"] == 0
+        assert [s.name for s in result.skills] == ["user1"]
 
     def test_load_all_skills_merge_precedence(self):
         """Test that skills are merged with correct precedence."""
