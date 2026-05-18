@@ -17,8 +17,8 @@ from openhands.sdk import (
     register_agent,
 )
 from openhands.sdk.subagent import AgentDefinition
-from openhands.sdk.tool import register_tool
-from openhands.tools.delegate import DelegateTool, DelegationVisualizer
+from openhands.tools.delegate import DelegationVisualizer
+from openhands.tools.task import TaskToolSet
 
 
 # 1. Define a sub-agent using AgentDefinition
@@ -36,7 +36,7 @@ register_agent(
     description=grammar_checker,
 )
 
-# 3. Set up the orchestrator agent with the DelegateTool
+# 3. Set up the orchestrator agent with the task tool
 llm = LLM(
     model=os.getenv("LLM_MODEL", "gpt-5.5"),
     api_key=os.getenv("LLM_API_KEY"),
@@ -44,10 +44,9 @@ llm = LLM(
     usage_id="file-agents-demo",
 )
 
-register_tool("DelegateTool", DelegateTool)
 main_agent = Agent(
     llm=llm,
-    tools=[Tool(name="DelegateTool")],
+    tools=[Tool(name=TaskToolSet.name)],
 )
 conversation = Conversation(
     agent=main_agent,
