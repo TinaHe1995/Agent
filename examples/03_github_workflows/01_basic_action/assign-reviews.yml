@@ -71,12 +71,18 @@ jobs:
                 # Need Reviewer Action
 
                 Find all open PRs where:
-                1. The PR is waiting for review (there are no open review comments or change requests)
+                1. The PR is still waiting on its currently requested reviewers or teams:
+                   - Fetch submitted reviews: GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews
+                   - Collapse them to each reviewer's latest state
+                   - If any HUMAN reviewer's latest state is APPROVED, SKIP the PR entirely
+                   - Ignore approvals from automation/bot accounts when deciding whether a human has approved
+                   - Also skip if there are open review comments, unresolved review threads, or any latest CHANGES_REQUESTED review
+                   - Example: if @alice approved and @bob is still requested, do NOT ping @bob
                 2. The PR is in a "clean" state (CI passing, no merge conflicts)
                 3. The PR is not marked as draft (draft: false)
                 4. The PR has had no activity (comments, commits, reviews) for more than 3 days.
 
-                In this case, send a message to the reviewers:
+                In this case, send a message only to the currently requested reviewers or teams:
                 [Automatic Post]: This PR seems to be currently waiting for review.
                 {reviewer_names}, could you please take a look when you have a chance?
 
