@@ -508,7 +508,7 @@ def generate_baseline_payloads(
     *,
     sdk_version: str,
     agent_server_version: str | None,
-) -> list[BaselinePayloadCase] | None:
+) -> list[BaselinePayloadCase]:
     with tempfile.TemporaryDirectory(prefix="persisted-settings-baseline-") as tmp_dir:
         venv_dir = Path(tmp_dir) / "venv"
         venv.EnvBuilder(with_pip=True).create(venv_dir)
@@ -544,11 +544,9 @@ def generate_baseline_payloads(
             baseline_desc = f"openhands-sdk=={sdk_version}"
             if agent_server_version is not None:
                 baseline_desc += f", openhands-agent-server=={agent_server_version}"
-            print(
-                "::warning title=Persisted settings baseline::Failed to generate "
-                f"baseline payloads from {baseline_desc}: {excerpt}"
-            )
-            return None
+            raise PersistedSettingsCompatError(
+                f"Failed to generate baseline payloads from {baseline_desc}: {excerpt}"
+            ) from exc
 
         raw_cases = json.loads(result.stdout)
         if not isinstance(raw_cases, list):
@@ -639,9 +637,6 @@ def main() -> int:
         sdk_version=sdk_baseline,
         agent_server_version=agent_server_baseline,
     )
-    if baseline_cases is None:
-        return 0
-
     validate_baseline_payload_cases(baseline_cases)
     print(
         f"Validated {len(baseline_cases)} baseline payload(s) from PyPI release "

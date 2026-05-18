@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -128,3 +129,27 @@ def test_get_pypi_baseline_version_prefers_current_or_previous(monkeypatch) -> N
 
     assert get_pypi_baseline_version("openhands-sdk", "1.1.0") == "1.1.0"
     assert get_pypi_baseline_version("openhands-sdk", "1.2.0") == "1.1.0"
+
+
+def test_generate_baseline_payloads_raises_on_generation_failure(monkeypatch) -> None:
+    monkeypatch.setattr(_prod.venv.EnvBuilder, "create", lambda self, _path: None)
+    monkeypatch.setattr(_prod, "_venv_python", lambda _path: Path("/tmp/fake-python"))
+
+    def _raise_called_process_error(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            ["python", "-m", "pip", "install"],
+            output="stdout",
+            stderr="stderr",
+        )
+
+    monkeypatch.setattr(_prod.subprocess, "run", _raise_called_process_error)
+
+    with pytest.raises(
+        PersistedSettingsCompatError,
+        match="Failed to generate baseline payloads",
+    ):
+        _prod.generate_baseline_payloads(
+            sdk_version="1.2.3",
+            agent_server_version="1.2.3",
+        )
