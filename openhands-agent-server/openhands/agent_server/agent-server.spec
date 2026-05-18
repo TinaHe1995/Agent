@@ -89,7 +89,7 @@ a = Analysis(
         # Built-in subagent definitions consumed by register_builtins_agents()
         # at agent-server startup. Without these, the registry stays empty in
         # PyInstaller builds and downstream clients see an unpopulated
-        # task_tool_set description (see issue #3289).
+        # task_tool_set description.
         *collect_data_files("openhands.tools.preset", includes=["subagents/*.md"]),
 
         # Package metadata for importlib.metadata
