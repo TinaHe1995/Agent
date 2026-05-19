@@ -116,16 +116,14 @@ class TestAutoLoadedSkillsSerialization:
         assert {s["name"] for s in dumped["skills"]} == {"foo", "bar"}
 
     def test_migration_stored_skills_matching_loader_are_marked_auto_loaded(self):
-        """Migration path: a conversation stored before this PR carries the
-        resolved auto-loaded skills inlined on ``skills``. On reload, the
-        validator must recognise those as auto-loaded (the persisted
-        skill equals what the loader produces) and drop them from the
-        next serialization — otherwise the bloat persists until the
-        conversation is recreated.
+        """Migration path (loading_from_snapshot only): a conversation
+        stored before this PR carries the resolved auto-loaded skills
+        inlined on ``skills``. When ``ConversationState`` loads it with
+        ``loading_from_snapshot=True``, the validator recognises matching
+        skills as auto-loaded and drops them from the next serialization —
+        otherwise the bloat persists until the conversation is recreated.
         """
         stored = [_make_skill("auto-x"), _make_skill("auto-y")]
-        # Loader returns the same skill objects (matches what was
-        # persisted under the old SDK).
         loader_output = {
             "auto-x": _make_skill("auto-x"),
             "auto-y": _make_skill("auto-y"),
@@ -134,7 +132,10 @@ class TestAutoLoadedSkillsSerialization:
             "openhands.sdk.context.agent_context.load_available_skills",
             return_value=loader_output,
         ):
-            ctx = AgentContext(load_public_skills=True, skills=stored)
+            ctx = AgentContext.model_validate(
+                {"load_public_skills": True, "skills": stored},
+                context={"loading_from_snapshot": True},
+            )
 
         # No duplicates: skills stayed at 2 (migration recognised them).
         assert {s.name for s in ctx.skills} == {"auto-x", "auto-y"}
@@ -142,12 +143,38 @@ class TestAutoLoadedSkillsSerialization:
         dumped = ctx.model_dump()
         assert dumped["skills"] == []
 
+    def test_fresh_construction_does_not_conflate_explicit_with_auto(self):
+        """Comment-6 regression: fresh ``AgentContext(skills=[explicit])``
+        construction where the explicit skill happens to equal what the
+        loader returns must NOT mark it as auto-loaded. Without this
+        guard, a later marketplace/user-skill edit would silently swap
+        the caller's pinned content on the next round-trip.
+        """
+        explicit = _make_skill("shared-name", "caller pinned this")
+        loader_output = {
+            "shared-name": _make_skill("shared-name", "caller pinned this")
+        }
+        with patch(
+            "openhands.sdk.context.agent_context.load_available_skills",
+            return_value=loader_output,
+        ):
+            ctx = AgentContext(load_public_skills=True, skills=[explicit])
+
+        # In-memory: only the explicit (validator's "already in
+        # existing" branch hit, no append).
+        assert len(ctx.skills) == 1
+        # On the wire: stays as explicit — not snapshotted as auto.
+        dumped = ctx.model_dump()
+        assert len(dumped["skills"]) == 1
+        assert dumped["skills"][0]["content"] == "caller pinned this"
+
     def test_migration_stored_skills_diverged_from_loader_stay_explicit(self):
         """If the persisted skill content no longer matches what the
         loader would produce (user edited the file, marketplace updated),
         the on-disk version wins — treat it as explicit and keep it on
         the wire. This is the safe default: we don't drop content
-        someone may have intentionally customised.
+        someone may have intentionally customised. Applies under
+        ``loading_from_snapshot`` (same as the matching-migration path).
         """
         stored = [_make_skill("auto-x", "old persisted content")]
         loader_output = {"auto-x": _make_skill("auto-x", "new loader content")}
@@ -155,7 +182,10 @@ class TestAutoLoadedSkillsSerialization:
             "openhands.sdk.context.agent_context.load_available_skills",
             return_value=loader_output,
         ):
-            ctx = AgentContext(load_public_skills=True, skills=stored)
+            ctx = AgentContext.model_validate(
+                {"load_public_skills": True, "skills": stored},
+                context={"loading_from_snapshot": True},
+            )
 
         # The stored ("old") version wins in-memory.
         assert len(ctx.skills) == 1
@@ -164,6 +194,58 @@ class TestAutoLoadedSkillsSerialization:
         dumped = ctx.model_dump()
         assert len(dumped["skills"]) == 1
         assert dumped["skills"][0]["content"] == "old persisted content"
+
+    def test_loading_from_snapshot_does_not_pick_up_new_auto_loaded_skills(self):
+        """Comment-5 regression: a persisted snapshot frozen with only
+        ``{a}`` must not silently grow to ``{a, b}`` if the loader now
+        also returns a new skill ``b`` (marketplace added it, user
+        added a file). The ``loading_from_snapshot`` context flag
+        tells the validator the persisted ``skills`` list is
+        authoritative.
+        """
+        stored = [_make_skill("a")]
+        # Loader sees a new ``b`` that wasn't in the persisted snapshot.
+        loader_output = {
+            "a": _make_skill("a"),
+            "b": _make_skill("b", "newly published content"),
+        }
+        with patch(
+            "openhands.sdk.context.agent_context.load_available_skills",
+            return_value=loader_output,
+        ):
+            ctx = AgentContext.model_validate(
+                {"load_public_skills": True, "skills": stored},
+                context={"loading_from_snapshot": True},
+            )
+
+        # In-memory: snapshot is authoritative — ``b`` is NOT appended.
+        assert {s.name for s in ctx.skills} == {"a"}
+        # Next ``model_dump`` (default, no preserve flag) still trims
+        # ``a`` since it was matched as auto-loaded. Serialized list
+        # is empty — exactly what the original snapshot would have
+        # serialized.
+        dumped = ctx.model_dump()
+        assert dumped["skills"] == []
+        # And the preserve-full path also gives back just ``a`` — no
+        # marketplace pollution.
+        dumped_full = ctx.model_dump(context={"preserve_full_skills": True})
+        assert {s["name"] for s in dumped_full["skills"]} == {"a"}
+
+    def test_fresh_construction_still_appends_new_auto_skills(self):
+        """Sanity: without the ``loading_from_snapshot`` flag, fresh
+        construction keeps appending new auto-loaded skills as today.
+        This is what makes the registry hot for first-launch users.
+        """
+        loader_output = {
+            "auto-1": _make_skill("auto-1"),
+            "auto-2": _make_skill("auto-2"),
+        }
+        with patch(
+            "openhands.sdk.context.agent_context.load_available_skills",
+            return_value=loader_output,
+        ):
+            ctx = AgentContext(load_public_skills=True)
+        assert {s.name for s in ctx.skills} == {"auto-1", "auto-2"}
 
     def test_replacing_auto_skill_via_model_copy_survives_serialization(self):
         """Regression guard for OpenHands' ``_create_agent_with_skills`` flow.

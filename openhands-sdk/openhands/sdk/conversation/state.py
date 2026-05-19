@@ -349,8 +349,16 @@ class ConversationState(OpenHandsModel):
 
         # ---- Resume path ----
         if base_text:
-            # Use cipher context for decrypting secrets if provided
-            context = {"cipher": cipher} if cipher else None
+            # ``loading_from_snapshot`` tells ``AgentContext._load_auto_skills``
+            # that the persisted ``skills`` list is authoritative and must
+            # NOT be augmented with newly published auto-loaded skills the
+            # loader picks up post-save. Without it, a snapshot frozen as
+            # {a} would silently grow to {a, b} after `b` lands in the
+            # public marketplace, breaking the freeze-at-create guarantee
+            # ``_save_base_state`` relied on. See software-agent-sdk#3301.
+            context: dict[str, Any] = {"loading_from_snapshot": True}
+            if cipher:
+                context["cipher"] = cipher
             state = cls.model_validate(json.loads(base_text), context=context)
 
             # Restore the conversation with the same id

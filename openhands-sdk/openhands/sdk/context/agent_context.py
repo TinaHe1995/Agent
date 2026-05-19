@@ -10,6 +10,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SecretStr,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -235,25 +236,46 @@ class AgentContext(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _load_auto_skills(self):
+    def _load_auto_skills(self, info: ValidationInfo):
         """Load user and/or public skills if enabled.
 
         Names of skills added here are tracked in
-        ``_auto_loaded_skill_names`` so the serializer can drop them
-        from the wire payload (this validator re-runs on every model
-        load, so the same skills repopulate without needing to be
-        persisted).
+        ``_auto_loaded_skills`` so the serializer can drop them from
+        the wire payload — this validator re-runs on every model load,
+        so the same skills repopulate without needing to be persisted.
 
-        Migration: stored conversations created before the serializer
-        change carry the resolved auto-loaded skill list inlined on
-        ``skills``. When such a conversation is loaded back, the names
-        match ``existing_names`` and the new-append branch is skipped
-        — but we still mark them as auto-loaded if the persisted skill
-        equals what the loader would produce now. Without this, every
-        old conversation would keep the bloated payload until rewritten.
-        A persisted skill that no longer matches the loader's current
-        output (user edited the file, marketplace updated, etc.) stays
-        treated as explicit so the on-disk content wins.
+        Two behaviour modes, switched by
+        ``context={"loading_from_snapshot": True}``:
+
+        Fresh construction (default, no flag):
+            - Skills the loader returned that aren't already in
+              ``self.skills`` get appended and tracked as auto-loaded.
+            - Skills the loader returned that ARE already in
+              ``self.skills`` (caller-supplied explicit) are left
+              alone — even if they happen to equal the loader output.
+              The caller pinned that content deliberately; treating it
+              as auto-loaded would let a later marketplace update
+              silently swap it on the next round-trip.
+
+        Loading from a persisted snapshot (``loading_from_snapshot``):
+            - The persisted ``skills`` list IS authoritative. Don't
+              append new auto-loaded skills — that would let a
+              marketplace update or a fresh skill file silently
+              pollute the snapshot on the next save.
+            - Skills already in ``self.skills`` that equal the
+              loader's current output get marked as auto-loaded so
+              the next serialize trims them (migration path: old
+              persisted conversations shrink on first reload through
+              the new SDK).
+            - Skills in ``self.skills`` that DON'T match the loader's
+              current output (user edited the file, marketplace
+              updated since the snapshot was taken) stay explicit so
+              the on-disk content wins.
+
+        The persistence load path in
+        ``ConversationState`` factory sets the context flag. API-
+        response paths and direct caller construction don't, so they
+        get fresh-construction semantics.
         """
         if not self.load_user_skills and not self.load_public_skills:
             return self
@@ -276,10 +298,20 @@ class AgentContext(BaseModel):
             self.marketplace_path,
         )
 
+        loading_from_snapshot = bool(
+            info.context and info.context.get("loading_from_snapshot")
+        )
+
         existing_by_name = {skill.name: skill for skill in self.skills}
         for name, skill in auto_skills.items():
             existing = existing_by_name.get(name)
             if existing is None:
+                if loading_from_snapshot:
+                    # Snapshot is authoritative — don't add a skill
+                    # the persisted state never had. This is what
+                    # freezes the auto-loaded set against marketplace
+                    # / user-skill churn between save and load.
+                    continue
                 self.skills.append(skill)
                 # Deep-copy so an in-place caller mutation
                 # (``ctx.skills[0].content = "custom"``) doesn't also
@@ -287,9 +319,12 @@ class AgentContext(BaseModel):
                 # would still succeed and the customised skill would
                 # silently disappear from the wire.
                 self._auto_loaded_skills[name] = skill.model_copy(deep=True)
-            elif existing == skill:
-                # Migration path for conversations stored before the
-                # serializer change — see the docstring.
+            elif existing == skill and loading_from_snapshot:
+                # Migration path: existing matches loader → mark as
+                # auto-loaded so the next serialize can trim it.
+                # ONLY fires under loading_from_snapshot — for fresh
+                # construction this would conflate caller-pinned
+                # explicit skills with auto-loaded ones.
                 self._auto_loaded_skills[name] = skill.model_copy(deep=True)
             else:
                 logger.debug(
