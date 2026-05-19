@@ -598,6 +598,38 @@ class TestACPAgentInitState:
         assert events[0].dynamic_context is not None
         assert "REGISTRY_TOKEN" in events[0].dynamic_context.text
 
+    def test_init_state_renders_registry_secrets_without_agent_context(self, tmp_path):
+        """The <CUSTOM_SECRETS> block should render from secret_registry alone.
+
+        Callers that ship secrets through the canonical conversation
+        channel (``StartConversationRequest.secrets`` →
+        ``Conversation.update_secrets`` → ``secret_registry``) but don't
+        attach an ``AgentContext`` shouldn't see those secrets silently
+        dropped from the system suffix — the values still flow into the
+        subprocess env via ``_start_acp_server``, so the agent needs to
+        know they're available.
+        """
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent()  # no agent_context
+        state = _make_state(tmp_path)
+        state.secret_registry.update_secrets(
+            {
+                "REGISTRY_TOKEN": StaticSecret(
+                    value=SecretStr("tok"), description="Registry token"
+                )
+            }
+        )
+        events: list = []
+
+        with patch("openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server"):
+            agent.init_state(state, on_event=events.append)
+
+        assert events[0].dynamic_context is not None
+        assert "REGISTRY_TOKEN" in events[0].dynamic_context.text
+
 
 # ---------------------------------------------------------------------------
 # _OpenHandsACPBridge
@@ -3806,13 +3838,18 @@ class TestACPSecretRegistryEnvInjection:
         )
         assert env.get("GITHUB_TOKEN") == "from-acp-env"
 
-    def test_agent_context_secret_takes_precedence_over_registry_secret(self, tmp_path):
-        """``agent_context.secrets`` wins over the same key in the registry.
+    def test_registry_secret_takes_precedence_over_agent_context_secret(self, tmp_path):
+        """``secret_registry`` wins over ``agent_context.secrets`` on collision.
 
-        The full precedence ladder is
-        ``acp_env > provider env > agent_context.secrets > secret_registry``;
-        the registry is the last-resort fill so callers that explicitly
-        set ``agent_context.secrets`` keep control over the value.
+        Precedence ladder:
+        ``acp_env > secret_registry > agent_context.secrets > os.environ``.
+        The registry is the canonical conversation-secret channel
+        (``StartConversationRequest.secrets`` lands here); ``agent_context.
+        secrets`` is the legacy direct-attach path. When both carry the same
+        key the canonical channel wins — that's also what lets OpenHands
+        eventually drop its ``AgentContext(secrets=...)`` shim without a
+        behaviour break for clients that still attach via both paths
+        during the migration.
         """
         from pydantic import SecretStr
 
@@ -3828,7 +3865,7 @@ class TestACPSecretRegistryEnvInjection:
             tmp_path,
             registry_secrets={"GITHUB_TOKEN": "from-registry"},
         )
-        assert env.get("GITHUB_TOKEN") == "from-context"
+        assert env.get("GITHUB_TOKEN") == "from-registry"
 
     def test_empty_registry_does_not_change_behaviour(self, tmp_path):
         """An empty secret_registry must not raise or alter the spawn env."""

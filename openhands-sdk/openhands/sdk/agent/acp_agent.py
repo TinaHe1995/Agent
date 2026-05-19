@@ -45,6 +45,7 @@ from acp.transports import default_environment
 from pydantic import Field, PrivateAttr, SecretStr, field_serializer
 
 from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.context import AgentContext
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
     ACPToolCallEvent,
@@ -968,10 +969,31 @@ class ACPAgent(AgentBase):
         )
 
     def _render_suffix(self, state: ConversationState) -> str | None:
-        """Render the system suffix once, including secrets from the registry."""
-        if not self.agent_context:
-            return None
+        """Render the system suffix once, including secrets from the registry.
+
+        The ``<CUSTOM_SECRETS>`` block lists every secret the ACP subprocess
+        will receive, so the agent knows which env vars are available without
+        them being inlined in the prompt. We render it from
+        ``state.secret_registry`` even when ``agent_context`` is absent —
+        otherwise a conversation that only ships secrets through the
+        ``StartConversationRequest.secrets`` channel (the canonical path)
+        would silently drop the advertisement, leaving the agent ignorant of
+        secrets that are nonetheless about to land in its env via
+        ``_start_acp_server``.
+        """
         secret_infos = state.secret_registry.get_secret_infos()
+        if self.agent_context is None:
+            # No caller-supplied context. Only synthesize an empty one for the
+            # renderer if we actually have a registry-secret advertisement to
+            # emit — otherwise return None so we don't start injecting other
+            # parts of the empty AgentContext's defaults (current_datetime, …)
+            # that the old "agent_context is None ⇒ no suffix" rule used to
+            # suppress.
+            if not secret_infos:
+                return None
+            return AgentContext(current_datetime=None).to_acp_prompt_context(
+                additional_secret_infos=secret_infos
+            )
         return self.agent_context.to_acp_prompt_context(
             additional_secret_infos=secret_infos
         )
@@ -981,41 +1003,55 @@ class ACPAgent(AgentBase):
         client = _OpenHandsACPBridge()
         self._client = client
 
-        # Build environment: inherit current env + ACP extras
+        # Build the subprocess environment. One mental model:
+        #
+        #     StartConversationRequest.secrets are conversation secrets.
+        #     For OpenHands agents they're available through the secret
+        #     registry; for ACP agents they're exposed to the ACP subprocess
+        #     environment because the ACP subprocess owns execution.
+        #
+        # Layering, lowest priority first:
+        #   1. default_environment + os.environ — the agent-server's own env
+        #   2. state.secret_registry             — conversation secrets, the
+        #                                          canonical channel callers
+        #                                          use (Conversation.update_
+        #                                          secrets / the equivalent
+        #                                          ``payload.secrets`` shape
+        #                                          on app-server clients)
+        #   3. agent_context.secrets             — legacy direct-attach path
+        #                                          kept so callers that wrap
+        #                                          secrets in AgentContext
+        #                                          keep working
+        #   4. self.acp_env                      — explicit per-agent override
+        #                                          (always wins via .update)
+        #
+        # Tiers 2 and 3 fill-if-absent, so the host env (e.g. an already-set
+        # ANTHROPIC_API_KEY on the agent-server) isn't silently shadowed.
+        # SecretSource.get_value() / SecretRegistry.get_secret_value() are
+        # synchronous; calling them here is safe because _start_acp_server
+        # is a regular (non-async) method.  Both already swallow lookup
+        # errors and return None; the ``if value`` guards skip those so a
+        # transient secret-source failure doesn't crash the spawn.
         env = default_environment()
         env.update(os.environ)
-        env.update(self.acp_env)
-        # Inject secrets from agent_context. acp_env entries take precedence
-        # (already set above), so we only fill keys not already present.
-        # SecretSource.get_value() is synchronous; calling it here is safe
-        # because _start_acp_server is a regular (non-async) method.
-        if self.agent_context and self.agent_context.secrets:
-            for name, secret in self.agent_context.secrets.items():
-                if name not in env:
-                    value = (
-                        secret.get_value()
-                        if isinstance(secret, SecretSource)
-                        else str(secret)
-                    )
-                    if value:
-                        env[name] = value
-        # Fill any remaining gaps from the conversation's secret registry —
-        # secrets sent via ``Conversation.update_secrets()`` (or the
-        # equivalent ``payload.secrets`` channel that app-server callers
-        # like agent-canvas use) belong in the ACP subprocess env too,
-        # without each caller having to also build an
-        # ``AgentContext(secrets=...)`` shim around the same data.
-        # ``get_secret_value`` swallows lookup errors and returns ``None``;
-        # the ``if value`` guard skips those so a transient secret-source
-        # failure doesn't crash the spawn.
-        # Precedence stays: ``acp_env > provider env > agent_context.secrets
-        # > secret_registry`` — registry entries only fill genuine gaps.
-        for name in state.secret_registry.secret_sources.keys():
+        for name in state.secret_registry.secret_sources:
             if name in env:
                 continue
             value = state.secret_registry.get_secret_value(name)
             if value:
                 env[name] = value
+        if self.agent_context and self.agent_context.secrets:
+            for name, secret in self.agent_context.secrets.items():
+                if name in env:
+                    continue
+                value = (
+                    secret.get_value()
+                    if isinstance(secret, SecretSource)
+                    else str(secret)
+                )
+                if value:
+                    env[name] = value
+        env.update(self.acp_env)
         # Strip CLAUDECODE so nested Claude Code instances don't refuse to start
         env.pop("CLAUDECODE", None)
 
