@@ -89,6 +89,57 @@ class TestGetLLM:
         assert llm.temperature == 0.5
         assert isinstance(llm.api_key, SecretStr)
 
+    def test_get_llm_with_profile_name(self, mock_workspace):
+        """get_llm can load a named profile from SaaS metadata."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "llm_model": "anthropic/claude-sonnet-4-20250514",
+            "llm_api_key": "sk-default-key",
+            "llm_base_url": None,
+            "llm_profiles": {
+                "profiles": {
+                    "fast": {
+                        "model": "openai/gpt-4o",
+                        "api_key": "sk-profile-key",
+                        "base_url": "https://litellm.example.com",
+                    }
+                },
+                "active_profile": "fast",
+            },
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.object(
+            mock_workspace, "_send_api_request", return_value=mock_response
+        ) as mock_req:
+            llm = mock_workspace.get_llm(profile_name="fast", temperature=0.3)
+
+        mock_req.assert_called_once_with(
+            "GET",
+            f"{CLOUD_URL}/api/v1/users/me",
+            params={"expose_secrets": "true"},
+            headers={"X-Session-API-Key": SESSION_KEY},
+        )
+        assert llm.model == "openai/gpt-4o"
+        assert llm.temperature == 0.3
+        assert isinstance(llm.api_key, SecretStr)
+        assert llm.api_key.get_secret_value() == "sk-profile-key"
+        assert llm.base_url == "https://litellm.example.com"
+
+    def test_get_llm_missing_profile_raises(self, mock_workspace):
+        """get_llm raises FileNotFoundError for unknown SaaS profiles."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "llm_profiles": {"profiles": {"fast": {"model": "gpt-4o"}}}
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.object(
+            mock_workspace, "_send_api_request", return_value=mock_response
+        ):
+            with pytest.raises(FileNotFoundError, match="missing"):
+                mock_workspace.get_llm(profile_name="missing")
+
     def test_get_llm_no_api_key_still_works(self, mock_workspace):
         """If no API key is configured, the LLM gets api_key=None."""
         mock_response = MagicMock()
