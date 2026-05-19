@@ -44,7 +44,6 @@ from openhands.sdk.plugin.installed import (
     update_plugin,
 )
 from openhands.sdk.plugin.loader import load_plugins
-from openhands.sdk.mcp.merge import merge_mcp_configs
 from openhands.sdk.plugin.plugin import Plugin
 from openhands.sdk.plugin.source import (
     GitHubURLComponents,
@@ -92,7 +91,6 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     # Plugin classes
     "Plugin",
-    "merge_mcp_configs",
     "PluginFetchError",
     "PluginManifest",
     "PluginAuthor",
