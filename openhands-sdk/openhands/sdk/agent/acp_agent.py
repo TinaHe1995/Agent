@@ -1010,23 +1010,25 @@ class ACPAgent(AgentBase):
         #     registry; for ACP agents they're exposed to the ACP subprocess
         #     environment because the ACP subprocess owns execution.
         #
-        # Layering, lowest priority first:
-        #   1. default_environment + os.environ — the agent-server's own env
-        #   2. state.secret_registry             — conversation secrets, the
-        #                                          canonical channel callers
-        #                                          use (Conversation.update_
-        #                                          secrets / the equivalent
-        #                                          ``payload.secrets`` shape
-        #                                          on app-server clients)
-        #   3. agent_context.secrets             — legacy direct-attach path
-        #                                          kept so callers that wrap
-        #                                          secrets in AgentContext
-        #                                          keep working
-        #   4. self.acp_env                      — explicit per-agent override
-        #                                          (always wins via .update)
+        # Construction order and same-key precedence:
+        #   1. Start with default_environment + os.environ as the base
+        #      subprocess env. os.environ wins over default_environment.
+        #   2. Fill missing keys from state.secret_registry, the canonical
+        #      conversation-secret channel callers use (Conversation.update_
+        #      secrets / the equivalent ``payload.secrets`` shape on
+        #      app-server clients).
+        #   3. Fill still-missing keys from agent_context.secrets, the legacy
+        #      direct-attach path kept so callers that wrap secrets in
+        #      AgentContext keep working.
+        #   4. Apply self.acp_env last as the explicit per-agent override.
         #
-        # Tiers 2 and 3 fill-if-absent, so the host env (e.g. an already-set
-        # ANTHROPIC_API_KEY on the agent-server) isn't silently shadowed.
+        # Effective precedence is:
+        #   self.acp_env > os.environ > default_environment >
+        #   state.secret_registry > agent_context.secrets
+        #
+        # Registry/context tiers fill-if-absent, so the host env (e.g. an
+        # already-set ANTHROPIC_API_KEY on the agent-server) is not silently
+        # shadowed.
         # SecretSource.get_value() / SecretRegistry.get_secret_value() are
         # synchronous; calling them here is safe because _start_acp_server
         # is a regular (non-async) method.  Both already swallow lookup

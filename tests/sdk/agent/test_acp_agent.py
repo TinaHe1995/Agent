@@ -3727,9 +3727,9 @@ class TestACPSecretRegistryEnvInjection:
     ACP subprocess env without each caller having to also build an
     ``AgentContext(secrets=...)`` shim around the same data.
 
-    Precedence is preserved as: ``acp_env > provider env >
-    agent_context.secrets > secret_registry`` — registry entries fill
-    only genuine gaps.
+    Same-key precedence is
+    ``acp_env > existing base env > secret_registry > agent_context.secrets``.
+    Registry and context entries only fill genuine gaps in the base env.
     """
 
     @staticmethod
@@ -3841,8 +3841,8 @@ class TestACPSecretRegistryEnvInjection:
     def test_registry_secret_takes_precedence_over_agent_context_secret(self, tmp_path):
         """``secret_registry`` wins over ``agent_context.secrets`` on collision.
 
-        Precedence ladder:
-        ``acp_env > secret_registry > agent_context.secrets > os.environ``.
+        Precedence ladder for this collision:
+        ``acp_env > existing base env > secret_registry > agent_context.secrets``.
         The registry is the canonical conversation-secret channel
         (``StartConversationRequest.secrets`` lands here); ``agent_context.
         secrets`` is the legacy direct-attach path. When both carry the same
@@ -3906,7 +3906,7 @@ class TestACPEnvConflictSuppression:
     does not support OAuth bearer tokens, breaking auth silently.
 
     _start_acp_server must strip the conflicting vars regardless of where they
-    came from: acp_env, os.environ, or agent_context.secrets.
+    came from: acp_env, os.environ, secret_registry, or agent_context.secrets.
     """
 
     @staticmethod
