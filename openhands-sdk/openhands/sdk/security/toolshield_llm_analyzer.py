@@ -219,6 +219,22 @@ class ToolShieldLLMSecurityAnalyzer(SecurityAnalyzerBase):
     one of the helpers (``default_safety_experiences()``,
     ``load_safety_experiences(...)``, ``auto_detect_safety_experiences()``).
 
+    Lifecycle: instances maintain a per-conversation deque of recent
+    actions (``history_window`` items) for guardrail context. Each
+    instance is intended for SINGLE-CONVERSATION use. Reusing one
+    analyzer instance across multiple conversations will leak action
+    history between them, which is both a privacy issue (conversation
+    A's tool arguments visible in conversation B's guardrail prompt)
+    and a correctness issue (the guardrail evaluates conversation B's
+    actions against irrelevant history). Construct one analyzer per
+    conversation, OR call :meth:`reset_history` at conversation
+    boundaries.
+
+    The recent-action-context propagation across analyzers (this one,
+    :class:`LLMSecurityAnalyzer`, :class:`GraySwanAnalyzer`) is tracked
+    for convergence in a separate follow-up; until that lands,
+    single-conversation lifecycle is the contract.
+
     Failure modes are consistent and ensemble-safe -- both an
     infrastructure error (network, rate limit) and a parse failure
     (the guardrail responded but its output had no parseable
@@ -289,6 +305,20 @@ class ToolShieldLLMSecurityAnalyzer(SecurityAnalyzerBase):
             f"model={self.llm.model}, history_window={self.history_window}, "
             f"has_experiences={bool(self.safety_experiences.strip())}"
         )
+
+    def reset_history(self) -> None:
+        """Clear the recent-action deque.
+
+        Call this at conversation boundaries when reusing a single
+        analyzer instance across multiple conversations to prevent
+        context leakage. See the class docstring for the
+        single-conversation lifecycle contract.
+
+        Prefer constructing a fresh analyzer per conversation when
+        feasible -- ``reset_history()`` is an escape hatch for
+        long-lived processes that can't afford the construction cost.
+        """
+        self._action_history.clear()
 
     @staticmethod
     def _parse_risk(text: str) -> SecurityRisk:

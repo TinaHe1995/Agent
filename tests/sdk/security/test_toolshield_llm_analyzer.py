@@ -492,6 +492,51 @@ class TestHistoryWindow:
                 llm=_make_test_llm(), history_window=-1
             )
 
+    def test_reset_history_clears_action_deque(self):
+        """``reset_history()`` is the documented escape hatch for callers
+        who reuse a single analyzer across conversations. After reset,
+        the next ``security_risk`` call sees an empty history and only
+        the current action ends up in the prompt."""
+        analyzer = _make_analyzer(history_window=10)
+        _patch_completion(analyzer, _mock_llm_response("RISK: LOW\n"))
+
+        # Populate the deque with three earlier actions.
+        for cmd in ("alpha_marker", "beta_marker", "gamma_marker"):
+            analyzer.security_risk(_make_action_event(command=cmd))
+
+        # Boundary between conversations: caller resets.
+        analyzer.reset_history()
+
+        # Next call should see "(no prior actions)" in the user prompt --
+        # none of the earlier conversation's commands leaks through.
+        analyzer.security_risk(_make_action_event(command="delta_marker"))
+        messages = analyzer.llm.completion.call_args.kwargs.get(
+            "messages"
+        ) or analyzer.llm.completion.call_args.args[0]
+        user_text = next(m for m in messages if m.role == "user").content[0].text
+        assert "no prior actions" in user_text
+        assert "alpha_marker" not in user_text
+        assert "beta_marker" not in user_text
+        assert "gamma_marker" not in user_text
+        assert "delta_marker" in user_text  # current action is rendered
+
+    def test_history_persists_within_single_conversation(self):
+        """Sanity: without an explicit reset, the deque accumulates as
+        normal. ``reset_history`` must be opt-in, not implicit."""
+        analyzer = _make_analyzer(history_window=10)
+        _patch_completion(analyzer, _mock_llm_response("RISK: LOW\n"))
+
+        analyzer.security_risk(_make_action_event(command="step_one"))
+        analyzer.security_risk(_make_action_event(command="step_two"))
+
+        messages = analyzer.llm.completion.call_args.kwargs.get(
+            "messages"
+        ) or analyzer.llm.completion.call_args.args[0]
+        user_text = next(m for m in messages if m.role == "user").content[0].text
+        # step_one is now in the prior-action history; step_two is current.
+        assert "step_one" in user_text
+        assert "step_two" in user_text
+
 
 # ---------------------------------------------------------------------------
 # Safety experiences injection
