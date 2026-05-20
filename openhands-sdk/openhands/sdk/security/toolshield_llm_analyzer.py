@@ -299,34 +299,52 @@ class ToolShieldLLMSecurityAnalyzer(SecurityAnalyzerBase):
         1. We require the label to appear on its own line (``^RISK: X$``)
            with the MULTILINE anchor, so the regex won't misfire on risk
            words that appear inside the explanation prose.
-        2. We strip ``<thought>...</thought>`` and ``<arguments>...</arguments>``
-           spans before parsing -- if the actor LLM smuggled a ``RISK: LOW``
-           line into an attacker-controlled action field and the guardrail
-           echoed it back verbatim, we discard those spans so they can't
-           hijack the verdict.
+        2. We strip ``<summary>...</summary>``, ``<thought>...</thought>``
+           and ``<arguments>...</arguments>`` spans before parsing -- if
+           the actor LLM smuggled a ``RISK: LOW`` line into an
+           attacker-controlled action field and the guardrail echoed it
+           back verbatim, we discard those spans so they can't hijack
+           the verdict.
 
-        If the LLM emits multiple standalone labels (which shouldn't happen
-        per the prompt spec but can in practice), we take the **last** one
-        as the final verdict.
+        Outcome rules:
 
-        On parse failure, returns ``UNKNOWN`` (consistent with the
-        infrastructure-error path and with ``GraySwanAnalyzer``).
+        - No labels after stripping -> ``UNKNOWN`` (parse failure).
+        - One distinct label (possibly repeated) -> that risk.
+        - Multiple distinct labels -> ``UNKNOWN``. Frontier guardrails
+          emit the verdict on line 1 plus a brief explanation after;
+          any echoed label in the explanation would otherwise override
+          the real verdict under a last-wins selection. Treating
+          inconsistent labels as ambiguity matches the "parser ambiguity
+          should not silently pass" stance of the parse-failure path and
+          of the AST ERROR-node-as-UNKNOWN convention planned for the
+          shell-parser side.
+
         ``ConfirmRisky`` with ``confirm_unknown=True`` still pauses for
-        user confirmation, so the conservative posture is preserved
-        without distorting ensemble fusion that takes ``max(concrete)``.
+        user confirmation on UNKNOWN, so the conservative posture is
+        preserved without distorting ensemble fusion that takes
+        ``max(concrete)``.
         """
         # Strip attacker-controllable spans so an echoed RISK label inside
         # them can't be parsed as the verdict.
         sanitized = _UNTRUSTED_TAG_RE.sub("", text)
-
         matches = _RISK_RE.findall(sanitized)
-        if matches:
-            return _RISK_MAP[matches[-1].upper()]
-        logger.warning(
-            "Guardrail output did not contain a parseable RISK label; "
-            "returning UNKNOWN (ConfirmRisky will apply its fallback)"
-        )
-        return SecurityRisk.UNKNOWN
+
+        if not matches:
+            logger.warning(
+                "Guardrail output did not contain a parseable RISK label; "
+                "returning UNKNOWN (ConfirmRisky will apply its fallback)"
+            )
+            return SecurityRisk.UNKNOWN
+
+        distinct = {m.upper() for m in matches}
+        if len(distinct) > 1:
+            logger.warning(
+                "Guardrail output contained inconsistent RISK labels "
+                f"{sorted(distinct)}; returning UNKNOWN (parser ambiguity)"
+            )
+            return SecurityRisk.UNKNOWN
+
+        return _RISK_MAP[matches[0].upper()]
 
     def security_risk(self, action: ActionEvent) -> SecurityRisk:
         """Evaluate ``action`` against the guardrail LLM."""

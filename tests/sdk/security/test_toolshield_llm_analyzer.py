@@ -162,9 +162,33 @@ class TestParseRisk:
             ToolShieldLLMSecurityAnalyzer._parse_risk(text) == SecurityRisk.HIGH
         )
 
-    def test_multiple_standalone_labels_takes_last(self):
-        """If the LLM emits a revision, the final verdict wins."""
+    def test_multiple_distinct_labels_returns_unknown(self):
+        """Conflicting labels are parser ambiguity, treated the same as no
+        label at all. Frontier guardrails emit the verdict on line 1 plus
+        a brief explanation; if the explanation happens to repeat a
+        different label on its own line, the analyzer must not silently
+        pass either way. Better to surface the ambiguity as UNKNOWN and
+        let ConfirmRisky's confirm_unknown=True default pause the
+        conversation.
+
+        (Previously this test asserted last-wins -> HIGH; the input is
+        unchanged but the contract is now stricter.)"""
         text = "RISK: LOW\nOn reflection, this is more dangerous.\nRISK: HIGH"
+        assert (
+            ToolShieldLLMSecurityAnalyzer._parse_risk(text)
+            == SecurityRisk.UNKNOWN
+        )
+
+    def test_multiple_consistent_labels_still_parses(self):
+        """Repetition of the same label is not ambiguity. An LLM that
+        states ``RISK: HIGH`` twice (once as the verdict, once in the
+        explanation summarizing the verdict) should still parse cleanly
+        as HIGH."""
+        text = (
+            "RISK: HIGH\n"
+            "This command is destructive.\n"
+            "Final verdict: RISK: HIGH"
+        )
         assert (
             ToolShieldLLMSecurityAnalyzer._parse_risk(text) == SecurityRisk.HIGH
         )
