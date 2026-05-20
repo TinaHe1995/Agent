@@ -3838,6 +3838,35 @@ class TestACPSecretRegistryEnvInjection:
         )
         assert env.get("GITHUB_TOKEN") == "from-acp-env"
 
+    def test_acp_env_shadow_skips_registry_lookup(self, tmp_path):
+        """``acp_env`` shadowing a key must not trigger ``get_value()``.
+
+        LookupSecret performs an HTTP request in production; calling it for
+        a key that ``acp_env`` is about to override wastes a round-trip and
+        can emit spurious lookup-failure warnings.
+        """
+        from pydantic import Field
+
+        from openhands.sdk.secret import SecretSource
+
+        class _CountingLookupSecret(SecretSource):
+            stored_value: str
+            calls: list[int] = Field(default_factory=list)
+
+            def get_value(self) -> str | None:
+                self.calls.append(1)
+                return self.stored_value
+
+        secret = _CountingLookupSecret(stored_value="from-registry")
+        agent = _make_agent(acp_env={"GITHUB_TOKEN": "from-acp-env"})
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            registry_secrets={"GITHUB_TOKEN": secret},
+        )
+        assert env.get("GITHUB_TOKEN") == "from-acp-env"
+        assert secret.calls == []
+
     def test_registry_secret_takes_precedence_over_agent_context_secret(self, tmp_path):
         """``secret_registry`` wins over ``agent_context.secrets`` on collision.
 

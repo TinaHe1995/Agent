@@ -1003,39 +1003,17 @@ class ACPAgent(AgentBase):
         client = _OpenHandsACPBridge()
         self._client = client
 
-        # Build the subprocess environment. One mental model:
-        #
-        #     StartConversationRequest.secrets are conversation secrets.
-        #     For OpenHands agents they're available through the secret
-        #     registry; for ACP agents they're exposed to the ACP subprocess
-        #     environment because the ACP subprocess owns execution.
-        #
-        # Construction order and same-key precedence:
-        #   1. Start with default_environment + os.environ as the base
-        #      subprocess env. os.environ wins over default_environment.
-        #   2. Fill missing keys from state.secret_registry, the canonical
-        #      conversation-secret channel callers use (Conversation.update_
-        #      secrets / the equivalent ``payload.secrets`` shape on
-        #      app-server clients).
-        #   3. Fill still-missing keys from agent_context.secrets, the legacy
-        #      direct-attach path kept so callers that wrap secrets in
-        #      AgentContext keep working.
-        #   4. Apply self.acp_env last as the explicit per-agent override.
-        #
-        # Effective precedence is:
-        #   self.acp_env > os.environ > default_environment >
+        # Build the subprocess environment top-down, highest precedence first:
+        #   acp_env > os.environ > default_environment >
         #   state.secret_registry > agent_context.secrets
         #
-        # Registry/context tiers fill-if-absent, so the host env (e.g. an
-        # already-set ANTHROPIC_API_KEY on the agent-server) is not silently
-        # shadowed.
-        # SecretSource.get_value() / SecretRegistry.get_secret_value() are
-        # synchronous; calling them here is safe because _start_acp_server
-        # is a regular (non-async) method.  Both already swallow lookup
-        # errors and return None; the ``if value`` guards skip those so a
-        # transient secret-source failure doesn't crash the spawn.
+        # Secret tiers fill-if-absent. The ``name in env`` guard does double
+        # duty: it preserves higher-precedence values and avoids calling
+        # SecretSource.get_value() for keys already satisfied — important
+        # because LookupSecret can make an HTTP request.
         env = default_environment()
         env.update(os.environ)
+        env.update(self.acp_env)
         for name in state.secret_registry.secret_sources:
             if name in env:
                 continue
@@ -1053,7 +1031,6 @@ class ACPAgent(AgentBase):
                 )
                 if value:
                     env[name] = value
-        env.update(self.acp_env)
         # Strip CLAUDECODE so nested Claude Code instances don't refuse to start
         env.pop("CLAUDECODE", None)
 
