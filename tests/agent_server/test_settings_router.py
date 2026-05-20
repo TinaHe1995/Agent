@@ -108,7 +108,7 @@ def test_get_conversation_settings_schema():
     assert body["model_name"] == "ConversationSettings"
 
     section_keys = [section["key"] for section in body["sections"]]
-    assert section_keys == ["general", "verification"]
+    assert section_keys == ["general", "verification", "controls"]
 
     verification_section = next(
         section for section in body["sections"] if section["key"] == "verification"
@@ -116,6 +116,16 @@ def test_get_conversation_settings_schema():
     verification_field_keys = {field["key"] for field in verification_section["fields"]}
     assert "confirmation_mode" in verification_field_keys
     assert "security_analyzer" in verification_field_keys
+
+    controls_section = next(
+        section for section in body["sections"] if section["key"] == "controls"
+    )
+    controls_field_keys = {field["key"] for field in controls_section["fields"]}
+    assert controls_field_keys == {
+        "controls.plan",
+        "controls.verify",
+        "controls.save",
+    }
 
 
 # ── GET /api/settings tests ─────────────────────────────────────────────

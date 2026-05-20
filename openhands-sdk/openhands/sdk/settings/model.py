@@ -49,6 +49,12 @@ from openhands.sdk.utils.redact import sanitize_dict
 from openhands.sdk.workspace import LocalWorkspace
 
 from .acp_providers import ACPProviderInfo, get_acp_provider
+from .controls import (
+    AgentControls,
+    PlanLevel as PlanLevel,
+    SaveMode as SaveMode,
+    VerifyLevel as VerifyLevel,
+)
 from .metadata import (
     SETTINGS_METADATA_KEY,
     SETTINGS_SECTION_METADATA_KEY,
@@ -312,7 +318,7 @@ def _default_llm_settings() -> LLM:
 _RequestT = TypeVar("_RequestT")
 
 AGENT_SETTINGS_SCHEMA_VERSION = 3
-CONVERSATION_SETTINGS_SCHEMA_VERSION = 1
+CONVERSATION_SETTINGS_SCHEMA_VERSION = 2
 
 
 class AgentSettingsBase(BaseModel):
@@ -466,6 +472,21 @@ def _migrate_conversation_settings_v0_to_v1(
     return migrated
 
 
+def _migrate_conversation_settings_v1_to_v2(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Add the ``controls`` block introduced in v1.20.0.
+
+    Pre-existing persisted payloads simply pick up the default controls
+    (``plan='some'``, ``verify='some'``, ``save='worktree'``) — they match
+    OpenHands' prior implicit behavior, so no field-level migration is
+    needed.
+    """
+    migrated = dict(payload)
+    migrated["schema_version"] = 2
+    return migrated
+
+
 _AGENT_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_agent_settings_v0_to_v1,
     1: _migrate_agent_settings_v1_to_v2,
@@ -473,6 +494,7 @@ _AGENT_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
 }
 _CONVERSATION_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_conversation_settings_v0_to_v1,
+    1: _migrate_conversation_settings_v1_to_v2,
 }
 
 
@@ -574,6 +596,20 @@ class ConversationSettings(BaseModel):
             ).model_dump(),
         },
     )
+    controls: AgentControls = Field(
+        default_factory=AgentControls,
+        description=(
+            "Workflow controls (Plan / Verify / Save) that govern how the agent "
+            "approaches a task. Defaults set here apply to every new conversation; "
+            "the user can change them mid-conversation by sending a message."
+        ),
+        json_schema_extra={
+            SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
+                key="controls",
+                label="Controls",
+            ).model_dump()
+        },
+    )
 
     @classmethod
     def export_schema(cls) -> SettingsSchema:
@@ -655,6 +691,7 @@ class ConversationSettings(BaseModel):
         payload.setdefault("confirmation_policy", self._build_confirmation_policy())
         payload.setdefault("security_analyzer", self._build_security_analyzer())
         payload.setdefault("max_iterations", self.max_iterations)
+        payload.setdefault("controls", self.controls)
         return payload
 
     def create_request(
