@@ -1,10 +1,13 @@
 """Tests for the route-level ``agent.agent_context.skills`` trim.
 
-The four read endpoints (``GET /search``, ``GET /{id}``, ``GET ""``,
-``POST ""``) on the conversation router strip ``agent.agent_context.skills``
-from the response payload. The persisted ``ConversationState`` and the
-in-memory copy held by the agent's runtime are unaffected — only the
-bytes leaving over HTTP shrink.
+The conversation read endpoints (``GET /search``, ``GET /{id}``,
+``GET ""``, ``POST ""``, ``POST /{id}/fork``) on the conversation
+router strip ``agent.agent_context.skills`` from the response payload
+**by default** (breaking change as of this release). Callers that
+still need the legacy shape can pass ``?include_skills=true``. The
+persisted ``ConversationState`` and the in-memory copy held by the
+agent's runtime are unaffected — only the bytes leaving over HTTP
+shrink.
 
 See the SDK PR description for why this lives at the route boundary
 rather than inside ``AgentContext`` itself.
@@ -127,10 +130,12 @@ class TestTrimHelper:
 
 
 class TestRouteIntegration:
-    """Integration tests through the FastAPI router — proves the
-    ``include_skills`` query param works at every read endpoint:
-    default (omitted or ``true``) keeps the full payload, ``false``
-    opts into the trim."""
+    """Integration tests through the FastAPI router.
+
+    Proves the new default-trim semantics and the
+    ``?include_skills=true`` opt-in escape hatch on every read
+    endpoint that returns a ``ConversationInfo``.
+    """
 
     @pytest.fixture
     def heavy_conversation(self):
@@ -157,66 +162,77 @@ class TestRouteIntegration:
         app.dependency_overrides[get_conversation_service] = lambda: service
         return TestClient(app), heavy_conversation
 
-    # --- Default (no query param) → full payload, backward compatible ---
+    # --- Default (no query param) → trimmed (breaking-change behaviour) ---
 
-    def test_get_conversation_default_includes_skills(self, client):
-        """Backward-compat: the default response shape is unchanged.
+    def test_get_conversation_default_trims_skills(self, client):
+        """Default response trims ``agent.agent_context.skills`` to ``[]``.
 
-        ``RemoteConversation.agent.agent_context.skills`` (and any other
-        external SDK consumer) must keep round-tripping correctly when
-        the caller doesn't opt into the trim.
+        This is the breaking change: prior releases returned the full
+        skill list inline. Callers that read
+        ``conversation.agent.agent_context.skills`` (notably via
+        ``RemoteConversation``) now see ``[]`` unless they pass
+        ``?include_skills=true``. No known client (agent-canvas,
+        OpenHands app-server, SDK examples) reads this field from
+        HTTP responses, so the change is documentation + opt-in
+        rather than a coordinated migration.
         """
         c, heavy = client
         response = c.get(f"/api/conversations/{heavy.id}")
         assert response.status_code == 200
         body = response.json()
-        assert len(body["agent"]["agent_context"]["skills"]) == 5
+        assert body["agent"]["agent_context"]["skills"] == []
 
-    def test_batch_get_default_includes_skills(self, client):
+    def test_batch_get_default_trims_skills(self, client):
         c, heavy = client
         response = c.get(f"/api/conversations?ids={heavy.id}")
         assert response.status_code == 200
         body = response.json()
-        assert len(body[0]["agent"]["agent_context"]["skills"]) == 5
+        assert body[0]["agent"]["agent_context"]["skills"] == []
 
-    def test_search_default_includes_skills(self, client):
+    def test_search_default_trims_skills(self, client):
         c, _heavy = client
         response = c.get("/api/conversations/search")
         assert response.status_code == 200
         body = response.json()
-        assert len(body["items"][0]["agent"]["agent_context"]["skills"]) == 5
+        assert body["items"][0]["agent"]["agent_context"]["skills"] == []
 
-    # --- include_skills=true (explicit) → same as default ---
+    # --- include_skills=false (explicit) → same as default ---
 
-    def test_get_conversation_explicit_true_includes_skills(self, client):
-        c, heavy = client
-        response = c.get(f"/api/conversations/{heavy.id}?include_skills=true")
-        assert response.status_code == 200
-        body = response.json()
-        assert len(body["agent"]["agent_context"]["skills"]) == 5
-
-    # --- include_skills=false → opt into the trim ---
-
-    def test_get_conversation_opt_in_trims_skills(self, client):
+    def test_get_conversation_explicit_false_trims_skills(self, client):
         c, heavy = client
         response = c.get(f"/api/conversations/{heavy.id}?include_skills=false")
         assert response.status_code == 200
         body = response.json()
         assert body["agent"]["agent_context"]["skills"] == []
 
-    def test_batch_get_opt_in_trims_skills(self, client):
-        c, heavy = client
-        response = c.get(f"/api/conversations?ids={heavy.id}&include_skills=false")
-        assert response.status_code == 200
-        body = response.json()
-        assert body[0]["agent"]["agent_context"]["skills"] == []
+    # --- include_skills=true → opt into legacy full payload ---
 
-    def test_search_opt_in_trims_skills(self, client):
-        c, _heavy = client
-        response = c.get("/api/conversations/search?include_skills=false")
+    def test_get_conversation_opt_in_includes_skills(self, client):
+        """Legacy opt-in. Callers that still read
+        ``conversation.agent.agent_context.skills`` from an HTTP
+        response can pass ``?include_skills=true`` to keep the prior
+        shape. Documented as a deprecation escape hatch, not the
+        steady-state path.
+        """
+        c, heavy = client
+        response = c.get(f"/api/conversations/{heavy.id}?include_skills=true")
         assert response.status_code == 200
         body = response.json()
-        assert body["items"][0]["agent"]["agent_context"]["skills"] == []
+        assert len(body["agent"]["agent_context"]["skills"]) == 5
+
+    def test_batch_get_opt_in_includes_skills(self, client):
+        c, heavy = client
+        response = c.get(f"/api/conversations?ids={heavy.id}&include_skills=true")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body[0]["agent"]["agent_context"]["skills"]) == 5
+
+    def test_search_opt_in_includes_skills(self, client):
+        c, _heavy = client
+        response = c.get("/api/conversations/search?include_skills=true")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"][0]["agent"]["agent_context"]["skills"]) == 5
 
     def test_batch_get_handles_null_items(self):
         """Missing items return ``None`` and the trim doesn't crash on them."""
@@ -229,26 +245,24 @@ class TestRouteIntegration:
         )
         app.dependency_overrides[get_conversation_service] = lambda: service
         c = TestClient(app)
-        response = c.get(f"/api/conversations?ids={uuid4()}&include_skills=false")
+        response = c.get(f"/api/conversations?ids={uuid4()}")
         assert response.status_code == 200
         assert response.json() == [None]
 
-    def test_opt_in_response_size_drops_meaningfully(self, client):
-        """Compare default (full) vs opt-in (trimmed) HTTP responses.
+    def test_default_response_size_drops_meaningfully(self, client):
+        """Compare default (trimmed) vs opt-in (full) HTTP responses.
 
         The conversation has 5 skills × 500 chars of content. The
-        opt-in response should be at least that much smaller than the
-        default response.
+        default response should be at least that much smaller than
+        the explicit ``?include_skills=true`` opt-in.
         """
         c, _heavy = client
-        full_bytes = len(c.get("/api/conversations/search").content)
-        trimmed_bytes = len(
-            c.get("/api/conversations/search?include_skills=false").content
-        )
+        default_bytes = len(c.get("/api/conversations/search").content)
+        full_bytes = len(c.get("/api/conversations/search?include_skills=true").content)
         # 5 × 500 chars of "x" skill content + per-skill metadata
         # overhead. Conservatively require at least 1500 bytes shaved.
-        assert full_bytes - trimmed_bytes > 1500, (
-            f"opt-in trim should drop ~2500 B of skill content; got "
-            f"{full_bytes - trimmed_bytes} B saved "
-            f"({full_bytes} → {trimmed_bytes})"
+        assert full_bytes - default_bytes > 1500, (
+            f"default trim should drop ~2500 B of skill content; got "
+            f"{full_bytes - default_bytes} B saved "
+            f"(full {full_bytes} → default {default_bytes})"
         )

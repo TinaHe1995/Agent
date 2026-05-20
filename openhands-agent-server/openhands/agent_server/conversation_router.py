@@ -88,7 +88,7 @@ async def search_conversations(
         ConversationSortOrder,
         Query(title="Sort order for conversations"),
     ] = ConversationSortOrder.CREATED_AT_DESC,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationPage:
     """Search / List conversations"""
@@ -98,7 +98,17 @@ async def search_conversations(
         page_id, limit, status, sort_order
     )
     if not include_skills:
-        page.items = [trim_conversation_response_skills(item) for item in page.items]
+        # ``model_copy`` rather than in-place mutation so we never
+        # write back into whatever the upstream service handed us
+        # (matters for services that cache their return value,
+        # including the ``AsyncMock`` used in route tests).
+        page = page.model_copy(
+            update={
+                "items": [
+                    trim_conversation_response_skills(item) for item in page.items
+                ]
+            }
+        )
     return page
 
 
@@ -120,7 +130,7 @@ async def count_conversations(
 )
 async def get_conversation(
     conversation_id: UUID,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationInfo:
     """Given an id, get a conversation"""
@@ -156,7 +166,7 @@ async def get_conversation_agent_final_response(
 @conversation_router.get("")
 async def batch_get_conversations(
     ids: Annotated[list[UUID], Query()],
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> list[ConversationInfo | None]:
     """Get a batch of conversations given their ids, returning null for
@@ -180,7 +190,7 @@ async def start_conversation(
         StartConversationRequest, Body(examples=START_CONVERSATION_EXAMPLES)
     ],
     response: Response,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationInfo:
     """Start a conversation in the local environment."""
@@ -425,7 +435,7 @@ async def condense_conversation(
 async def fork_conversation(
     conversation_id: UUID,
     request: Annotated[ForkConversationRequest, Body()] = ForkConversationRequest(),  # noqa: B008
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationInfo:
     """Fork a conversation, deep-copying its event history.

@@ -78,7 +78,7 @@ async def search_acp_conversations(
         ConversationSortOrder,
         Query(title="Sort order for conversations"),
     ] = ConversationSortOrder.CREATED_AT_DESC,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ACPConversationPage:
     """Search conversations using the ACP-capable contract.
@@ -92,7 +92,13 @@ async def search_acp_conversations(
         page_id, limit, status, sort_order
     )
     if not include_skills:
-        page.items = [trim_conversation_response_skills(item) for item in page.items]
+        page = page.model_copy(
+            update={
+                "items": [
+                    trim_conversation_response_skills(item) for item in page.items
+                ]
+            }
+        )
     return page
 
 
@@ -119,7 +125,7 @@ async def count_acp_conversations(
 )
 async def get_acp_conversation(
     conversation_id: UUID,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ACPConversationInfo:
     """Get a conversation using the ACP-capable contract.
@@ -138,7 +144,7 @@ async def get_acp_conversation(
 @conversation_router_acp.get("", deprecated=True)
 async def batch_get_acp_conversations(
     ids: Annotated[list[UUID], Query()],
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> list[ACPConversationInfo | None]:
     """Batch get conversations using the ACP-capable contract.
@@ -163,7 +169,7 @@ async def start_acp_conversation(
         Body(examples=START_ACP_CONVERSATION_EXAMPLES),
     ],
     response: Response,
-    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = True,
+    include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ACPConversationInfo:
     """Start a conversation using the ACP-capable contract.
