@@ -281,6 +281,58 @@ class TestRenderResumeTranscript:
         assert out is not None
         assert "[diff write] /workspace/new.py" in out
 
+    def test_direct_text_block_renders_verbatim(self) -> None:
+        # ``_serialize_tool_content`` preserves direct ``{type: "text",
+        # text: "..."}`` ContentBlocks at the top level (without the
+        # ``{type: "content"}`` wrapper). Their text must be rendered, not
+        # squashed to ``[text]``.
+        event = _tool(
+            "tc-1",
+            title="search",
+            content=[{"type": "text", "text": "matched 12 lines"}],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "matched 12 lines" in out
+        assert "[text]" not in out
+
+    def test_direct_image_block_renders_placeholder(self) -> None:
+        event = _tool(
+            "tc-1",
+            title="screenshot",
+            content=[
+                {"type": "image", "data": "base64-bytes", "mimeType": "image/png"}
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[Image]" in out
+
+    @pytest.mark.parametrize("falsey_output", [0, False, ""])
+    def test_falsey_raw_output_is_rendered(self, falsey_output: object) -> None:
+        # Tools can legitimately return falsey scalars: ``0`` from a shell
+        # exit code, ``False`` from a boolean predicate, ``""`` from a
+        # silent command. None of these are placeholders.
+        event = _tool(
+            "tc-1",
+            title="cmd",
+            raw_input={"command": "true"},
+            raw_output=falsey_output,
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "output:" in out
+        assert str(falsey_output) in out
+
+    def test_falsey_raw_output_only_is_not_a_placeholder(self) -> None:
+        # ``raw_output=0`` is a valid completion; even without ``raw_input``
+        # the event should render rather than being dropped.
+        event = _tool("tc-1", title="cmd", raw_output=0)
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[TOOL USE: cmd]" in out
+        assert "output:" in out
+
     def test_content_text_block_renders_inline(self) -> None:
         # ToolCallContent {type: "content", content: {type: "text", ...}}
         # is the ACP wrapper around generic ContentBlock variants. Text
@@ -576,16 +628,49 @@ class TestIsPatchEdit:
         )
         assert ev.is_patch_edit is True
 
-    def test_first_diff_block_wins(self) -> None:
-        # When multiple diff blocks are present, the first one decides.
-        ev = _tool(
+    def test_any_diff_block_with_old_text_is_patch(self) -> None:
+        # A multi-file tool call can include a write (``oldText=None``)
+        # alongside a patch (``oldText`` set). If *any* diff is a patch,
+        # the event is a patch edit; only an all-writes set classifies as
+        # a write.
+        ev_patch_then_write = _tool(
             "tc-1",
             content=[
                 {"type": "diff", "old_text": "before", "new_text": "after"},
                 {"type": "diff", "old_text": None, "new_text": "second"},
             ],
         )
-        assert ev.is_patch_edit is True
+        assert ev_patch_then_write.is_patch_edit is True
+
+        ev_write_then_patch = _tool(
+            "tc-2",
+            content=[
+                {"type": "diff", "old_text": None, "new_text": "create"},
+                {"type": "diff", "old_text": "before", "new_text": "after"},
+            ],
+        )
+        assert ev_write_then_patch.is_patch_edit is True
+
+    def test_all_diff_blocks_writes_classify_as_write(self) -> None:
+        ev = _tool(
+            "tc-1",
+            content=[
+                {"type": "diff", "old_text": None, "new_text": "a"},
+                {"type": "diff", "old_text": None, "new_text": "b"},
+            ],
+        )
+        assert ev.is_patch_edit is False
+
+    def test_diff_content_blocks_never_fall_back_to_raw_input(self) -> None:
+        # Structured ACP content is authoritative. When all diff blocks are
+        # writes the event must classify as a write even if ``raw_input``
+        # would otherwise trigger the patch fallback.
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "old_text": None, "new_text": "create"}],
+            raw_input={"old_string": "abc", "new_string": "def"},
+        )
+        assert ev.is_patch_edit is False
 
 
 @pytest.mark.parametrize(

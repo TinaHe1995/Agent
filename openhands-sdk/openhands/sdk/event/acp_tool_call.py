@@ -78,8 +78,13 @@ class ACPToolCallEvent(Event):
 
         Robustness:
           * ``content`` is a list of mixed block variants (text, diff,
-            terminal, …) in any order — this scans for the first ``diff``
-            block rather than assuming ``content[0]``.
+            terminal, …) in any order — this scans for ``diff`` blocks
+            rather than assuming ``content[0]``.
+          * A single tool call can carry **multiple** ``diff`` blocks (e.g.
+            a multi-file patch that creates one file and edits another).
+            The event is classified as a patch edit if *any* diff block
+            has a non-null ``old_text``; it counts as a write only when
+            *every* diff block is a full-file write.
           * Block shape may be a Pydantic model (live notifications), a
             snake_case dict (after ``model_dump``), or a camelCase dict
             (ACP JSON wire). ``_block_field`` reads from all three, with
@@ -89,11 +94,17 @@ class ACPToolCallEvent(Event):
         expose the diff intent through raw input keys, the check falls back
         to ``raw_input``. The fallback requires a non-empty ``old_string`` —
         a ``new_string``-only payload (or empty ``old_string``) describes a
-        create/write, not a patch.
+        create/write, not a patch. The fallback only applies when *no*
+        ``diff`` block is present in ``content``; structured ACP data
+        always overrides the heuristic.
         """
-        for block in self.content or ():
-            if _block_field(block, "type") == "diff":
-                return _block_field(block, "old_text", "oldText") is not None
+        diff_blocks = [
+            b for b in self.content or () if _block_field(b, "type") == "diff"
+        ]
+        if diff_blocks:
+            return any(
+                _block_field(b, "old_text", "oldText") is not None for b in diff_blocks
+            )
         raw = self.raw_input if isinstance(self.raw_input, dict) else {}
         old = raw.get("old_string")
         return isinstance(old, str) and len(old) > 0

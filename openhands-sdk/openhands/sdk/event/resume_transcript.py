@@ -110,18 +110,18 @@ def _render_action_event(event: ActionEvent, max_chars: int) -> str | None:
 
 
 def _render_content_block(block: Any) -> str | None:
-    """Render a single ACP ``ToolCallContent`` block as a compact summary.
+    """Render a single ACP content block as a compact summary.
 
-    The ACP protocol defines three ``ToolCallContent`` variants:
-
-      * ``{type: "diff", path, oldText, newText}`` — file edit (camelCase
-        on the JSON wire, snake_case after ``model_dump``);
-      * ``{type: "content", content: <ContentBlock>}`` — wraps a generic
-        ContentBlock (``text``, ``image``, ``audio``, ``resource``…);
-      * ``{type: "terminal", terminalId}`` — references a terminal.
+    The ACP protocol defines three ``ToolCallContent`` variants —
+    ``diff``, ``content`` (wrapping a generic ``ContentBlock``), and
+    ``terminal`` — but ``_serialize_tool_content`` preserves direct
+    ``ContentBlock`` dicts (``{type: "text", text: …}`` and friends) at
+    the top level as well, so both shapes can appear in
+    ``ACPToolCallEvent.content``.
 
     Returns a one-or-multi-line string, or ``None`` if the block carries
-    no usable signal. All field reads accept both naming conventions.
+    no usable signal. All field reads accept both snake_case and
+    camelCase naming conventions.
     """
     block_type = _block_field(block, "type")
     if block_type == "diff":
@@ -137,20 +137,25 @@ def _render_content_block(block: Any) -> str | None:
         inner = _block_field(block, "content")
         if inner is None:
             return None
-        inner_type = _block_field(inner, "type")
-        if inner_type == "text":
-            text = _block_field(inner, "text")
-            if isinstance(text, str) and text:
-                return text
-            return None
-        if inner_type == "image":
-            return "[Image]"
-        if inner_type:
-            return f"[{inner_type}]"
-        return None
+        return _render_content_block(inner)
     if block_type == "terminal":
         tid = _block_field(block, "terminal_id", "terminalId")
         return f"[terminal {tid}]" if tid else "[terminal]"
+    # Direct ContentBlock variants (also accepted at the top level — some
+    # ACP servers emit them unwrapped, and ``_serialize_tool_content``
+    # keeps that shape during persistence). Text content must be returned
+    # verbatim so the resume transcript doesn't lose the actual payload.
+    if block_type == "text":
+        text = _block_field(block, "text")
+        if isinstance(text, str) and text:
+            return text
+        return None
+    if block_type == "image":
+        return "[Image]"
+    if block_type == "audio":
+        return "[Audio]"
+    if block_type in ("resource", "resource_link"):
+        return f"[{block_type}]"
     if block_type:
         return f"[{block_type}]"
     return None
@@ -169,13 +174,16 @@ def _render_content_list(content: list[Any] | None) -> list[str]:
 
 def _render_tool_event(event: ACPToolCallEvent, max_chars: int) -> str | None:
     # ACP streams ``pending → pending → completed`` for a single tool call;
-    # placeholder events emitted before parameters arrive carry no input,
-    # no output, no error, *and* no content. A non-empty ``content`` list is
-    # treated as a real signal so content-only events (diff/terminal blocks
-    # without raw I/O) are rendered instead of being dropped.
+    # placeholder events emitted before parameters arrive carry None for
+    # input/output, False for is_error, and an empty/None content list.
+    # Distinguish ``is None`` from falsey-but-valid payloads here: a tool
+    # whose ``raw_output`` is ``0``, ``False``, or ``""`` is a *completed*
+    # call with falsey result data, not a placeholder. Renderability:
+    # something is present iff any of raw_input, raw_output, is_error, or
+    # content carries actual information.
     if (
-        not event.raw_input
-        and not event.raw_output
+        event.raw_input is None
+        and event.raw_output is None
         and not event.is_error
         and not event.content
     ):
@@ -183,7 +191,7 @@ def _render_tool_event(event: ACPToolCallEvent, max_chars: int) -> str | None:
     status = "failed" if event.is_error else (event.status or "completed")
     name = event.title or event.tool_kind or "tool"
     parts: list[str] = [f"[TOOL USE: {name}] ({status})"]
-    if event.raw_input:
+    if event.raw_input is not None:
         parts.append("  input:")
         for line in str(event.raw_input).splitlines() or [""]:
             parts.append(f"    {line}")
@@ -193,7 +201,7 @@ def _render_tool_event(event: ACPToolCallEvent, max_chars: int) -> str | None:
         for entry in content_lines:
             for line in entry.splitlines() or [""]:
                 parts.append(f"    {line}")
-    if event.raw_output:
+    if event.raw_output is not None:
         parts.append("  output:")
         for line in str(event.raw_output).splitlines() or [""]:
             parts.append(f"    {line}")
