@@ -31,13 +31,17 @@ Complementary to the deprecation mechanism:
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
+import tempfile
 import tomllib
 import urllib.request
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -110,6 +114,14 @@ ACP_SKIP_TOKEN = "skip-acp-check"
 ACP_BASE_REF_ENV = "ACP_VERSION_CHECK_BASE_REF"
 
 
+def _get_base_ref() -> str | None:
+    base_ref = os.environ.get(ACP_BASE_REF_ENV) or os.environ.get("GITHUB_BASE_REF")
+    if not base_ref:
+        return None
+    base_ref = base_ref.strip()
+    return base_ref or None
+
+
 def read_version_from_pyproject(path: str) -> str:
     """Read the version string from a pyproject.toml file."""
     with open(path, "rb") as f:
@@ -166,8 +178,12 @@ def _min_version_from_requirement(req_str: str) -> pkg_version.Version | None:
     return max(lower_bounds)
 
 
+def _git_ref_candidates(ref: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((f"origin/{ref}", ref)))
+
+
 def _git_show_file(ref: str, rel_path: str) -> str | None:
-    for candidate in (f"origin/{ref}", ref):
+    for candidate in _git_ref_candidates(ref):
         result = subprocess.run(
             ["git", "show", f"{candidate}:{rel_path}"],
             check=False,
@@ -177,6 +193,29 @@ def _git_show_file(ref: str, rel_path: str) -> str | None:
         if result.returncode == 0:
             return result.stdout
     return None
+
+
+def _git_archive_directory(
+    repo_root: str,
+    ref: str,
+    rel_path: str,
+    dest_root: str,
+) -> bool:
+    for candidate in _git_ref_candidates(ref):
+        result = subprocess.run(
+            ["git", "archive", "--format=tar", candidate, rel_path],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            continue
+
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            archive.extractall(dest_root, filter="data")
+        return True
+
+    return False
 
 
 def _load_base_pyproject(base_ref: str) -> dict | None:
@@ -206,7 +245,7 @@ def _check_acp_version_bump(repo_root: str) -> int:
         )
         return 0
 
-    base_ref = os.environ.get(ACP_BASE_REF_ENV) or os.environ.get("GITHUB_BASE_REF")
+    base_ref = _get_base_ref()
     if not base_ref:
         print(
             "::warning title=ACP version::No base ref found; skipping ACP version check"
@@ -568,7 +607,11 @@ def _object_path(obj: object | None) -> str:
     )
 
 
-def _write_field_default_change_report(changes: list[FieldDefaultChange]) -> None:
+def _write_field_default_change_report(
+    changes: list[FieldDefaultChange],
+    *,
+    field_default_changes_since_base: list[FieldDefaultChange] | None = None,
+) -> None:
     """Write detected public Field default changes to a JSON report file."""
     report_path = os.environ.get(FIELD_DEFAULT_CHANGE_REPORT_ENV, "").strip()
     if not report_path:
@@ -576,7 +619,13 @@ def _write_field_default_change_report(changes: list[FieldDefaultChange]) -> Non
 
     Path(report_path).write_text(
         json.dumps(
-            {"field_default_changes": [asdict(change) for change in changes]},
+            {
+                "field_default_changes": [asdict(change) for change in changes],
+                "field_default_changes_since_base": [
+                    asdict(change)
+                    for change in (field_default_changes_since_base or [])
+                ],
+            },
             indent=2,
         )
         + "\n"
@@ -857,6 +906,36 @@ def _load_current(
         return None
 
 
+@contextmanager
+def _load_from_git_ref(
+    griffe_module: object,
+    repo_root: str,
+    ref: str,
+    cfg: PackageConfig,
+):
+    title = f"{cfg.distribution} API"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        if not _git_archive_directory(repo_root, ref, cfg.source_dir, tmpdir):
+            print(
+                f"::warning title={title}::Failed to load {cfg.distribution} from "
+                f"git ref {ref}: unable to archive {cfg.source_dir}"
+            )
+            yield None
+            return
+
+        try:
+            yield griffe_module.load(
+                cfg.package,
+                search_paths=[os.path.join(tmpdir, cfg.source_dir)],
+            )
+        except Exception as e:
+            print(
+                f"::warning title={title}::Failed to load {cfg.distribution} from "
+                f"git ref {ref}: {e}"
+            )
+            yield None
+
+
 def _load_prev_from_pypi(
     griffe_module: object,
     prev: str,
@@ -877,6 +956,38 @@ def _load_prev_from_pypi(
             f"Failed to load {cfg.distribution}=={prev} from PyPI: {e}"
         )
         return None
+
+
+def _collect_field_default_changes_since_ref(
+    griffe_module: object,
+    repo_root: str,
+    ref: str,
+    cfg: PackageConfig,
+) -> list[FieldDefaultChange]:
+    new_root = _load_current(griffe_module, repo_root, cfg)
+    if not new_root:
+        return []
+
+    with _load_from_git_ref(griffe_module, repo_root, ref, cfg) as old_root:
+        if not old_root:
+            return []
+
+        changes: list[FieldDefaultChange] = []
+        try:
+            _compute_breakages(
+                old_root,
+                new_root,
+                cfg,
+                field_default_changes=changes,
+            )
+        except Exception as e:
+            print(
+                f"::warning title={cfg.distribution} API::Failed to compare "
+                f"Field defaults against base ref {ref}: {e}"
+            )
+            return []
+
+    return changes
 
 
 def _find_deprecated_symbols(source_root: Path) -> DeprecatedSymbols:
@@ -1171,6 +1282,8 @@ def main() -> int:
     import griffe
 
     field_default_changes: list[FieldDefaultChange] = []
+    field_default_changes_since_base: list[FieldDefaultChange] = []
+    base_ref = _get_base_ref()
     for cfg in PACKAGES:
         print(f"\n{'=' * 60}")
         print(f"Checking {cfg.distribution} ({cfg.package})")
@@ -1181,8 +1294,20 @@ def main() -> int:
             cfg,
             field_default_changes=field_default_changes,
         )
+        if base_ref:
+            field_default_changes_since_base.extend(
+                _collect_field_default_changes_since_ref(
+                    griffe,
+                    repo_root,
+                    base_ref,
+                    cfg,
+                )
+            )
 
-    _write_field_default_change_report(field_default_changes)
+    _write_field_default_change_report(
+        field_default_changes,
+        field_default_changes_since_base=field_default_changes_since_base,
+    )
     return rc
 
 
