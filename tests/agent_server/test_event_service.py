@@ -2110,6 +2110,109 @@ class TestEventServiceClose:
         assert event_service._run_task is None
         conversation.close.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_run_uses_executor_for_sync_only_conversation(self, event_service):
+        """EventService.run() must use the thread-pool executor when the
+        conversation only inherits the default BaseConversation.arun()
+        (which delegates to sync run()).  This prevents sync-only
+        subclasses from accidentally blocking the event loop."""
+        from openhands.sdk.conversation.base import BaseConversation
+
+        run_thread_id: int | None = None
+        mock = MagicMock()
+
+        # Concrete subclass that never overrides arun(); all abstract
+        # methods are filled by a MagicMock delegate so we only test
+        # the dispatch logic.
+        class SyncOnlyConversation(BaseConversation):
+            """Minimal subclass that only implements sync run()."""
+
+            @property
+            def id(self):
+                return mock.id
+
+            @property
+            def state(self):
+                return mock.state
+
+            @property
+            def conversation_stats(self):
+                return mock.conversation_stats
+
+            def send_message(self, message, sender=None):
+                pass
+
+            def run(self):
+                nonlocal run_thread_id
+                run_thread_id = threading.current_thread().ident
+
+            def pause(self):
+                pass
+
+            def close(self):
+                pass
+
+            def set_confirmation_policy(self, policy):
+                pass
+
+            def set_security_analyzer(self, analyzer):
+                pass
+
+            def update_secrets(self, secrets):
+                pass
+
+            def reject_pending_actions(self, reason=""):
+                pass
+
+            def interrupt(self):
+                pass
+
+            def generate_title(self, llm=None, max_length=50):
+                return ""
+
+            def ask_agent(self, question):
+                return ""
+
+            def condense(self):
+                pass
+
+            def execute_tool(self, tool_name, action):
+                return mock.execute_tool(tool_name, action)
+
+            def fork(self, **kwargs):
+                return mock.fork(**kwargs)
+
+        conv = SyncOnlyConversation()
+        event_service._conversation = conv  # type: ignore[assignment]
+
+        # Sanity: this conversation does NOT override arun()
+        assert type(conv).arun is BaseConversation.arun
+
+        # Bypass guards that access internal _state (not part of the
+        # abstract interface) so we only test the dispatch logic.
+        with (
+            patch.object(
+                type(event_service),
+                "_get_execution_status",
+                new_callable=AsyncMock,
+                return_value=ConversationExecutionStatus.PAUSED,
+            ),
+            patch.object(
+                type(event_service),
+                "_publish_state_update",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await event_service.run()
+            # Give the background task a moment to execute
+            await asyncio.sleep(0.3)
+
+        event_loop_thread = threading.current_thread().ident
+        assert run_thread_id is not None, "run() was never called"
+        assert run_thread_id != event_loop_thread, (
+            "run() executed on the event loop thread — expected thread-pool"
+        )
+
 
 @pytest_asyncio.fixture
 async def real_conversation_service(tmp_path):

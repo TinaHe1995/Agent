@@ -1184,7 +1184,11 @@ class LocalConversation(BaseConversation):
 
         task = self._arun_task
         if task is not None and not task.done():
-            task.cancel()
+            # Marshal cancellation onto the task's event loop so this is
+            # safe to call from any thread (e.g. signal handlers, the
+            # agent-server's HTTP thread).
+            loop = task.get_loop()
+            loop.call_soon_threadsafe(task.cancel)
             logger.info("interrupt(): cancelled in-flight arun() task")
         else:
             self.pause()

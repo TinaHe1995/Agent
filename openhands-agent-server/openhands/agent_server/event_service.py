@@ -18,6 +18,7 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.pub_sub import PubSub, Subscriber
 from openhands.sdk import LLM, AgentBase, Event, Message, get_logger
+from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 from openhands.sdk.conversation.secret_registry import SecretValue
@@ -739,10 +740,18 @@ class EventService:
             async def _run_and_publish():
                 try:
                     # Prefer the native async path when available so the event
-                    # loop is free during LLM I/O. Fall back to thread-pool
+                    # loop is free during LLM I/O.  Fall back to thread-pool
                     # execution for backward compatibility.
-                    arun = getattr(conversation, "arun", None)
-                    if arun is not None and asyncio.iscoroutinefunction(arun):
+                    #
+                    # BaseConversation defines a default ``async def arun()``
+                    # that simply delegates to the synchronous ``run()``, so
+                    # ``iscoroutinefunction`` alone would always be True.
+                    # Detect an *actual* override to avoid running a
+                    # sync-only subclass on the event loop.
+                    has_native_arun = (
+                        type(conversation).arun is not BaseConversation.arun
+                    )
+                    if has_native_arun:
                         await conversation.arun()
                     else:
                         await loop.run_in_executor(self._run_executor, conversation.run)
