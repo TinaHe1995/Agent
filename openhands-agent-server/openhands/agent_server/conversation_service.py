@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -12,7 +13,10 @@ from pydantic import BaseModel
 
 from openhands.agent_server.config import Config, WebhookSpec
 from openhands.agent_server.conversation_lease import ConversationLeaseHeldError
-from openhands.agent_server.event_service import EventService
+from openhands.agent_server.event_service import (
+    LEASE_RENEW_INTERVAL_SECONDS,
+    EventService,
+)
 from openhands.agent_server.models import (
     ConversationInfo,
     ConversationPage,
@@ -323,6 +327,7 @@ class ConversationService:
     _conversation_webhook_subscribers: list["ConversationWebhookSubscriber"] = field(
         default_factory=list, init=False
     )
+    _lease_renewal_task: asyncio.Task | None = field(default=None, init=False)
     _run_executor: ThreadPoolExecutor | None = field(default=None, init=False)
 
     async def get_conversation(self, conversation_id: UUID) -> ConversationInfo | None:
@@ -644,6 +649,25 @@ class ConversationService:
             await self._notify_conversation_webhooks(conversation_info)
         return bool(event_service)
 
+    async def interrupt_conversation(self, conversation_id: UUID) -> bool:
+        """Immediately cancel an in-flight LLM call for a conversation.
+
+        Unlike :meth:`pause_conversation`, which waits for the current
+        LLM request to finish, this cancels the running ``arun()`` task
+        so the interruption takes effect mid-stream.
+        """
+        if self._event_services is None:
+            raise ValueError("inactive_service")
+        event_service = self._event_services.get(conversation_id)
+        if event_service:
+            await event_service.interrupt()
+            state = await event_service.get_state()
+            conversation_info = _compose_webhook_conversation_info(
+                event_service.stored, state
+            )
+            await self._notify_conversation_webhooks(conversation_info)
+        return bool(event_service)
+
     async def resume_conversation(self, conversation_id: UUID) -> bool:
         if self._event_services is None:
             raise ValueError("inactive_service")
@@ -935,9 +959,36 @@ class ConversationService:
             for webhook_spec in self.webhook_specs
         ]
 
+        self._lease_renewal_task = asyncio.create_task(self._renew_all_leases_loop())
+
         return self
 
+    async def _renew_all_leases_loop(self) -> None:
+        """Single background task that renews leases for all active conversations.
+
+        Replaces N per-conversation renewal tasks with one centralized loop,
+        reducing asyncio task overhead.  Each renewal involves synchronous
+        file I/O (FileLock + read + write), so individual calls are offloaded
+        via ``asyncio.to_thread`` to avoid blocking the event loop.
+        """
+        try:
+            while True:
+                await asyncio.sleep(LEASE_RENEW_INTERVAL_SECONDS)
+                event_services = self._event_services
+                if event_services is None:
+                    return
+                for event_service in list(event_services.values()):
+                    await asyncio.to_thread(event_service.renew_lease)
+        except asyncio.CancelledError:
+            raise
+
     async def __aexit__(self, exc_type, exc_value, traceback):
+        if self._lease_renewal_task is not None:
+            self._lease_renewal_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._lease_renewal_task
+            self._lease_renewal_task = None
+
         event_services = self._event_services
         if event_services is None:
             return
@@ -976,6 +1027,9 @@ class ConversationService:
             cipher=self.cipher,
             owner_instance_id=self.owner_instance_id,
         )
+        # Lease renewal is handled by the centralized
+        # _renew_all_leases_loop task on ConversationService.
+        event_service._external_lease_renewal = True
         event_service._run_executor = self._run_executor
 
         try:
