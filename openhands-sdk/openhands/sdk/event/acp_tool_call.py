@@ -12,17 +12,35 @@ from openhands.sdk.event.types import SourceType
 
 _MAX_DISPLAY_CHARS = 500
 
+_MISSING: Any = object()
 
-def _block_field(block: Any, name: str) -> Any:
-    """Read ``name`` from a content block that may be a model or a dict.
 
-    ACP content blocks travel as Pydantic models in-process and as plain
-    dicts after persistence (see ``_serialize_tool_content`` which calls
-    ``model_dump``). Both shapes need to be readable.
+def _block_field(block: Any, *names: str) -> Any:
+    """Read the first matching field from ``names`` on ``block``.
+
+    ACP content blocks reach this code in three shapes:
+
+      * Pydantic model (live notifications) — read via ``getattr``;
+      * snake_case dict (after ``model_dump`` persistence) — Pydantic dumps
+        using Python attribute names by default;
+      * camelCase dict (ACP JSON wire format) — the ACP TypeScript spec
+        defines diff blocks as ``{ type: "diff", oldText, newText, path }``,
+        and JSON arriving from an external API or websocket frame keeps
+        those keys verbatim.
+
+    Multiple aliases (e.g. ``"old_text", "oldText"``) can be passed and the
+    first one present wins. Returns ``None`` if no alias matches.
     """
     if isinstance(block, dict):
-        return block.get(name)
-    return getattr(block, name, None)
+        for name in names:
+            if name in block:
+                return block[name]
+        return None
+    for name in names:
+        value = getattr(block, name, _MISSING)
+        if value is not _MISSING:
+            return value
+    return None
 
 
 class ACPToolCallEvent(Event):
@@ -51,17 +69,21 @@ class ACPToolCallEvent(Event):
         """True if this event represents a patch/diff edit (not a full-file write).
 
         ACP-spec edit tools emit a ``diff`` content block whose ``old_text``
-        field distinguishes the two cases:
+        field (``oldText`` on the JSON wire) distinguishes the two cases:
           * patch edit (e.g. ``Edit``): ``old_text`` is set
           * full-file create (e.g. ``Write``): ``old_text`` is ``None``
 
         This check is provider-agnostic across Claude Code, Codex, and Gemini
         servers that follow the ACP spec.
 
-        The content block is read defensively: it may arrive as a Pydantic
-        model with attributes (live ACP notifications) or as a plain dict
-        (after persistence — ``_serialize_tool_content`` stores blocks via
-        ``model_dump``). Both shapes are accepted.
+        Robustness:
+          * ``content`` is a list of mixed block variants (text, diff,
+            terminal, …) in any order — this scans for the first ``diff``
+            block rather than assuming ``content[0]``.
+          * Block shape may be a Pydantic model (live notifications), a
+            snake_case dict (after ``model_dump``), or a camelCase dict
+            (ACP JSON wire). ``_block_field`` reads from all three, with
+            ``"oldText"`` accepted as an alias of ``"old_text"``.
 
         For providers that omit the structured content block but still
         expose the diff intent through raw input keys, the check falls back
@@ -69,12 +91,9 @@ class ACPToolCallEvent(Event):
         a ``new_string``-only payload (or empty ``old_string``) describes a
         create/write, not a patch.
         """
-        content = self.content or []
-        if content:
-            first = content[0]
-            block_type = _block_field(first, "type")
-            if block_type == "diff":
-                return _block_field(first, "old_text") is not None
+        for block in self.content or ():
+            if _block_field(block, "type") == "diff":
+                return _block_field(block, "old_text", "oldText") is not None
         raw = self.raw_input if isinstance(self.raw_input, dict) else {}
         old = raw.get("old_string")
         return isinstance(old, str) and len(old) > 0

@@ -220,6 +220,120 @@ class TestRenderResumeTranscript:
         assert "[USER]: hi" in out
         assert "[TOOL USE:" not in out
 
+    def test_content_only_tool_event_is_rendered(self) -> None:
+        # A tool event whose only payload is structured ``content`` (no
+        # ``raw_input``/``raw_output``/``is_error``) must not be filtered
+        # out as a placeholder. ACP servers such as Codex and Gemini emit
+        # the diff or terminal data via ``content`` rather than raw I/O.
+        event = _tool(
+            "tc-1",
+            title="edit",
+            content=[
+                {
+                    "type": "diff",
+                    "path": "/workspace/app.py",
+                    "old_text": "old",
+                    "new_text": "new",
+                }
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[TOOL USE: edit]" in out
+        assert "content:" in out
+        assert "[diff patch] /workspace/app.py" in out
+
+    def test_content_only_tool_event_camelcase_diff(self) -> None:
+        # Same as above with JSON wire keys — content-only rendering must
+        # accept ``oldText`` / ``newText`` aliases.
+        event = _tool(
+            "tc-1",
+            title="Edit",
+            content=[
+                {
+                    "type": "diff",
+                    "path": "/workspace/app.py",
+                    "oldText": "old",
+                    "newText": "new",
+                }
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[diff patch] /workspace/app.py" in out
+
+    def test_content_only_write_block_labelled_as_write(self) -> None:
+        # A diff block without ``old_text`` is a full-file write, not a
+        # patch; the rendered line reflects that.
+        event = _tool(
+            "tc-1",
+            title="write",
+            content=[
+                {
+                    "type": "diff",
+                    "path": "/workspace/new.py",
+                    "old_text": None,
+                    "new_text": "whole file",
+                }
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[diff write] /workspace/new.py" in out
+
+    def test_content_text_block_renders_inline(self) -> None:
+        # ToolCallContent {type: "content", content: {type: "text", ...}}
+        # is the ACP wrapper around generic ContentBlock variants. Text
+        # content should appear inline under "content:".
+        event = _tool(
+            "tc-1",
+            title="search",
+            content=[
+                {
+                    "type": "content",
+                    "content": {"type": "text", "text": "found 3 matches"},
+                }
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "found 3 matches" in out
+
+    def test_content_terminal_block_renders_label(self) -> None:
+        event = _tool(
+            "tc-1",
+            title="shell",
+            content=[{"type": "terminal", "terminal_id": "term-abc"}],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "[terminal term-abc]" in out
+
+    def test_placeholder_with_empty_content_still_skipped(self) -> None:
+        # A pending event with no input, no output, no error, and an empty
+        # content list is still a placeholder and should be dropped.
+        event = _tool("tc-1", content=[])
+        assert render_resume_transcript([event]) is None
+
+    def test_content_rendered_alongside_raw_io(self) -> None:
+        # When both content and raw I/O are present, both render (no
+        # information lost).
+        event = _tool(
+            "tc-1",
+            title="edit",
+            raw_input={"file_path": "/foo"},
+            raw_output="ok",
+            content=[
+                {"type": "diff", "path": "/foo", "old_text": "a", "new_text": "b"}
+            ],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "input:" in out
+        assert "content:" in out
+        assert "output:" in out
+        assert "[diff patch] /foo" in out
+
     def test_extended_content_is_included(self) -> None:
         # ``MessageEvent.extended_content`` (AgentContext / hook-provided
         # per-turn context) is folded in by ``to_llm_message()`` and ACP sees
@@ -431,6 +545,47 @@ class TestIsPatchEdit:
             raw_input={"old_string": "abc", "new_string": "def"},
         )
         assert ev.is_patch_edit is False
+
+    def test_camel_case_oldText_alias_classifies_as_patch(self) -> None:
+        # ACP's JSON wire format uses camelCase: ``oldText`` / ``newText``.
+        # When events arrive from an external API or websocket frame the
+        # dict keys keep that shape because ``content`` is ``list[Any]``.
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "oldText": "before", "newText": "after"}],
+        )
+        assert ev.is_patch_edit is True
+
+    def test_camel_case_without_oldText_is_full_write(self) -> None:
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "oldText": None, "newText": "whole file"}],
+        )
+        assert ev.is_patch_edit is False
+
+    def test_diff_block_after_other_blocks_is_found(self) -> None:
+        # ACP content is a list of variants in any order — a text or
+        # terminal block can precede the diff. ``is_patch_edit`` must scan
+        # the whole list rather than only checking ``content[0]``.
+        ev = _tool(
+            "tc-1",
+            content=[
+                {"type": "content", "content": {"type": "text", "text": "Editing…"}},
+                {"type": "diff", "old_text": "before", "new_text": "after"},
+            ],
+        )
+        assert ev.is_patch_edit is True
+
+    def test_first_diff_block_wins(self) -> None:
+        # When multiple diff blocks are present, the first one decides.
+        ev = _tool(
+            "tc-1",
+            content=[
+                {"type": "diff", "old_text": "before", "new_text": "after"},
+                {"type": "diff", "old_text": None, "new_text": "second"},
+            ],
+        )
+        assert ev.is_patch_edit is True
 
 
 @pytest.mark.parametrize(
