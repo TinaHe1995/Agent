@@ -200,28 +200,40 @@ class ConversationPage(BaseModel):
     next_page_id: str | None = None
 
 
+INCLUDE_SKILLS_PARAM_TITLE = (
+    "Whether to include ``agent.agent_context.skills`` in the response. "
+    "Default ``true`` preserves the full payload (no behaviour change for "
+    "existing consumers). Pass ``false`` to drop skills from the wire — "
+    "useful when the caller doesn't read skill bodies and wants to avoid "
+    "the ~260 KB of inlined skill content that ``load_user_skills=true`` / "
+    "``load_public_skills=true`` agents accumulate. The persisted "
+    "conversation state on disk and the in-memory runtime copy are "
+    "untouched either way."
+)
+
+
 def trim_conversation_response_skills(info: ConversationInfo) -> ConversationInfo:
     """Return ``info`` with ``agent.agent_context.skills`` set to ``[]``.
 
-    Applied at the four HTTP read routes that emit ``ConversationInfo``
-    (search, get, batch-get, start). The persisted ``ConversationState``
-    on disk and the in-memory copy held by the agent's runtime are
-    untouched — only the bytes leaving over HTTP shrink.
+    **Opt-in** via the ``include_skills=false`` query parameter on the
+    routes that emit ``ConversationInfo`` (search, get, batch-get,
+    start, fork, and the deprecated ACP equivalents). The default
+    response shape on every endpoint still includes the full skills
+    list — clients that don't opt in see the same payload they always
+    saw, so ``RemoteConversation.agent.agent_context.skills`` and any
+    other external consumer continue to round-trip correctly.
 
-    Why drop the skills entirely on the wire: when an ``AgentContext``
-    is constructed with ``load_user_skills=True`` / ``load_public_skills=True``,
+    The opt-in shape exists because when an ``AgentContext`` is
+    constructed with ``load_user_skills=True`` / ``load_public_skills=True``,
     its model_validator resolves the entire skill catalog (~40 entries
     in stock setups) and persists them inline. Every conversation
-    fetch therefore carried ~260 KB of skill content that no API
-    consumer actually reads — the skill bodies are only consumed
-    server-side at prompt-render time, never client-side.
+    fetch therefore carries ~260 KB of skill content. Clients that
+    don't read skill bodies (agent-canvas's conversation list, for
+    example — see ``useUserConversation``) can pass
+    ``?include_skills=false`` to shave that off the wire.
 
-    Dropping ``skills`` from the API response (rather than from the
-    model itself) keeps the model semantics simple: the wire
-    representation differs from the in-memory representation in
-    exactly one place, here, instead of via a serializer / validator
-    pair that has to coordinate across persistence, ``model_copy``,
-    ``round_trip``, equality checks, snapshot drift detection, etc.
+    The persisted ``ConversationState`` on disk and the in-memory copy
+    held by the agent's runtime are untouched regardless.
 
     A ``model_copy`` chain is enough because ``BaseModel.model_copy``
     is shallow on default — we replace the leaf ``skills`` list with

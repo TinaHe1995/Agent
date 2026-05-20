@@ -127,8 +127,10 @@ class TestTrimHelper:
 
 
 class TestRouteIntegration:
-    """Integration tests through the FastAPI router — proves the trim
-    actually fires at every read endpoint."""
+    """Integration tests through the FastAPI router — proves the
+    ``include_skills`` query param works at every read endpoint:
+    default (omitted or ``true``) keeps the full payload, ``false``
+    opts into the trim."""
 
     @pytest.fixture
     def heavy_conversation(self):
@@ -155,19 +157,66 @@ class TestRouteIntegration:
         app.dependency_overrides[get_conversation_service] = lambda: service
         return TestClient(app), heavy_conversation
 
-    def test_get_conversation_trims_skills(self, client):
+    # --- Default (no query param) → full payload, backward compatible ---
+
+    def test_get_conversation_default_includes_skills(self, client):
+        """Backward-compat: the default response shape is unchanged.
+
+        ``RemoteConversation.agent.agent_context.skills`` (and any other
+        external SDK consumer) must keep round-tripping correctly when
+        the caller doesn't opt into the trim.
+        """
         c, heavy = client
         response = c.get(f"/api/conversations/{heavy.id}")
         assert response.status_code == 200
         body = response.json()
-        assert body["agent"]["agent_context"]["skills"] == []
+        assert len(body["agent"]["agent_context"]["skills"]) == 5
 
-    def test_batch_get_conversations_trims_skills(self, client):
+    def test_batch_get_default_includes_skills(self, client):
         c, heavy = client
         response = c.get(f"/api/conversations?ids={heavy.id}")
         assert response.status_code == 200
         body = response.json()
+        assert len(body[0]["agent"]["agent_context"]["skills"]) == 5
+
+    def test_search_default_includes_skills(self, client):
+        c, _heavy = client
+        response = c.get("/api/conversations/search")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"][0]["agent"]["agent_context"]["skills"]) == 5
+
+    # --- include_skills=true (explicit) → same as default ---
+
+    def test_get_conversation_explicit_true_includes_skills(self, client):
+        c, heavy = client
+        response = c.get(f"/api/conversations/{heavy.id}?include_skills=true")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["agent"]["agent_context"]["skills"]) == 5
+
+    # --- include_skills=false → opt into the trim ---
+
+    def test_get_conversation_opt_in_trims_skills(self, client):
+        c, heavy = client
+        response = c.get(f"/api/conversations/{heavy.id}?include_skills=false")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["agent"]["agent_context"]["skills"] == []
+
+    def test_batch_get_opt_in_trims_skills(self, client):
+        c, heavy = client
+        response = c.get(f"/api/conversations?ids={heavy.id}&include_skills=false")
+        assert response.status_code == 200
+        body = response.json()
         assert body[0]["agent"]["agent_context"]["skills"] == []
+
+    def test_search_opt_in_trims_skills(self, client):
+        c, _heavy = client
+        response = c.get("/api/conversations/search?include_skills=false")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["items"][0]["agent"]["agent_context"]["skills"] == []
 
     def test_batch_get_handles_null_items(self):
         """Missing items return ``None`` and the trim doesn't crash on them."""
@@ -180,35 +229,26 @@ class TestRouteIntegration:
         )
         app.dependency_overrides[get_conversation_service] = lambda: service
         c = TestClient(app)
-        response = c.get(f"/api/conversations?ids={uuid4()}")
+        response = c.get(f"/api/conversations?ids={uuid4()}&include_skills=false")
         assert response.status_code == 200
         assert response.json() == [None]
 
-    def test_search_conversations_trims_skills(self, client):
-        c, _heavy = client
-        response = c.get("/api/conversations/search")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["items"][0]["agent"]["agent_context"]["skills"] == []
+    def test_opt_in_response_size_drops_meaningfully(self, client):
+        """Compare default (full) vs opt-in (trimmed) HTTP responses.
 
-    def test_response_size_drops_meaningfully(self, client):
-        """Compare trimmed (HTTP) vs untrimmed (model_dump_json) sizes.
-
-        The conversation has 5 skills × 500 chars of content = ~2500
-        bytes of skill bodies. The trimmed HTTP response should be at
-        least that much smaller than serializing the same conversation
-        with skills intact.
+        The conversation has 5 skills × 500 chars of content. The
+        opt-in response should be at least that much smaller than the
+        default response.
         """
-        c, heavy = client
-        response = c.get("/api/conversations/search")
-        trimmed_bytes = len(response.content)
-        untrimmed_bytes = len(
-            ConversationPage(items=[heavy], next_page_id=None).model_dump_json()
+        c, _heavy = client
+        full_bytes = len(c.get("/api/conversations/search").content)
+        trimmed_bytes = len(
+            c.get("/api/conversations/search?include_skills=false").content
         )
         # 5 × 500 chars of "x" skill content + per-skill metadata
         # overhead. Conservatively require at least 1500 bytes shaved.
-        assert untrimmed_bytes - trimmed_bytes > 1500, (
-            f"trim should drop ~2500 B of skill content; got "
-            f"{untrimmed_bytes - trimmed_bytes} B saved "
-            f"({untrimmed_bytes} → {trimmed_bytes})"
+        assert full_bytes - trimmed_bytes > 1500, (
+            f"opt-in trim should drop ~2500 B of skill content; got "
+            f"{full_bytes - trimmed_bytes} B saved "
+            f"({full_bytes} → {trimmed_bytes})"
         )
