@@ -813,13 +813,6 @@ class BrowserToolSet(ToolDefinition[BrowserAction, BrowserObservation]):
         conv_state: "ConversationState",
         **executor_config,
     ) -> "BrowserToolExecutor":
-        with cls._shared_executor_lock:
-            executor = cls._shared_executor
-
-        if executor is not None:
-            cls._warn_config_ignored(executor_config)
-            return executor
-
         with cls._shared_executor_creation_lock:
             with cls._shared_executor_lock:
                 executor = cls._shared_executor

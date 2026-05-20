@@ -288,6 +288,69 @@ def test_browser_toolset_initial_create_serializes_candidate_construction():
     assert executors["parent"] is BrowserToolSet._shared_executor
 
 
+def test_browser_toolset_create_waits_for_shared_executor_close():
+    """Concurrent create() should wait for closing shared executor cleanup."""
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    create_finished = threading.Event()
+    init_configs: list[dict[str, object]] = []
+    executors: dict[str, BrowserToolExecutor] = {}
+    errors: list[BaseException] = []
+
+    def fake_init(self, **kwargs):
+        init_configs.append(kwargs.copy())
+        self.full_output_save_dir = kwargs.get("full_output_save_dir")
+        self._initialized = False
+        self._cleanup_initiated = False
+        self._action_timeout_seconds = 30.0
+        self._async_executor = MagicMock()
+        self._async_executor.close = MagicMock()
+
+        if len(init_configs) == 1:
+            self._async_executor.run_async.side_effect = _block_cleanup
+
+    def _block_cleanup(*_args, **_kwargs):
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=2.0)
+
+    def create_tools(conv_state: ConversationState) -> None:
+        try:
+            tools = BrowserToolSet.create(conv_state=conv_state)
+            executor = tools[0].executor
+            assert isinstance(executor, BrowserToolExecutor)
+            executors["created"] = executor
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            create_finished.set()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        conv_state = _create_test_conv_state(temp_dir)
+        with patch.object(BrowserToolExecutor, "__init__", fake_init):
+            old_executor = BrowserToolSet.create(conv_state=conv_state)[0].executor
+            assert isinstance(old_executor, BrowserToolExecutor)
+
+            close_thread = threading.Thread(target=old_executor.close)
+            close_thread.start()
+            assert cleanup_started.wait(timeout=2.0)
+
+            create_thread = threading.Thread(target=create_tools, args=(conv_state,))
+            create_thread.start()
+            assert not create_finished.wait(timeout=0.1)
+            assert len(init_configs) == 1
+
+            release_cleanup.set()
+            close_thread.join(timeout=2.0)
+            create_thread.join(timeout=2.0)
+
+    assert not close_thread.is_alive()
+    assert not create_thread.is_alive()
+    assert not errors
+    assert len(init_configs) == 2
+    assert executors["created"] is not old_executor
+    assert executors["created"] is BrowserToolSet._shared_executor
+
+
 def test_browser_toolset_warns_when_config_ignored(caplog):
     """
     Test that a warning is logged when a second create()
