@@ -60,7 +60,22 @@ async def list_workspaces(request: Request) -> WorkspacesListResponse:
     """Return the saved workspaces and workspace parents."""
     config = get_config(request)
     store = get_workspaces_store(config)
-    persisted = store.load() or PersistedWorkspaces()
+    try:
+        persisted = store.load()
+    except (OSError, PermissionError):
+        logger.error("Workspaces list failed - file I/O error")
+        raise HTTPException(status_code=500, detail="Failed to read workspaces")
+    if persisted is None:
+        # ``load()`` collapses "file missing" and "file present but
+        # unreadable/corrupted/future-schema" into the same ``None``. Returning
+        # an empty list for the second case would hide the user's data and let
+        # a subsequent POST overwrite the still-on-disk file with defaults.
+        if store._path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Workspaces file is corrupted",
+            )
+        persisted = PersistedWorkspaces()
     return _to_response(persisted)
 
 
@@ -73,8 +88,16 @@ async def add_workspaces(
     store = get_workspaces_store(config)
 
     def apply(current: PersistedWorkspaces) -> PersistedWorkspaces:
-        existing_paths = {w.path for w in current.workspaces}
-        new_items = [w for w in payload.workspaces if w.path not in existing_paths]
+        # Dedupe against the existing list AND within the incoming payload,
+        # otherwise a body like ``[{"path": "/a"}, {"path": "/a"}]`` would
+        # persist both entries despite the endpoint contract.
+        seen_paths = {w.path for w in current.workspaces}
+        new_items: list[WorkspaceItem] = []
+        for w in payload.workspaces:
+            if w.path in seen_paths:
+                continue
+            seen_paths.add(w.path)
+            new_items.append(w)
         if not new_items:
             return current
         return current.model_copy(
@@ -141,8 +164,15 @@ async def add_workspace_parents(
     store = get_workspaces_store(config)
 
     def apply(current: PersistedWorkspaces) -> PersistedWorkspaces:
-        existing_paths = {p.path for p in current.workspace_parents}
-        new_items = [p for p in payload.parents if p.path not in existing_paths]
+        # Dedupe against the existing list AND within the incoming payload —
+        # see ``add_workspaces`` above for the same rationale.
+        seen_paths = {p.path for p in current.workspace_parents}
+        new_items: list[WorkspaceParentItem] = []
+        for p in payload.parents:
+            if p.path in seen_paths:
+                continue
+            seen_paths.add(p.path)
+            new_items.append(p)
         if not new_items:
             return current
         return current.model_copy(
