@@ -13,6 +13,18 @@ from openhands.sdk.event.types import SourceType
 _MAX_DISPLAY_CHARS = 500
 
 
+def _block_field(block: Any, name: str) -> Any:
+    """Read ``name`` from a content block that may be a model or a dict.
+
+    ACP content blocks travel as Pydantic models in-process and as plain
+    dicts after persistence (see ``_serialize_tool_content`` which calls
+    ``model_dump``). Both shapes need to be readable.
+    """
+    if isinstance(block, dict):
+        return block.get(name)
+    return getattr(block, name, None)
+
+
 class ACPToolCallEvent(Event):
     """Event representing a tool call executed by an ACP server.
 
@@ -44,18 +56,28 @@ class ACPToolCallEvent(Event):
           * full-file create (e.g. ``Write``): ``old_text`` is ``None``
 
         This check is provider-agnostic across Claude Code, Codex, and Gemini
-        servers that follow the ACP spec. For providers that omit the
-        structured content block but still expose the diff intent through
-        raw input keys (``old_string`` / ``new_string``), the check falls
-        back to inspecting ``raw_input``.
+        servers that follow the ACP spec.
+
+        The content block is read defensively: it may arrive as a Pydantic
+        model with attributes (live ACP notifications) or as a plain dict
+        (after persistence — ``_serialize_tool_content`` stores blocks via
+        ``model_dump``). Both shapes are accepted.
+
+        For providers that omit the structured content block but still
+        expose the diff intent through raw input keys, the check falls back
+        to ``raw_input``. The fallback requires a non-empty ``old_string`` —
+        a ``new_string``-only payload (or empty ``old_string``) describes a
+        create/write, not a patch.
         """
         content = self.content or []
         if content:
             first = content[0]
-            if getattr(first, "type", None) == "diff":
-                return getattr(first, "old_text", None) is not None
+            block_type = _block_field(first, "type")
+            if block_type == "diff":
+                return _block_field(first, "old_text") is not None
         raw = self.raw_input if isinstance(self.raw_input, dict) else {}
-        return bool({"old_string", "new_string"} & raw.keys())
+        old = raw.get("old_string")
+        return isinstance(old, str) and len(old) > 0
 
     @property
     def visualize(self) -> Text:

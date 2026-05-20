@@ -47,20 +47,55 @@ DEFAULT_MAX_CHARS = 60_000
 DEFAULT_MAX_MESSAGE_CHARS = 8_000
 DEFAULT_MAX_TOOL_CHARS = 2_000
 
+_HEAD_ELLIPSIS = "...\n"
+_TAIL_ELLIPSIS = "..."
 
-def _truncate(text: str, max_chars: int) -> str:
+
+def _truncate_keep_head(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to at most ``max_chars`` chars, keeping the start.
+
+    Honors any non-negative ``max_chars`` strictly: ``max_chars=0`` yields
+    ``""``, and values below 4 yield a plain slice (no room for an
+    ellipsis marker). Used for per-message and per-tool-block caps where
+    the opening content (question, command, file path) is what matters.
+    """
+    if max_chars <= 0:
+        return ""
     if len(text) <= max_chars:
         return text
-    return text[: max_chars - 3] + "..."
+    if max_chars < len(_TAIL_ELLIPSIS) + 1:
+        return text[:max_chars]
+    return text[: max_chars - len(_TAIL_ELLIPSIS)] + _TAIL_ELLIPSIS
+
+
+def _truncate_keep_tail(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to at most ``max_chars`` chars, keeping the end.
+
+    Honors any non-negative ``max_chars`` strictly. Used for the resume
+    transcript body when the full history doesn't fit — the freshest
+    events are the most useful context for an agent picking up where it
+    left off, so we drop the oldest content first.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars < len(_HEAD_ELLIPSIS) + 1:
+        return text[-max_chars:]
+    return _HEAD_ELLIPSIS + text[-(max_chars - len(_HEAD_ELLIPSIS)) :]
 
 
 def _render_message_event(event: MessageEvent, max_chars: int) -> str | None:
     role_label = "[USER]" if event.llm_message.role == "user" else "[ASSISTANT]"
-    parts = [p for p in content_to_str(event.llm_message.content) if p]
+    # ``to_llm_message`` folds ``extended_content`` (AgentContext / hook-provided
+    # per-turn context) into ``content`` — exactly what the original LLM saw.
+    # Reading ``llm_message.content`` alone would silently drop that context.
+    message = event.to_llm_message()
+    parts = [p for p in content_to_str(message.content) if p]
     text = "\n".join(parts).strip()
     if not text:
         return None
-    return f"{role_label}: {_truncate(text, max_chars)}"
+    return f"{role_label}: {_truncate_keep_head(text, max_chars)}"
 
 
 def _render_action_event(event: ActionEvent, max_chars: int) -> str | None:
@@ -70,7 +105,7 @@ def _render_action_event(event: ActionEvent, max_chars: int) -> str | None:
     message = getattr(event.action, "message", None) if event.action else None
     if not isinstance(message, str) or not message.strip():
         return None
-    return f"[AGENT]: {_truncate(message.strip(), max_chars)}"
+    return f"[AGENT]: {_truncate_keep_head(message.strip(), max_chars)}"
 
 
 def _render_tool_event(event: ACPToolCallEvent, max_chars: int) -> str | None:
@@ -91,7 +126,7 @@ def _render_tool_event(event: ACPToolCallEvent, max_chars: int) -> str | None:
         parts.append("  output:")
         for line in str(event.raw_output).splitlines() or [""]:
             parts.append(f"    {line}")
-    return _truncate("\n".join(parts), max_chars)
+    return _truncate_keep_head("\n".join(parts), max_chars)
 
 
 def _terminal_tool_indices(events: Sequence[Event]) -> set[int]:
@@ -122,7 +157,8 @@ def render_resume_transcript(
     Returns ``None`` when no event in ``events`` produces visible output
     (e.g. a fresh conversation, or only filtered placeholder tool events).
 
-    ``MessageEvent``s become ``[USER]: …`` / ``[ASSISTANT]: …`` blocks,
+    ``MessageEvent``s become ``[USER]: …`` / ``[ASSISTANT]: …`` blocks
+    (including ``extended_content`` from ``to_llm_message()``),
     ``ACPToolCallEvent``s become ``[TOOL USE: <name>] (<status>)`` blocks
     with raw input/output indented underneath, and ``ActionEvent``s whose
     ``action`` exposes a ``message`` (e.g. ``FinishAction``) become
@@ -131,6 +167,15 @@ def render_resume_transcript(
     ``ACPToolCallEvent``s are deduplicated by ``tool_call_id``: only the
     final (terminal) event in each ACP streaming pending→completed
     sequence is rendered.
+
+    Truncation is **tail-preserving** for the overall transcript: when the
+    full history exceeds ``max_chars``, the marker and footer are kept
+    and the oldest body content is dropped (with a ``"...\\n"`` prefix
+    marking the cut). Per-message and per-tool caps are head-preserving —
+    long individual blocks keep their opening text and append ``"..."``.
+
+    All ``max_*`` parameters are honored strictly down to zero; the output
+    string is guaranteed to satisfy ``len(result) <= max_chars``.
 
     The caller is responsible for:
       * passing events in chronological order (newest-first fetches must
@@ -143,7 +188,7 @@ def render_resume_transcript(
     """
     keep_tool_indices = _terminal_tool_indices(events)
 
-    lines: list[str] = []
+    blocks: list[str] = []
     for i, event in enumerate(events):
         rendered: str | None
         if isinstance(event, MessageEvent):
@@ -157,11 +202,37 @@ def render_resume_transcript(
         else:
             rendered = None
         if rendered:
-            lines.append(rendered)
-            lines.append("")
+            blocks.append(rendered)
 
-    if not lines:
+    if not blocks:
         return None
 
-    header = [marker, "", header_body, ""] if header_body else [marker, ""]
-    return _truncate("\n".join(header + lines + [footer]), max_chars)
+    header_lines = [marker] + ([header_body] if header_body else [])
+    header_text = "\n\n".join(header_lines)
+    body_text = "\n\n".join(blocks)
+
+    full = "\n\n".join([header_text, body_text, footer])
+    if len(full) <= max_chars:
+        return full
+
+    # The transcript is too long. Preserve the marker, header body, and
+    # footer literally; head-truncate the body so the freshest events
+    # survive — that's the context an agent picking up the conversation
+    # most needs.
+    sep = "\n\n"
+    overhead = len(header_text) + len(sep) + len(sep) + len(footer)
+    body_budget = max_chars - overhead
+    if body_budget >= len(_HEAD_ELLIPSIS) + 1:
+        return (
+            header_text
+            + sep
+            + _truncate_keep_tail(body_text, body_budget)
+            + sep
+            + footer
+        )
+
+    # ``max_chars`` is so tight that even header+footer alone don't leave
+    # room for a meaningful body. Fall back to a single tail-truncation of
+    # the assembled string — the footer (and the tail of the latest event)
+    # will dominate the surviving bytes.
+    return _truncate_keep_tail(full, max_chars)

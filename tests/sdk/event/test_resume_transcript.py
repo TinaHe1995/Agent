@@ -159,21 +159,92 @@ class TestRenderResumeTranscript:
         idx_agent = out.index("[AGENT]: third agent")
         assert idx_user < idx_tool < idx_assistant < idx_agent
 
-    def test_max_chars_truncates_with_ellipsis(self) -> None:
+    def test_max_chars_keeps_footer_when_tight(self) -> None:
+        # ``max_chars`` so tight that even header+footer can't fit alone:
+        # the tail-truncate fallback preserves the end of the transcript,
+        # which is the footer (and the freshest event content just above it).
         events = [_user("x" * 5000)]
         out = render_resume_transcript(events, max_chars=200)
         assert out is not None
         assert len(out) == 200
-        assert out.endswith("...")
+        assert out.endswith(DEFAULT_FOOTER)
+
+    def test_max_chars_preserves_header_footer_and_newest_event(self) -> None:
+        # With a budget large enough to hold the marker, header body, footer,
+        # and a chunk of body, the marker stays at the top, the footer at the
+        # bottom, and the BODY is head-truncated so the latest events survive.
+        events = [
+            _user("OLD first turn " + "o" * 500),
+            _assistant("OLD assistant reply " + "o" * 500),
+            _user("NEW most recent turn"),
+        ]
+        out = render_resume_transcript(events, max_chars=500)
+        assert out is not None
+        assert len(out) <= 500
+        assert out.startswith(RESUME_CONTEXT_MARKER)
+        assert out.endswith(DEFAULT_FOOTER)
+        # The latest event must survive intact.
+        assert "NEW most recent turn" in out
+        # The oldest turn should be dropped, with a "..." cut marker present.
+        assert "OLD first turn" not in out
+        assert "..." in out
+
+    @pytest.mark.parametrize("max_chars", [0, 1, 2, 3, 4, 10, 50])
+    def test_max_chars_strictly_bounds_output(self, max_chars: int) -> None:
+        # Any non-negative ``max_chars`` must produce ``len(out) <= max_chars``.
+        events = [_user("hello"), _assistant("world")]
+        out = render_resume_transcript(events, max_chars=max_chars)
+        assert out is not None
+        assert len(out) <= max_chars
+
+    @pytest.mark.parametrize("cap", [0, 1, 2, 3, 4, 50])
+    def test_max_message_chars_strictly_bounds_text(self, cap: int) -> None:
+        # The text portion of the message line (after "[USER]: ") must be
+        # ≤ cap characters regardless of how small ``cap`` is.
+        events = [_user("x" * 500)]
+        out = render_resume_transcript(events, max_message_chars=cap)
+        assert out is not None
+        user_line = next(ln for ln in out.splitlines() if ln.startswith("[USER]"))
+        text_portion = user_line[len("[USER]: ") :]
+        assert len(text_portion) <= cap
+
+    def test_max_tool_chars_zero_skips_tool_block(self) -> None:
+        # With ``max_tool_chars=0`` the rendered tool block becomes "" and
+        # is dropped — non-tool events still render.
+        events = [
+            _user("hi"),
+            _tool("tc-1", title="bash", raw_input={"command": "ls"}),
+        ]
+        out = render_resume_transcript(events, max_tool_chars=0)
+        assert out is not None
+        assert "[USER]: hi" in out
+        assert "[TOOL USE:" not in out
+
+    def test_extended_content_is_included(self) -> None:
+        # ``MessageEvent.extended_content`` (AgentContext / hook-provided
+        # per-turn context) is folded in by ``to_llm_message()`` and ACP sees
+        # it as part of the turn. The transcript must include it so the
+        # resumed agent has the same context.
+        event = MessageEvent(
+            source="user",
+            llm_message=Message(
+                role="user", content=[TextContent(text="base content")]
+            ),
+            extended_content=[TextContent(text="extra context from hook")],
+        )
+        out = render_resume_transcript([event])
+        assert out is not None
+        assert "base content" in out
+        assert "extra context from hook" in out
 
     def test_max_message_chars_truncates_long_turn(self) -> None:
         events = [_user("x" * 10_000)]
         out = render_resume_transcript(events, max_message_chars=100)
         assert out is not None
-        # The user line should be capped; the marker/header bytes still fit.
         user_line = next(ln for ln in out.splitlines() if ln.startswith("[USER]"))
         assert user_line.endswith("...")
-        assert len(user_line) <= len("[USER]: ") + 100
+        # text portion (after "[USER]: ") capped at max_message_chars.
+        assert len(user_line) - len("[USER]: ") <= 100
 
     def test_max_tool_chars_truncates_tool_block(self) -> None:
         event = _tool(
@@ -183,12 +254,13 @@ class TestRenderResumeTranscript:
         )
         out = render_resume_transcript([event], max_tool_chars=120)
         assert out is not None
-        tool_lines = [ln for ln in out.splitlines() if "x" in ln]
-        # The whole tool block (joined lines) was capped; rendered text length
-        # for the block is ≤ max_tool_chars.
-        joined = "\n".join(out.splitlines())
-        assert "..." in joined
-        assert len(tool_lines) > 0
+        # Recover the rendered tool block from the body (between header and
+        # footer) and verify the whole block is bounded by max_tool_chars.
+        body_start = out.index("[TOOL USE:")
+        body_end = out.index(DEFAULT_FOOTER)
+        tool_block = out[body_start:body_end].strip()
+        assert "..." in tool_block
+        assert len(tool_block) <= 120
 
     def test_image_content_renders_as_placeholder(self) -> None:
         # ImageContent → "[Image: N URLs]" via content_to_str. Test that the
@@ -298,6 +370,66 @@ class TestIsPatchEdit:
 
     def test_no_content_no_raw_input_is_not_patch(self) -> None:
         ev = _tool("tc-1")
+        assert ev.is_patch_edit is False
+
+    def test_dict_content_with_old_text_is_patch(self) -> None:
+        # Persisted ACP events store content blocks as plain dicts (via
+        # ``_serialize_tool_content`` → ``model_dump``). The property must
+        # handle both attribute and dict access.
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "old_text": "before", "new_text": "after"}],
+        )
+        assert ev.is_patch_edit is True
+
+    def test_dict_content_without_old_text_is_full_write(self) -> None:
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "old_text": None, "new_text": "whole file"}],
+        )
+        assert ev.is_patch_edit is False
+
+    def test_model_validate_dict_content_classifies_correctly(self) -> None:
+        # Regression for the QA reviewer's failure case: an event reconstructed
+        # via ``model_validate`` from a JSON-shaped payload keeps ``content[0]``
+        # as a dict, and ``is_patch_edit`` must still classify it correctly.
+        ev = ACPToolCallEvent.model_validate(
+            {
+                "tool_call_id": "validated-diff",
+                "title": "Edit",
+                "content": [
+                    {
+                        "type": "diff",
+                        "old_text": "before",
+                        "new_text": "after",
+                    }
+                ],
+            }
+        )
+        assert ev.content is not None
+        assert isinstance(ev.content[0], dict)
+        assert ev.is_patch_edit is True
+
+    def test_raw_input_only_new_string_is_not_patch(self) -> None:
+        # A Write/create payload may carry only ``new_string`` — that's not
+        # a patch edit, it's a full-file write.
+        ev = _tool("tc-1", raw_input={"new_string": "whole file", "file_path": "/a"})
+        assert ev.is_patch_edit is False
+
+    def test_raw_input_empty_old_string_is_not_patch(self) -> None:
+        # An empty ``old_string`` has nothing to patch — it's effectively a
+        # create.
+        ev = _tool("tc-1", raw_input={"old_string": "", "new_string": "y"})
+        assert ev.is_patch_edit is False
+
+    def test_diff_content_takes_precedence_over_raw_input(self) -> None:
+        # If both signals are present, the structured ACP content block
+        # wins — it's the protocol-level source of truth.
+        ev = _tool(
+            "tc-1",
+            content=[{"type": "diff", "old_text": None, "new_text": "x"}],
+            raw_input={"old_string": "abc", "new_string": "def"},
+        )
         assert ev.is_patch_edit is False
 
 
