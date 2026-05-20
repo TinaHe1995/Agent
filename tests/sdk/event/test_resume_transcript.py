@@ -224,24 +224,34 @@ class TestRenderResumeTranscript:
         assert "OLD first turn" not in out
         assert "..." in out
 
-    @pytest.mark.parametrize("max_chars", [0, 1, 2, 3, 4, 10, 50])
+    @pytest.mark.parametrize("max_chars", [50, 100, 500])
     def test_max_chars_strictly_bounds_output(self, max_chars: int) -> None:
-        # Any non-negative ``max_chars`` must produce ``len(out) <= max_chars``.
+        # For budgets >= len(marker), output must be non-None with length <= max_chars.
         events = [_user("hello"), _assistant("world")]
         out = render_resume_transcript(events, max_chars=max_chars)
         assert out is not None
         assert len(out) <= max_chars
 
-    @pytest.mark.parametrize("max_chars", [1, 5, 10, 30, 200])
-    def test_tight_budget_output_still_starts_with_marker(self, max_chars: int) -> None:
-        # Even when the budget is so small that header+footer+body don't fit,
-        # the output must start with the marker so that callers can detect a
-        # resumed transcript and the double-resume guard stays reliable.
+    @pytest.mark.parametrize("max_chars", [0, 1, 10, 23])
+    def test_max_chars_below_marker_length_returns_none(self, max_chars: int) -> None:
+        # A budget below len(RESUME_CONTEXT_MARKER) (24 chars) cannot fit the
+        # complete marker. Returning a partial marker would bypass the
+        # double-resume guard (callers check out.startswith(RESUME_CONTEXT_MARKER)),
+        # so None is returned instead so callers treat it as a fresh conversation.
+        assert render_resume_transcript([_user("hello")], max_chars=max_chars) is None
+
+    @pytest.mark.parametrize("max_chars", [24, 30, 200])
+    def test_tight_budget_output_starts_with_complete_marker(
+        self, max_chars: int
+    ) -> None:
+        # For any budget >= len(marker), even a very tight cap returns a
+        # transcript that starts with the full, untruncated marker so callers
+        # can reliably detect a resume and the double-resume guard works.
         events = [_user("x" * 5000)]
         out = render_resume_transcript(events, max_chars=max_chars)
         assert out is not None
         assert len(out) <= max_chars
-        assert out.startswith(RESUME_CONTEXT_MARKER[:max_chars])
+        assert out.startswith(RESUME_CONTEXT_MARKER)
 
     @pytest.mark.parametrize("cap", [0, 1, 2, 3, 4, 50])
     def test_max_message_chars_strictly_bounds_text(self, cap: int) -> None:

@@ -341,15 +341,20 @@ def render_resume_transcript(
         )
 
     # ``max_chars`` is so tight that even header+footer alone don't leave
-    # room for a meaningful body. We must still preserve the marker as the
-    # first bytes of the output — it is the shared signal that callers use
-    # for double-resume detection, so breaking that contract (by returning a
-    # tail that starts mid-content) would silently corrupt the guard.
-    if max_chars <= 0:
-        return ""
+    # room for a meaningful body. Preserve the marker contract: every
+    # non-None result must start with the complete ``marker`` string so that
+    # callers can use ``out.startswith(marker)`` for double-resume detection.
+    # A partial marker (e.g. ``<<RESUMED `` for max_chars=10) looks like
+    # usable context but silently bypasses that guard. Return ``None`` when
+    # the budget cannot fit the full marker — the caller should treat this
+    # as a fresh conversation rather than as a malformed resume.
+    if max_chars < len(marker):
+        return None
     marker_prefix = marker + "\n"
-    if len(marker_prefix) >= max_chars:
-        return marker_prefix[:max_chars]
+    if len(marker_prefix) > max_chars:
+        # Marker fits but no room for the newline separator — return just the
+        # marker (without the newline) so the output is exactly max_chars.
+        return marker
     # Fill the remaining budget with the freshest tail of the transcript.
     content_budget = max_chars - len(marker_prefix)
     return marker_prefix + _truncate_keep_tail(
