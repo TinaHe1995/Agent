@@ -871,6 +871,8 @@ class EventService:
             self._run_task.cancel()
             try:
                 await asyncio.wait_for(self._run_task, timeout=10.0)
+            except asyncio.CancelledError:
+                pass  # Expected after cancel()
             except Exception as exc:
                 logger.warning("Run task did not exit cleanly during close: %s", exc)
             self._run_task = None
