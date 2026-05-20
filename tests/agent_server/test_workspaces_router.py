@@ -6,6 +6,7 @@ the same server sees the same list. These tests cover the HTTP surface the
 GUI consumes plus the file-locked persistence underneath it.
 """
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -202,6 +203,52 @@ def test_add_workspace_parents_dedupes_duplicate_paths_within_single_payload(cli
     body = listed.json()
     assert [p["path"] for p in body["workspaceParents"]] == ["/p"]
     assert body["workspaceParents"][0]["id"] == "first"
+
+
+def test_unset_parent_path_is_omitted_from_response_and_on_disk_json(client):
+    """A workspace without ``parentPath`` must serialize as an absent key,
+    not ``"parentPath": null``.
+
+    Both the wire format and ``workspaces.json`` must match the GUI's
+    ``LocalWorkspace.parentPath?: string`` shape — emitting ``null`` violates
+    the contract and breaks strict TS clients.
+    """
+    # Arrange
+    client.post(
+        "/api/workspaces",
+        json={
+            "workspaces": [
+                {"id": "/no-parent", "name": "no-parent", "path": "/no-parent"},
+                {
+                    "id": "/has-parent",
+                    "name": "has-parent",
+                    "path": "/has-parent",
+                    "parentPath": "/parents/root",
+                },
+            ]
+        },
+    )
+
+    # Act
+    listed = client.get("/api/workspaces").json()
+    on_disk_path = Path(os.environ["OH_PERSISTENCE_DIR"]) / "workspaces.json"
+    on_disk = json.loads(on_disk_path.read_text(encoding="utf-8"))
+
+    # Assert: wire format
+    no_parent_wire = next(w for w in listed["workspaces"] if w["path"] == "/no-parent")
+    has_parent_wire = next(
+        w for w in listed["workspaces"] if w["path"] == "/has-parent"
+    )
+    assert "parentPath" not in no_parent_wire
+    assert has_parent_wire["parentPath"] == "/parents/root"
+
+    # Assert: on-disk format mirrors the wire shape.
+    no_parent_disk = next(w for w in on_disk["workspaces"] if w["path"] == "/no-parent")
+    has_parent_disk = next(
+        w for w in on_disk["workspaces"] if w["path"] == "/has-parent"
+    )
+    assert "parentPath" not in no_parent_disk
+    assert has_parent_disk["parentPath"] == "/parents/root"
 
 
 def test_list_workspaces_returns_409_when_persisted_file_is_corrupted(client):

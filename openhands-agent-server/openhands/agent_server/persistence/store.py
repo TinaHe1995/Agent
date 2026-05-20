@@ -656,7 +656,10 @@ class FileWorkspacesStore(WorkspacesStore):
 
     def save(self, workspaces: PersistedWorkspaces) -> None:
         _ensure_secure_directory(self.persistence_dir)
-        data = workspaces.model_dump(mode="json", by_alias=True)
+        # ``exclude_none=True`` keeps the on-disk shape aligned with the wire
+        # contract: unset ``parentPath`` is absent rather than ``null``, which
+        # matches the GUI's ``LocalWorkspace.parentPath?: string`` type.
+        data = workspaces.model_dump(mode="json", by_alias=True, exclude_none=True)
         _atomic_write_json(self._path, data)
         logger.debug(f"Workspaces saved to {self._path}")
 

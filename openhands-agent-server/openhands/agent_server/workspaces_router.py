@@ -55,7 +55,11 @@ def _to_response(persisted: PersistedWorkspaces) -> WorkspacesListResponse:
     )
 
 
-@workspaces_router.get("", response_model=WorkspacesListResponse)
+@workspaces_router.get(
+    "",
+    response_model=WorkspacesListResponse,
+    response_model_exclude_none=True,
+)
 async def list_workspaces(request: Request) -> WorkspacesListResponse:
     """Return the saved workspaces and workspace parents."""
     config = get_config(request)
@@ -79,7 +83,11 @@ async def list_workspaces(request: Request) -> WorkspacesListResponse:
     return _to_response(persisted)
 
 
-@workspaces_router.post("", response_model=WorkspacesListResponse)
+@workspaces_router.post(
+    "",
+    response_model=WorkspacesListResponse,
+    response_model_exclude_none=True,
+)
 async def add_workspaces(
     request: Request, payload: AddWorkspacesRequest
 ) -> WorkspacesListResponse:
@@ -155,7 +163,11 @@ async def delete_workspace(
     return DeleteResponse()
 
 
-@workspaces_router.post("/parents", response_model=WorkspacesListResponse)
+@workspaces_router.post(
+    "/parents",
+    response_model=WorkspacesListResponse,
+    response_model_exclude_none=True,
+)
 async def add_workspace_parents(
     request: Request, payload: AddWorkspaceParentsRequest
 ) -> WorkspacesListResponse:
