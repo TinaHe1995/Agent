@@ -250,10 +250,9 @@ class ConversationState(OpenHandsModel):
         """
         with self._view_lock:
             n = len(self._events)
-            if n > self._view_watermark:
-                for i in range(self._view_watermark, n):
-                    self._view.append_event(self._events[i])
-                self._view_watermark = n
+            for i in range(self._view_watermark, n):
+                self._view.append_event(self._events[i])
+                self._view_watermark = i + 1
             return self._view
 
     def rebuild_view(self) -> None:
@@ -270,6 +269,11 @@ class ConversationState(OpenHandsModel):
         Any ``View`` reference previously returned by ``state.view``
         is invalidated after this call and must not be used — it
         will never reflect new events or the rebuilt state.
+
+        If ``View.from_events`` raises (e.g. due to corrupted events),
+        the cache is left unchanged and the exception propagates to
+        the caller.  ``state.view`` continues to serve the pre-rebuild
+        state until a successful ``rebuild_view()`` call.
         """
         with self._view_lock:
             snapshot = list(self._events)
