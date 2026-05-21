@@ -31,16 +31,25 @@ The agent server has two distinct CORS requirements:
        implement CHIPS (Chromium/Edge today; Firefox/Safari coverage
        still in progress).
 
-   Wildcard credentialed CORS uses ``allow_origin_regex=r".*"`` instead
-   of ``allow_origins=["*"]``. Starlette's ``CORSMiddleware`` treats the
-   literal ``"*"`` as ``allow_all_origins=True`` and then emits the
-   string ``"*"`` on actual (non-preflight) responses unless the request
-   already carries a ``Cookie`` header — which fails the very first mint
-   request that creates the cookie, because browsers reject
-   ``Access-Control-Allow-Origin: *`` together with
-   ``Access-Control-Allow-Credentials: true``. The regex path
-   unconditionally echoes the request ``Origin`` back, which is what
-   credentialed CORS actually requires.
+   Wildcard credentialed CORS uses ``allow_origin_regex=r"https?://.+"``
+   instead of ``allow_origins=["*"]``. Two reasons:
+
+     * Starlette's ``CORSMiddleware`` treats the literal ``"*"`` as
+       ``allow_all_origins=True`` and then emits the string ``"*"`` on
+       actual (non-preflight) responses unless the request already
+       carries a ``Cookie`` header — which fails the very first mint
+       request that creates the cookie, because browsers reject
+       ``Access-Control-Allow-Origin: *`` together with
+       ``Access-Control-Allow-Credentials: true``. The regex path
+       unconditionally echoes the request ``Origin`` back, which is
+       what credentialed CORS actually requires.
+     * Restricting to ``http(s)://`` schemes excludes the literal
+       ``Origin: null`` browsers send for sandboxed iframes
+       (``<iframe sandbox>``), ``data:`` / ``blob:`` URL frames, and
+       certain redirect chains. None of those are legitimate clients
+       of these endpoints, and a null-origin context defeats CHIPS
+       partitioning (the cookie's partition key would be ``null``,
+       making cross-context behavior browser-dependent).
 
 The single global ``CORSDispatcher`` middleware routes each request to
 the appropriate underlying middleware based on the request path, after
@@ -141,13 +150,16 @@ class CORSDispatcher:
         self._default_cors = LocalhostCORSMiddleware(
             app, allow_origins=list(allow_origins)
         )
-        # Match any origin via regex. With allow_credentials=True this
-        # causes Starlette to echo the request Origin on both preflight
-        # and actual responses (with a ``Vary: Origin`` so caches don't
-        # collapse responses across origins).
+        # Match any http(s) origin via regex. With allow_credentials=True
+        # this causes Starlette to echo the request Origin on both
+        # preflight and actual responses (with a ``Vary: Origin`` so
+        # caches don't collapse responses across origins). The
+        # ``https?://`` anchor deliberately excludes the literal
+        # ``Origin: null`` browsers send for sandboxed iframes,
+        # ``data:`` URLs, etc. — see the module docstring.
         self._workspace_cors = CORSMiddleware(
             app,
-            allow_origin_regex=r".*",
+            allow_origin_regex=r"https?://.+",
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],

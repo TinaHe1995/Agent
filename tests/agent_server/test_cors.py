@@ -180,6 +180,44 @@ def test_workspace_session_delete_response_echoes_origin(tmp_path):
     assert resp.headers["access-control-allow-credentials"] == "true"
 
 
+def test_workspace_routes_reject_null_origin(tmp_path):
+    """Sandboxed iframes (``<iframe sandbox>``), ``data:`` URLs and
+    some redirect chains send ``Origin: null``. The regex used for the
+    workspace CORS instance is anchored to ``https?://`` so ``null``
+    does not match — CHIPS partitioning is undefined for null-origin
+    contexts and these are not legitimate clients of the workspace
+    endpoints."""
+    cid = uuid4()
+    client = _build_client(
+        tmp_path,
+        conversation_id=cid,
+        config=Config(session_api_keys=[SESSION_KEY]),
+    )
+
+    # Preflight from a null origin is not matched -> no CORS headers.
+    resp = _preflight(client, "/api/auth/workspace-session", origin="null")
+    assert "access-control-allow-origin" not in resp.headers
+
+    resp = _preflight(
+        client,
+        f"/api/conversations/{cid}/workspace/file",
+        origin="null",
+        method="GET",
+    )
+    assert "access-control-allow-origin" not in resp.headers
+
+    # Actual POST/GET with Origin: null also doesn't get an echoed origin
+    # back, so credentialed fetches from sandbox/data: contexts can't
+    # complete.
+    resp = client.post(
+        "/api/auth/workspace-session",
+        headers={"X-Session-API-Key": SESSION_KEY, "Origin": "null"},
+    )
+    # The endpoint itself still responds (CORS doesn't gate the server),
+    # but the missing ACAO header makes the browser reject the response.
+    assert "access-control-allow-origin" not in resp.headers
+
+
 def test_workspace_static_get_response_echoes_origin(tmp_path):
     """Actual GET against a workspace static file from an arbitrary
     origin must also echo the Origin (not ``*``) for credentialed
