@@ -766,6 +766,128 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             accumulated_token_usage=self.metrics.accumulated_token_usage,
         )
 
+    def _make_retry_decorator(
+        self,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Return a configured retry decorator using this LLM's retry settings."""
+        return self.retry_decorator(
+            num_retries=self.num_retries,
+            retry_exceptions=LLM_RETRY_EXCEPTIONS,
+            retry_min_wait=self.retry_min_wait,
+            retry_max_wait=self.retry_max_wait,
+            retry_multiplier=self.retry_multiplier,
+            retry_listener=self._retry_listener_fn,
+        )
+
+    def _build_completion_result(self, resp: ModelResponse) -> LLMResponse:
+        """Convert a raw :class:`ModelResponse` into an :class:`LLMResponse`."""
+        first_choice = resp["choices"][0]
+        message = Message.from_llm_chat_message(first_choice["message"])
+        return LLMResponse(
+            message=message,
+            metrics=self._current_metrics_snapshot(),
+            raw_response=resp,
+        )
+
+    def _build_responses_result(self, resp: ResponsesAPIResponse) -> LLMResponse:
+        """Convert a raw :class:`ResponsesAPIResponse` into an :class:`LLMResponse`."""
+        output_seq = cast(Sequence[Any], resp.output or [])
+        message = Message.from_llm_responses_output(output_seq)
+        return LLMResponse(
+            message=message,
+            metrics=self._current_metrics_snapshot(),
+            raw_response=resp,
+        )
+
+    def _build_responses_call_kwargs(
+        self,
+        input_items: list[dict[str, Any]],
+        instructions: str | None,
+        resp_tools: list[Any] | None,
+        final_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the shared kwargs dict for litellm_responses / litellm_aresponses."""
+        typed_input: ResponseInputParam | str = (
+            cast(ResponseInputParam, input_items) if input_items else ""
+        )
+        api_key_value = self._get_litellm_api_key_value()
+        return {
+            "model": self.model,
+            "input": typed_input,
+            "instructions": instructions,
+            "tools": resp_tools,
+            "api_key": api_key_value,
+            "api_base": self.base_url,
+            "api_version": self.api_version,
+            "timeout": self.timeout,
+            "drop_params": self.drop_params,
+            "seed": self.seed,
+            **self._aws_kwargs(),
+            **final_kwargs,
+        }
+
+    def _process_stream_event(
+        self, event: Any
+    ) -> tuple[Any | None, ModelResponseStream | None]:
+        """Extract output item and delta chunk from a Responses stream event.
+
+        Returns:
+            (output_item, delta_chunk) — either or both may be ``None``.
+        """
+        output_item: Any | None = None
+        delta_chunk: ModelResponseStream | None = None
+
+        evt_type = getattr(event, "type", None)
+        if evt_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
+            item = getattr(event, "item", None)
+            if item is not None:
+                output_item = item
+
+        if isinstance(
+            event,
+            (
+                OutputTextDeltaEvent,
+                RefusalDeltaEvent,
+                ReasoningSummaryTextDeltaEvent,
+            ),
+        ):
+            delta = event.delta
+            if delta:
+                delta_chunk = ModelResponseStream(
+                    choices=[StreamingChoices(delta=Delta(content=delta))]
+                )
+
+        return output_item, delta_chunk
+
+    def _finalize_stream_response(
+        self,
+        completed_response: Any,
+        collected_output_items: list[Any],
+    ) -> ResponsesAPIResponse:
+        """Validate and patch the completed response from a Responses stream.
+
+        Raises:
+            LLMNoResponseError: If the stream finished without a completed
+                response or with an unexpected event type.
+        """
+        if completed_response is None:
+            raise LLMNoResponseError(
+                "Responses stream finished without a completed response"
+            )
+        if not isinstance(completed_response, ResponseCompletedEvent):
+            raise LLMNoResponseError(
+                f"Unexpected completed event: {type(completed_response)}"
+            )
+
+        completed_resp = completed_response.response
+        # Patch empty output with items collected from stream
+        if not completed_resp.output and collected_output_items:
+            completed_resp.output = collected_output_items
+
+        assert self._telemetry is not None
+        self._telemetry.on_response(completed_resp)
+        return completed_resp
+
     def _prepare_completion_params(
         self,
         messages: list[Message],
@@ -1000,14 +1122,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             messages, tools, add_security_risk_prediction, kwargs
         )
 
-        @self.retry_decorator(
-            num_retries=self.num_retries,
-            retry_exceptions=LLM_RETRY_EXCEPTIONS,
-            retry_min_wait=self.retry_min_wait,
-            retry_max_wait=self.retry_max_wait,
-            retry_multiplier=self.retry_multiplier,
-            retry_listener=self._retry_listener_fn,
-        )
+        @self._make_retry_decorator()
         def _one_attempt(**retry_kwargs: Any) -> ModelResponse:
             assert self._telemetry is not None
             self._telemetry.on_request(telemetry_ctx=telemetry_ctx)
@@ -1028,14 +1143,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             return resp
 
         try:
-            resp = _one_attempt()
-            first_choice = resp["choices"][0]
-            message = Message.from_llm_chat_message(first_choice["message"])
-            return LLMResponse(
-                message=message,
-                metrics=self._current_metrics_snapshot(),
-                raw_response=resp,
-            )
+            return self._build_completion_result(_one_attempt())
         except Exception as e:
             return self._handle_error(
                 e,
@@ -1081,14 +1189,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             messages, tools, add_security_risk_prediction, kwargs
         )
 
-        @self.retry_decorator(
-            num_retries=self.num_retries,
-            retry_exceptions=LLM_RETRY_EXCEPTIONS,
-            retry_min_wait=self.retry_min_wait,
-            retry_max_wait=self.retry_max_wait,
-            retry_multiplier=self.retry_multiplier,
-            retry_listener=self._retry_listener_fn,
-        )
+        @self._make_retry_decorator()
         async def _one_attempt(**retry_kwargs: Any) -> ModelResponse:
             assert self._telemetry is not None
             self._telemetry.on_request(telemetry_ctx=telemetry_ctx)
@@ -1109,14 +1210,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             return resp
 
         try:
-            resp = await _one_attempt()
-            first_choice = resp["choices"][0]
-            message = Message.from_llm_chat_message(first_choice["message"])
-            return LLMResponse(
-                message=message,
-                metrics=self._current_metrics_snapshot(),
-                raw_response=resp,
-            )
+            return self._build_completion_result(await _one_attempt())
         except Exception as e:
             # Fallback is synchronous; cast the token callback since the
             # fallback LLM's sync path accepts TokenCallbackType.
@@ -1181,14 +1275,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             messages, tools, include, store, add_security_risk_prediction, kwargs
         )
 
-        @self.retry_decorator(
-            num_retries=self.num_retries,
-            retry_exceptions=LLM_RETRY_EXCEPTIONS,
-            retry_min_wait=self.retry_min_wait,
-            retry_max_wait=self.retry_max_wait,
-            retry_multiplier=self.retry_multiplier,
-            retry_listener=self._retry_listener_fn,
-        )
+        @self._make_retry_decorator()
         def _one_attempt(**retry_kwargs: Any) -> ResponsesAPIResponse:
             assert self._telemetry is not None
             self._telemetry.on_request(telemetry_ctx=telemetry_ctx)
@@ -1196,30 +1283,17 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             with self._litellm_modify_params_ctx(self.modify_params):
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=DeprecationWarning)
-                    typed_input: ResponseInputParam | str = (
-                        cast(ResponseInputParam, input_items) if input_items else ""
+                    litellm_kwargs = self._build_responses_call_kwargs(
+                        input_items, instructions, resp_tools, final_kwargs
                     )
-                    api_key_value = self._get_litellm_api_key_value()
+                    ret = litellm_responses(**litellm_kwargs)
 
-                    ret = litellm_responses(
-                        model=self.model,
-                        input=typed_input,
-                        instructions=instructions,
-                        tools=resp_tools,
-                        api_key=api_key_value,
-                        api_base=self.base_url,
-                        api_version=self.api_version,
-                        timeout=self.timeout,
-                        drop_params=self.drop_params,
-                        seed=self.seed,
-                        **{**self._aws_kwargs(), **final_kwargs},
-                    )
                     if isinstance(ret, ResponsesAPIResponse):
                         if user_enable_streaming:
                             logger.warning(
-                                "Responses streaming was requested, but the provider "
-                                "returned a non-streaming response; no on_token deltas "
-                                "will be emitted."
+                                "Responses streaming was requested, but the "
+                                "provider returned a non-streaming response; "
+                                "no on_token deltas will be emitted."
                             )
                         self._telemetry.on_response(ret)
                         return ret
@@ -1232,7 +1306,6 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                             raise AssertionError(
                                 f"Expected Responses stream iterator, got {type(ret)}"
                             )
-
                         stream_callback = on_token if user_enable_streaming else None
                         # Collect output items from streaming events.
                         # Some endpoints (e.g., Codex subscription) send
@@ -1244,64 +1317,22 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                         for event in ret:
                             if event is None:
                                 continue
-                            evt_type = getattr(event, "type", None)
-                            if evt_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
-                                item = getattr(event, "item", None)
-                                if item is not None:
-                                    collected_output_items.append(item)
-                            if stream_callback is None:
-                                continue
-                            if isinstance(
-                                event,
-                                (
-                                    OutputTextDeltaEvent,
-                                    RefusalDeltaEvent,
-                                    ReasoningSummaryTextDeltaEvent,
-                                ),
-                            ):
-                                delta = event.delta
-                                if delta:
-                                    stream_callback(
-                                        ModelResponseStream(
-                                            choices=[
-                                                StreamingChoices(
-                                                    delta=Delta(content=delta)
-                                                )
-                                            ]
-                                        )
-                                    )
+                            output_item, delta_chunk = self._process_stream_event(event)
+                            if output_item is not None:
+                                collected_output_items.append(output_item)
+                            if stream_callback is not None and delta_chunk is not None:
+                                stream_callback(delta_chunk)
 
-                        completed_event = ret.completed_response
-                        if completed_event is None:
-                            raise LLMNoResponseError(
-                                "Responses stream finished without a completed response"
-                            )
-                        if not isinstance(completed_event, ResponseCompletedEvent):
-                            raise LLMNoResponseError(
-                                f"Unexpected completed event: {type(completed_event)}"
-                            )
-
-                        completed_resp = completed_event.response
-                        # Patch empty output with items collected from stream
-                        if not completed_resp.output and collected_output_items:
-                            completed_resp.output = collected_output_items
-
-                        self._telemetry.on_response(completed_resp)
-                        return completed_resp
+                        return self._finalize_stream_response(
+                            ret.completed_response, collected_output_items
+                        )
 
                     raise AssertionError(
                         f"Expected ResponsesAPIResponse, got {type(ret)}"
                     )
 
         try:
-            resp: ResponsesAPIResponse = _one_attempt()
-            output_seq = cast(Sequence[Any], resp.output or [])
-            message = Message.from_llm_responses_output(output_seq)
-            return LLMResponse(
-                message=message,
-                metrics=self._current_metrics_snapshot(),
-                raw_response=resp,
-            )
+            return self._build_responses_result(_one_attempt())
         except Exception as e:
             return self._handle_error(
                 e,
@@ -1352,14 +1383,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             messages, tools, include, store, add_security_risk_prediction, kwargs
         )
 
-        @self.retry_decorator(
-            num_retries=self.num_retries,
-            retry_exceptions=LLM_RETRY_EXCEPTIONS,
-            retry_min_wait=self.retry_min_wait,
-            retry_max_wait=self.retry_max_wait,
-            retry_multiplier=self.retry_multiplier,
-            retry_listener=self._retry_listener_fn,
-        )
+        @self._make_retry_decorator()
         async def _one_attempt(
             **retry_kwargs: Any,
         ) -> ResponsesAPIResponse:
@@ -1369,24 +1393,11 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             with self._litellm_modify_params_ctx(self.modify_params):
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=DeprecationWarning)
-                    typed_input: ResponseInputParam | str = (
-                        cast(ResponseInputParam, input_items) if input_items else ""
+                    litellm_kwargs = self._build_responses_call_kwargs(
+                        input_items, instructions, resp_tools, final_kwargs
                     )
-                    api_key_value = self._get_litellm_api_key_value()
+                    ret = await litellm_aresponses(**litellm_kwargs)
 
-                    ret = await litellm_aresponses(
-                        model=self.model,
-                        input=typed_input,
-                        instructions=instructions,
-                        tools=resp_tools,
-                        api_key=api_key_value,
-                        api_base=self.base_url,
-                        api_version=self.api_version,
-                        timeout=self.timeout,
-                        drop_params=self.drop_params,
-                        seed=self.seed,
-                        **{**self._aws_kwargs(), **final_kwargs},
-                    )
                     if isinstance(ret, ResponsesAPIResponse):
                         if user_enable_streaming:
                             logger.warning(
@@ -1406,7 +1417,6 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                                 "Expected Responses async stream "
                                 f"iterator, got {type(ret)}"
                             )
-
                         stream_cb = on_token if user_enable_streaming else None
                         # Collect output items from streaming events.
                         # Some endpoints (e.g., Codex subscription) send
@@ -1418,65 +1428,22 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                         async for event in ret:
                             if event is None:
                                 continue
-                            evt_type = getattr(event, "type", None)
-                            if evt_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
-                                item = getattr(event, "item", None)
-                                if item is not None:
-                                    collected_output_items.append(item)
-                            if stream_cb is None:
-                                continue
-                            if isinstance(
-                                event,
-                                (
-                                    OutputTextDeltaEvent,
-                                    RefusalDeltaEvent,
-                                    ReasoningSummaryTextDeltaEvent,
-                                ),
-                            ):
-                                delta = event.delta
-                                if delta:
-                                    await _invoke_token_callback(
-                                        stream_cb,
-                                        ModelResponseStream(
-                                            choices=[
-                                                StreamingChoices(
-                                                    delta=Delta(content=delta)
-                                                )
-                                            ]
-                                        ),
-                                    )
+                            output_item, delta_chunk = self._process_stream_event(event)
+                            if output_item is not None:
+                                collected_output_items.append(output_item)
+                            if stream_cb is not None and delta_chunk is not None:
+                                await _invoke_token_callback(stream_cb, delta_chunk)
 
-                        completed_event = ret.completed_response
-                        if completed_event is None:
-                            raise LLMNoResponseError(
-                                "Responses stream finished without a completed response"
-                            )
-                        if not isinstance(completed_event, ResponseCompletedEvent):
-                            raise LLMNoResponseError(
-                                f"Unexpected completed event: {type(completed_event)}"
-                            )
-
-                        completed_resp = completed_event.response
-                        # Patch empty output with items collected from stream
-                        if not completed_resp.output and collected_output_items:
-                            completed_resp.output = collected_output_items
-
-                        self._telemetry.on_response(completed_resp)
-                        return completed_resp
+                        return self._finalize_stream_response(
+                            ret.completed_response, collected_output_items
+                        )
 
                     raise AssertionError(
                         f"Expected ResponsesAPIResponse, got {type(ret)}"
                     )
 
         try:
-            completed: ResponsesAPIResponse = await _one_attempt()
-            output_seq = cast(Sequence[Any], completed.output or [])
-            message = Message.from_llm_responses_output(output_seq)
-            return LLMResponse(
-                message=message,
-                metrics=self._current_metrics_snapshot(),
-                raw_response=completed,
-            )
+            return self._build_responses_result(await _one_attempt())
         except Exception as e:
             _fb_token = cast("TokenCallbackType | None", on_token)
             return await self._ahandle_error(
