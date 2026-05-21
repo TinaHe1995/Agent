@@ -103,7 +103,8 @@ class AgentContext(BaseModel):
             "workspace (e.g. .openhands/skills/, .cursorrules, agents.md). Unlike "
             "load_user_skills / load_public_skills, this flag is not resolved by "
             "AgentContext itself (the workspace path is unknown at validation "
-            "time); the agent-server resolves it at conversation start."
+            "time); LocalConversation resolves it lazily on the first "
+            "send_message() / run(), when the workspace is known."
         ),
         json_schema_extra={"acp_compatible": True},
     )
