@@ -124,6 +124,19 @@ class Config(BaseModel):
             "always accepted regardless of what's in here)."
         ),
     )
+    allow_workspace_cors_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Additional CORS origins permitted ONLY for the workspace-session "
+            "auth endpoint (``/api/auth/workspace-session``) and the workspace "
+            "static-file routes (``/api/conversations/{id}/workspace/*``). "
+            "Origins listed here are allowed in addition to ``allow_cors_origins`` "
+            "for those routes, but are NOT granted CORS access to the rest of "
+            "the API. Use this to let a different-origin frontend mint the "
+            "workspace session cookie and load workspace artifacts without "
+            "opening the full API surface to that origin."
+        ),
+    )
     conversations_path: Path = Field(
         default=Path("workspace/conversations"),
         description=(
