@@ -198,3 +198,49 @@ def test_current_model_name_is_none_for_native_openhands_agent():
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_name is None
+
+
+def test_current_model_fields_read_from_persisted_agent_state():
+    """Cold conversation list: the live agent's PrivateAttrs are still None
+    because ``init_state`` hasn't fired, but ``agent_state`` persisted the
+    values from the last session.  The lift should source from there so the
+    chip survives cold reads.
+    """
+    agent = ACPAgent(acp_command=["echo", "test"])
+    # Crucially, leave ``_current_model_id`` at its None default — this
+    # simulates an agent freshly reconstructed from the persisted JSON
+    # before any ``init_state`` call has run for this conversation.
+    state = _make_state(agent)
+    state.agent_state = {
+        "acp_session_id": "prior-session",
+        "acp_current_model_id": "default",
+        "acp_current_model_name": "Default (recommended)",
+    }
+    stored = _make_stored(state)
+
+    info = _compose_conversation_info(stored, state)
+
+    assert info.current_model_id == "default"
+    assert info.current_model_name == "Default (recommended)"
+
+
+def test_live_agent_attrs_take_precedence_over_persisted_state():
+    """Within an active session, the live agent is the freshest source."""
+    agent = ACPAgent(acp_command=["echo", "test"])
+    agent._current_model_id = "claude-opus-4-1"
+    m = MagicMock()
+    m.model_id = "claude-opus-4-1"
+    m.name = "Opus 4.1"
+    agent._available_models = [m]
+    state = _make_state(agent)
+    # Stale persisted state from a prior session that picked a different model.
+    state.agent_state = {
+        "acp_current_model_id": "haiku",
+        "acp_current_model_name": "Haiku",
+    }
+    stored = _make_stored(state)
+
+    info = _compose_conversation_info(stored, state)
+
+    assert info.current_model_id == "claude-opus-4-1"
+    assert info.current_model_name == "Opus 4.1"

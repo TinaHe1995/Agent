@@ -251,8 +251,22 @@ def _compose_conversation_info(
     # because the agent itself stores them in PrivateAttrs (ACPAgent is
     # frozen) and PrivateAttrs don't survive ``model_dump``.  ``getattr``
     # handles non-ACP agents which don't have the attributes at all.
-    current_model_id = getattr(state.agent, "current_model_id", None)
-    current_model_name = getattr(state.agent, "current_model_name", None)
+    #
+    # Fall back to ``state.agent_state`` (which IS persisted to disk via
+    # ``base_state.json`` alongside ``acp_session_id``) so cold reads from
+    # the conversation list — where the agent's PrivateAttrs are still
+    # ``None`` because ``init_state`` hasn't fired — still surface the
+    # model the agent last resolved. ``ACPAgent._init`` writes the same
+    # values into ``agent_state["acp_current_model_*"]`` at session start.
+    agent_state = getattr(state, "agent_state", {}) or {}
+    current_model_id = (
+        getattr(state.agent, "current_model_id", None)
+        or agent_state.get("acp_current_model_id")
+    )
+    current_model_name = (
+        getattr(state.agent, "current_model_name", None)
+        or agent_state.get("acp_current_model_name")
+    )
     return ConversationInfo(
         **state.model_dump(mode="json"),
         title=stored.title,

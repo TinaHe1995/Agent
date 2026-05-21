@@ -1043,12 +1043,25 @@ class ACPAgent(AgentBase):
         # in a different working directory would at best silently miss the
         # prior session and at worst load a different session that happens to
         # exist at the new cwd.
+        # Persist the model the ACP server resolved for this session
+        # (raw id + human-readable name) into ``agent_state`` for the same
+        # reason as ``acp_session_id`` / ``acp_session_cwd``: it's per-session
+        # state that needs to survive agent-server restarts and cold reads of
+        # the conversation list, but it lives on the frozen ACPAgent as a
+        # PrivateAttr (so doesn't serialize via ``model_dump``).  Without
+        # this, ``ConversationInfo.current_model_*`` would only be populated
+        # while the subprocess is alive — i.e. the chip would vanish from
+        # idle / restored conversations in the sidebar.
         state.agent_state = {
             **state.agent_state,
             "acp_agent_name": self._agent_name,
             "acp_agent_version": self._agent_version,
             "acp_session_id": self._session_id,
             "acp_session_cwd": self._working_dir,
+            "acp_current_model_id": self._current_model_id,
+            "acp_current_model_name": _resolve_model_name(
+                self._current_model_id, self._available_models
+            ),
         }
 
         if self._installed_suffix:
