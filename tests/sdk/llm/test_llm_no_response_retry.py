@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from litellm.types.utils import Choices, Message as LiteLLMMessage, ModelResponse, Usage
@@ -106,3 +106,77 @@ def test_no_response_retry_bumps_temperature(mock_completion, base_llm: LLM) -> 
     # Grab kwargs from the second call
     _, second_kwargs = mock_completion.call_args_list[1]
     assert second_kwargs.get("temperature") == 1.0
+
+
+# ------------------------------------------------------------------
+# Async acompletion tests
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@patch(
+    "openhands.sdk.llm.llm.litellm_acompletion",
+    new_callable=AsyncMock,
+)
+async def test_async_no_response_retry_bumps_temperature(
+    mock_acompletion: AsyncMock, base_llm: LLM
+) -> None:
+    """Async acompletion must apply the temperature bump on retry (B2 regression)."""
+    assert base_llm.temperature == 0.0
+
+    mock_acompletion.side_effect = [
+        create_empty_choices_response("empty-1"),
+        create_mock_response("ok"),
+    ]
+
+    resp = await base_llm.acompletion(
+        messages=[Message(role="user", content=[TextContent(text="hi")])]
+    )
+
+    assert isinstance(resp, LLMResponse)
+    assert mock_acompletion.call_count == 2
+    _, second_kwargs = mock_acompletion.call_args_list[1]
+    assert second_kwargs.get("temperature") == 1.0
+
+
+@pytest.mark.asyncio
+@patch(
+    "openhands.sdk.llm.llm.litellm_acompletion",
+    new_callable=AsyncMock,
+)
+async def test_async_no_response_retries_then_succeeds(
+    mock_acompletion: AsyncMock, base_llm: LLM
+) -> None:
+    mock_acompletion.side_effect = [
+        create_empty_choices_response("empty-1"),
+        create_mock_response("success"),
+    ]
+
+    resp = await base_llm.acompletion(
+        messages=[Message(role="user", content=[TextContent(text="hi")])]
+    )
+
+    assert isinstance(resp, LLMResponse)
+    assert resp.message is not None
+    assert mock_acompletion.call_count == 2
+
+
+@pytest.mark.asyncio
+@patch(
+    "openhands.sdk.llm.llm.litellm_acompletion",
+    new_callable=AsyncMock,
+)
+async def test_async_no_response_exhausts_retries(
+    mock_acompletion: AsyncMock, base_llm: LLM
+) -> None:
+    mock_acompletion.side_effect = [
+        create_empty_choices_response("empty-1"),
+        create_empty_choices_response("empty-2"),
+    ]
+
+    with pytest.raises(LLMNoResponseError):
+        await base_llm.acompletion(
+            messages=[Message(role="user", content=[TextContent(text="hi")])]
+        )
+
+    assert mock_acompletion.call_count == base_llm.num_retries
