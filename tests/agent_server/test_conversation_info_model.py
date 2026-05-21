@@ -139,10 +139,13 @@ def test_current_model_id_propagates_init_resolution(
     assert info.current_model_id == expected
 
 
-def _model_info(model_id: str, name: str | None) -> object:
+def _model_info(
+    model_id: str, name: str | None, description: str | None = None
+) -> object:
     m = MagicMock()
     m.model_id = model_id
     m.name = name
+    m.description = description
     return m
 
 
@@ -151,18 +154,26 @@ def test_current_model_name_is_lifted_alongside_id():
 
     Simulates the claude-agent-acp default-config case: ``current_model_id``
     is the alias ``"default"`` and ``current_model_name`` is the resolved
-    human-readable string from ``ModelInfo.name``.
+    underlying model from ``ModelInfo.description`` (``"Opus 4.7 with 1M
+    context"``) — neither ``modelId`` nor ``name`` carry the actual model
+    identity for that case.
     """
     agent = ACPAgent(acp_command=["echo", "test"])
     agent._current_model_id = "default"
-    agent._available_models = [_model_info("default", "Default (recommended)")]
+    agent._available_models = [
+        _model_info(
+            "default",
+            "Default (recommended)",
+            "Opus 4.7 with 1M context · Most capable for complex work",
+        )
+    ]
     state = _make_state(agent)
     stored = _make_stored(state)
 
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_id == "default"
-    assert info.current_model_name == "Default (recommended)"
+    assert info.current_model_name == "Opus 4.7 with 1M context"
 
 
 def test_current_model_name_falls_back_to_id_when_no_match():

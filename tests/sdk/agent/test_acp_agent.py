@@ -3966,44 +3966,74 @@ class TestExtractSessionModels:
 
 
 class TestResolveModelName:
-    """``_resolve_model_name`` resolves alias model_ids to ``ModelInfo.name``.
+    """``_resolve_model_name`` resolves alias model_ids to a useful display.
 
     The motivating case is claude-agent-acp returning ``"default"`` for
-    ``currentModelId`` while exposing the human-readable name (``"Default
-    (recommended)"``) on the matching ``available_models`` entry.
+    ``currentModelId`` while ``ModelInfo.name`` is also an alias
+    (``"Default (recommended)"``) — the *actual* resolved model
+    (``"Opus 4.7 with 1M context"``) lives in ``ModelInfo.description``.
     """
 
-    def _model_info(self, model_id: str, name: str | None) -> Any:
+    def _model_info(
+        self,
+        model_id: str,
+        name: str | None,
+        description: str | None = None,
+    ) -> Any:
         m = MagicMock()
         m.model_id = model_id
         m.name = name
+        m.description = description
         return m
 
-    def test_returns_name_when_id_matches_an_entry(self):
-        # Mirrors claude-agent-acp's actual default-config response.
+    def test_alias_resolves_via_description_first_segment(self):
+        # claude-agent-acp 0.36.1 actual shape — ``description`` leads with
+        # the resolved model identity, separated from capability blurbs by " · ".
         models = [
-            self._model_info("default", "Default (recommended)"),
-            self._model_info("sonnet", "Sonnet"),
-            self._model_info("haiku", "Haiku"),
+            self._model_info(
+                "default",
+                "Default (recommended)",
+                "Opus 4.7 with 1M context · Most capable for complex work",
+            ),
+            self._model_info(
+                "sonnet", "Sonnet", "Sonnet 4.6 · Best for everyday tasks"
+            ),
+            self._model_info("haiku", "Haiku", "Haiku 4.5 · Fastest for quick answers"),
         ]
+        assert _resolve_model_name("default", models) == "Opus 4.7 with 1M context"
+        assert _resolve_model_name("sonnet", models) == "Sonnet 4.6"
+        assert _resolve_model_name("haiku", models) == "Haiku 4.5"
+
+    def test_alias_falls_back_to_name_when_description_missing(self):
+        # Server omits description: stop at ``name`` rather than at the raw id.
+        models = [self._model_info("default", "Default (recommended)")]
         assert _resolve_model_name("default", models) == "Default (recommended)"
-        assert _resolve_model_name("sonnet", models) == "Sonnet"
+
+    def test_concrete_id_uses_name_not_description(self):
+        # codex-acp: ``description`` is a capability blurb, not a model
+        # identity ("Optimized for professional work and long-running
+        # agents..."). The ``name`` ("gpt-5.4 (low)") is the right display.
+        models = [
+            self._model_info(
+                "gpt-5.4/low",
+                "gpt-5.4 (low)",
+                "Optimized for professional work and long-running agents. ...",
+            )
+        ]
+        assert _resolve_model_name("gpt-5.4/low", models) == "gpt-5.4 (low)"
 
     def test_falls_back_to_raw_id_when_no_match(self):
-        # codex-acp reports the concrete id directly; if it ever appears
-        # in ``current_model_id`` without a matching ``available_models``
-        # entry, we should still pass it through.
         assert _resolve_model_name("gpt-5.5/xhigh", []) == "gpt-5.5/xhigh"
         models = [self._model_info("other", "Other")]
         assert _resolve_model_name("gpt-5.5/xhigh", models) == "gpt-5.5/xhigh"
 
-    def test_falls_back_to_id_when_entry_has_empty_name(self):
-        # Defensive: if a server includes the entry but leaves ``name``
-        # empty or non-string, don't surface an unhelpful blank string.
-        models = [self._model_info("default", "")]
-        assert _resolve_model_name("default", models) == "default"
-        models = [self._model_info("default", None)]
-        assert _resolve_model_name("default", models) == "default"
+    def test_falls_back_to_id_when_entry_has_empty_name_and_no_description(self):
+        # Defensive: empty name + empty description shouldn't surface a
+        # blank chip — let the id through.
+        models = [self._model_info("custom_id", "", description="")]
+        assert _resolve_model_name("custom_id", models) == "custom_id"
+        models = [self._model_info("custom_id", None, description=None)]
+        assert _resolve_model_name("custom_id", models) == "custom_id"
 
     def test_returns_none_when_id_is_none(self):
         assert _resolve_model_name(None, []) is None
@@ -4015,15 +4045,19 @@ class TestACPAgentCurrentModelNameProperty:
     def test_defaults_to_none(self):
         assert _make_agent().current_model_name is None
 
-    def test_resolves_via_available_models_lookup(self):
-        # Simulates claude-agent-acp default config: alias id + descriptive name.
+    def test_resolves_alias_via_description_first_segment(self):
+        # claude-agent-acp default config: ``modelId="default"`` is an alias,
+        # ``name="Default (recommended)"`` is also an alias — the *actual*
+        # resolved model identity ("Opus 4.7 with 1M context") lives in
+        # ``description``. Surface that.
         agent = _make_agent()
         agent._current_model_id = "default"
         m = MagicMock()
         m.model_id = "default"
         m.name = "Default (recommended)"
+        m.description = "Opus 4.7 with 1M context · Most capable for complex work"
         agent._available_models = [m]
-        assert agent.current_model_name == "Default (recommended)"
+        assert agent.current_model_name == "Opus 4.7 with 1M context"
 
     def test_falls_back_to_raw_id_when_lookup_misses(self):
         # codex-acp pattern: concrete id, available_models may or may not

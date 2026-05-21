@@ -231,27 +231,51 @@ def _extract_current_model_id(response: Any) -> str | None:
     return current
 
 
+_GENERIC_MODEL_ALIASES = frozenset({"default", "auto", "sonnet", "opus", "haiku"})
+
+
 def _resolve_model_name(
     current_model_id: str | None,
     available_models: list[Any],
 ) -> str | None:
-    """Map a raw ``currentModelId`` to the human-readable ``ModelInfo.name``.
+    """Map a raw ``currentModelId`` to a human-readable model identity.
 
-    ACP servers sometimes return an alias (e.g. claude-agent-acp emits
-    ``"default"``) where the resolved underlying model is exposed via the
-    matching entry in ``available_models``.  This helper performs that
-    lookup and falls back to the raw id when the alias isn't in the list —
-    so codex-acp, which already reports the concrete id, sees no behavior
-    change.
+    Three cases, in order:
+
+      1. ``current_model_id`` is a known generic alias (e.g.
+         claude-agent-acp's ``"default"`` / ``"sonnet"`` / ``"opus"`` /
+         ``"haiku"``). The matching ``ModelInfo.name`` is also an alias in
+         these cases (``"Default (recommended)"``, ``"Sonnet"``, …) and
+         doesn't tell the user what's actually running. The *resolved*
+         model identity lives in ``ModelInfo.description`` — the first
+         segment before ``" · "`` — e.g. ``"Opus 4.7 with 1M context"`` for
+         ``"default"``. Surface that.
+
+      2. ``current_model_id`` is concrete (e.g. codex-acp's
+         ``"gpt-5.5/xhigh"``, an explicit Anthropic version like
+         ``"claude-opus-4-1"``, …). Use ``ModelInfo.name`` when present —
+         it's typically a slightly prettier form of the id
+         (``"GPT-5.5 (xhigh)"``).
+
+      3. No match in ``available_models``. Pass the raw id through so the
+         chip stays at least as informative as before this helper existed.
     """
     if current_model_id is None:
         return None
+    is_alias = current_model_id.lower() in _GENERIC_MODEL_ALIASES
     for model_info in available_models:
-        if getattr(model_info, "model_id", None) == current_model_id:
-            name = getattr(model_info, "name", None)
-            if isinstance(name, str) and name:
-                return name
-            break
+        if getattr(model_info, "model_id", None) != current_model_id:
+            continue
+        if is_alias:
+            desc = getattr(model_info, "description", None)
+            if isinstance(desc, str) and desc:
+                head = desc.split(" · ", 1)[0].strip()
+                if head:
+                    return head
+        name = getattr(model_info, "name", None)
+        if isinstance(name, str) and name:
+            return name
+        break
     return current_model_id
 
 
