@@ -794,10 +794,14 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 raise ValueError("Streaming requires an on_token callback")
             kwargs["stream"] = True
 
+        # 1) serialize messages
         formatted_messages = self.format_messages_for_llm(messages)
+
+        # 2) choose function-calling strategy
         use_native_fc = self.native_tool_calling
         original_fncall_msgs = copy.deepcopy(formatted_messages)
 
+        # Convert Tool objects to ChatCompletionToolParam once here
         cc_tools: list[ChatCompletionToolParam] = []
         if tools:
             cc_tools = [
@@ -820,18 +824,23 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 include_security_params=add_security_risk_prediction,
             )
 
+        # 3) normalize provider params
+        # Only pass tools when native FC is active
         kwargs["tools"] = cc_tools if (bool(cc_tools) and use_native_fc) else None
         has_tools_flag = bool(cc_tools) and use_native_fc
+        # Behavior-preserving: delegate to select_chat_options
         call_kwargs = select_chat_options(self, kwargs, has_tools=has_tools_flag)
 
+        # 4) request context for telemetry (always include context_window for metrics)
         assert self._telemetry is not None
+        # Always pass context_window so metrics are tracked even when logging disabled
         telemetry_ctx: dict[str, Any] = {
             "context_window": self.effective_max_input_tokens or 0
         }
         if self._telemetry.log_enabled:
             telemetry_ctx.update(
                 {
-                    "messages": formatted_messages[:],
+                    "messages": formatted_messages[:],  # already simple dicts
                     "tools": tools,
                     "kwargs": {k: v for k, v in call_kwargs.items()},
                 }
@@ -868,7 +877,12 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 tools=ctx.cc_tools,
                 include_security_params=ctx.add_security_risk_prediction,
             )
+        # 6) telemetry
         self._telemetry.on_response(resp, raw_resp=raw_resp)
+
+        # Ensure at least one choice.
+        # Gemini sometimes returns empty choices; we raise LLMNoResponseError here
+        # inside the retry boundary so it is retried.
         if not resp.get("choices") or len(resp["choices"]) < 1:
             raise LLMNoResponseError(
                 "Response choices is less than 1. Response: " + str(resp)
@@ -877,8 +891,11 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
 
     def _build_completion_llm_response(self, resp: ModelResponse) -> LLMResponse:
         """Convert a validated ModelResponse into an LLMResponse."""
+        # Convert the first choice to an OpenHands Message
         first_choice = resp["choices"][0]
         message = Message.from_llm_chat_message(first_choice["message"])
+
+        # Create and return LLMResponse
         return LLMResponse(
             message=message,
             metrics=self._metrics_snapshot(),
@@ -886,6 +903,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         )
 
     def _metrics_snapshot(self) -> MetricsSnapshot:
+        # Get current metrics snapshot
         return MetricsSnapshot(
             model_name=self.metrics.model_name,
             accumulated_cost=self.metrics.accumulated_cost,
@@ -952,10 +970,12 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             messages, tools, add_security_risk_prediction, on_token, kwargs
         )
 
+        # 5) do the call with retries
         @self.retry_decorator(**self._retry_kwargs())
         def _one_attempt(**retry_kwargs) -> ModelResponse:
             assert self._telemetry is not None
             self._telemetry.on_request(telemetry_ctx=ctx.telemetry_ctx)
+            # Merge retry-modified kwargs (like temperature) with call_kwargs
             final_kwargs = {**ctx.call_kwargs, **retry_kwargs}
             resp = self._transport_call(
                 messages=ctx.formatted_messages,
@@ -1017,6 +1037,8 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             assert resp is not None
             return self._build_completion_llm_response(resp)
         except Exception as e:
+            # Fallback is synchronous; cast the token callback since the
+            # fallback LLM's sync path accepts TokenCallbackType.
             _fb_token = cast("TokenCallbackType | None", on_token)
             return await self._ahandle_error(
                 e,
@@ -1056,12 +1078,16 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         """Build all state needed before the responses transport call."""
         user_enable_streaming = bool(kwargs.get("stream", False)) or self.stream
         if user_enable_streaming:
+            # We allow on_token to be None for subscription mode
             if on_token is None and not self.is_subscription:
                 raise ValueError("Streaming requires an on_token callback")
             kwargs["stream"] = True
 
+        # Build instructions + input list using dedicated Responses formatter
         instructions, input_items = self.format_messages_for_responses(messages)
 
+        # Convert Tool objects to Responses ToolParam
+        # (Responses path always supports function tools)
         resp_tools = (
             [
                 t.to_responses_tool(
@@ -1073,11 +1099,14 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             else None
         )
 
+        # Normalize/override Responses kwargs consistently
         call_kwargs = select_responses_options(
             self, kwargs, include=include, store=store
         )
 
+        # Request context for telemetry (always include context_window for metrics)
         assert self._telemetry is not None
+        # Always pass context_window so metrics are tracked even when logging disabled
         telemetry_ctx: dict[str, Any] = {
             "context_window": self.effective_max_input_tokens or 0
         }
@@ -1131,6 +1160,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         if event is None:
             return None, None
         item = None
+        # Collect finished output items
         evt_type = getattr(event, "type", None)
         if evt_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
             raw_item = getattr(event, "item", None)
@@ -1165,6 +1195,8 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 f"Unexpected completed event: {type(completed_event)}"
             )
         completed_resp = completed_event.response
+
+        # Patch empty output with items collected from stream
         if not completed_resp.output and collected_output_items:
             completed_resp.output = collected_output_items
         return completed_resp
@@ -1173,6 +1205,8 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         self, completed: ResponsesAPIResponse
     ) -> LLMResponse:
         """Convert a ResponsesAPIResponse into an LLMResponse."""
+        # Parse output -> Message (typed)
+        # Cast to a typed sequence accepted by from_llm_responses_output
         output_seq = cast(Sequence[Any], completed.output or [])
         message = Message.from_llm_responses_output(output_seq)
         return LLMResponse(
@@ -1220,6 +1254,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             kwargs,
         )
 
+        # Perform call with retries
         @self.retry_decorator(**self._retry_kwargs())
         def _one_attempt(**retry_kwargs) -> ResponsesAPIResponse:
             assert self._telemetry is not None
@@ -1243,12 +1278,20 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                         self._telemetry.on_response(ret)
                         return ret
 
+                    # When stream=True, LiteLLM returns a streaming iterator rather
+                    # than a single ResponsesAPIResponse. Drain the iterator and
+                    # use the completed response.
                     if final_kwargs.get("stream", False):
                         if not isinstance(ret, SyncResponsesAPIStreamingIterator):
                             raise AssertionError(
                                 f"Expected Responses stream iterator, got {type(ret)}"
                             )
                         stream_cb = on_token if ctx.user_enable_streaming else None
+                        # Collect output items from streaming events.
+                        # Some endpoints (e.g., Codex subscription) send output
+                        # items as separate events but the final response.completed
+                        # event has output=[]. We accumulate them here and patch
+                        # the completed response if needed.
                         collected: list[Any] = []
                         for event in ret:
                             item, delta = self._responses_process_stream_event(event)
@@ -1348,6 +1391,11 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                                     f"iterator, got {type(ret)}"
                                 )
                             stream_cb = on_token if ctx.user_enable_streaming else None
+                            # Collect output items from streaming events.
+                            # Some endpoints (e.g., Codex subscription) send output
+                            # items as separate events but the final response.completed
+                            # event has output=[]. We accumulate them here and patch
+                            # the completed response if needed.
                             collected: list[Any] = []
                             async for event in ret:
                                 item, delta = self._responses_process_stream_event(
@@ -1474,10 +1522,15 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         on_token: TokenCallbackType | None = None,
         **kwargs,
     ) -> ModelResponse:
+        # litellm.modify_params is GLOBAL; guard it for thread-safety
         with self._litellm_modify_params_ctx(self.modify_params):
             with warnings.catch_warnings():
                 self._suppress_litellm_warnings()
                 if enable_streaming:
+                    # When streaming, request usage in the final chunk so that
+                    # detailed token breakdowns (prompt_tokens_details with
+                    # cached_tokens, etc.) are not silently discarded by
+                    # litellm's streaming handler.
                     kwargs.setdefault("stream_options", {"include_usage": True})
 
                 ret = litellm_completion(
@@ -1505,10 +1558,15 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         **kwargs,
     ) -> ModelResponse:
         """Async variant of :meth:`_transport_call`."""
+        # litellm.modify_params is GLOBAL; guard it for thread-safety
         with self._litellm_modify_params_ctx(self.modify_params):
             with warnings.catch_warnings():
                 self._suppress_litellm_warnings()
                 if enable_streaming:
+                    # When streaming, request usage in the final chunk so that
+                    # detailed token breakdowns (prompt_tokens_details with
+                    # cached_tokens, etc.) are not silently discarded by
+                    # litellm's streaming handler.
                     kwargs.setdefault("stream_options", {"include_usage": True})
 
                 ret = await litellm_acompletion(
