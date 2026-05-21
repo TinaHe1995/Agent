@@ -103,7 +103,10 @@ from openhands.sdk.llm.streaming import (
     TokenCallbackType,
     _invoke_token_callback,
 )
-from openhands.sdk.llm.utils.image_inline import maybe_inline_image_urls
+from openhands.sdk.llm.utils.image_inline import (
+    amaybe_inline_image_urls,
+    maybe_inline_image_urls,
+)
 from openhands.sdk.llm.utils.image_resize import maybe_resize_messages_for_provider
 from openhands.sdk.llm.utils.litellm_provider import infer_litellm_provider
 from openhands.sdk.llm.utils.metrics import Metrics, MetricsSnapshot
@@ -963,7 +966,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 raise ValueError("Streaming requires an on_token callback")
             kwargs["stream"] = True
 
-        formatted_messages = self.format_messages_for_llm(messages)
+        formatted_messages = await self.aformat_messages_for_llm(messages)
 
         use_native_fc = self.native_tool_calling
         original_fncall_msgs = copy.deepcopy(formatted_messages)
@@ -1315,7 +1318,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 raise ValueError("Streaming requires an on_token callback")
             kwargs["stream"] = True
 
-        instructions, input_items = self.format_messages_for_responses(messages)
+        instructions, input_items = await self.aformat_messages_for_responses(messages)
 
         resp_tools = (
             [
@@ -1888,13 +1891,36 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 ].cache_prompt = True  # Last item inside the message content
                 break
 
-    def format_messages_for_llm(self, messages: list[Message]) -> list[dict]:
-        """Formats Message objects for LLM consumption."""
+    def _inline_required(self) -> bool:
+        """Resolve whether http(s) image URLs must be downloaded and inlined."""
+        if self.inline_image_urls is not None:
+            return self.inline_image_urls
+        return get_features(
+            self._model_name_for_capabilities()
+        ).requires_inline_image_data
 
+    def _prepare_chat_messages(self, messages: list[Message]) -> list[Message]:
+        """Apply the cache+inline+resize passes, returning detached messages."""
         messages = copy.deepcopy(messages)
         if self.is_caching_prompt_active():
             self._apply_prompt_caching(messages)
+        vision_enabled = self.vision_is_active()
+        # Inline first (URL → data:), then resize (data: → smaller data:).
+        # The resize pass only operates on ``data:image/*`` URLs, so chaining
+        # gives us "free" large-image protection for inlined images.
+        messages = maybe_inline_image_urls(
+            messages,
+            inline_required=self._inline_required(),
+            vision_enabled=vision_enabled,
+        )
+        messages = maybe_resize_messages_for_provider(
+            messages,
+            provider=self._infer_model_info_provider(),
+            vision_enabled=vision_enabled,
+        )
+        return messages
 
+    def _to_chat_dicts(self, messages: list[Message]) -> list[dict]:
         model_features = get_features(self._model_name_for_capabilities())
         cache_enabled = self.is_caching_prompt_active()
         vision_enabled = self.vision_is_active()
@@ -1905,27 +1931,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             else model_features.force_string_serializer
         )
         send_reasoning_content = model_features.send_reasoning_content
-        inline_required = (
-            self.inline_image_urls
-            if self.inline_image_urls is not None
-            else model_features.requires_inline_image_data
-        )
-
-        # Inline first (URL → data:), then resize (data: → smaller data:).
-        # The resize pass only operates on ``data:image/*`` URLs, so chaining
-        # gives us "free" large-image protection for inlined images.
-        messages = maybe_inline_image_urls(
-            messages,
-            inline_required=inline_required,
-            vision_enabled=vision_enabled,
-        )
-        messages = maybe_resize_messages_for_provider(
-            messages,
-            provider=self._infer_model_info_provider(),
-            vision_enabled=vision_enabled,
-        )
-
-        formatted_messages = [
+        return [
             message.to_chat_dict(
                 cache_enabled=cache_enabled,
                 vision_enabled=vision_enabled,
@@ -1936,19 +1942,30 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             for message in messages
         ]
 
-        return formatted_messages
+    def format_messages_for_llm(self, messages: list[Message]) -> list[dict]:
+        """Formats Message objects for LLM consumption."""
+        return self._to_chat_dicts(self._prepare_chat_messages(messages))
 
-    def format_messages_for_responses(
-        self, messages: list[Message]
-    ) -> tuple[str | None, list[dict[str, Any]]]:
-        """Prepare (instructions, input[]) for the OpenAI Responses API.
+    async def aformat_messages_for_llm(self, messages: list[Message]) -> list[dict]:
+        """Async variant that runs the blocking inline/resize pass off-loop."""
+        messages = copy.deepcopy(messages)
+        if self.is_caching_prompt_active():
+            self._apply_prompt_caching(messages)
+        vision_enabled = self.vision_is_active()
+        messages = await amaybe_inline_image_urls(
+            messages,
+            inline_required=self._inline_required(),
+            vision_enabled=vision_enabled,
+        )
+        messages = maybe_resize_messages_for_provider(
+            messages,
+            provider=self._infer_model_info_provider(),
+            vision_enabled=vision_enabled,
+        )
+        return self._to_chat_dicts(messages)
 
-        - Skips prompt caching flags and string serializer concerns
-        - Uses Message.to_responses_value to get either instructions (system)
-          or input items (others)
-        - Concatenates system instructions into a single instructions string
-        - For subscription mode, system prompts are prepended to user content
-        """
+    def _prepare_responses_messages(self, messages: list[Message]) -> list[Message]:
+        """Detach, optionally strip reasoning, and inline image URLs."""
         msgs = copy.deepcopy(messages)
 
         # Subscription mode (store=false): strip reasoning items from prior
@@ -1958,11 +1975,12 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             for m in msgs:
                 if m.role == "assistant" and m.responses_reasoning_item is not None:
                     m.responses_reasoning_item = None
+        return msgs
 
-        # Determine vision based on model detection
+    def _build_responses_payload(
+        self, msgs: list[Message]
+    ) -> tuple[str | None, list[dict[str, Any]]]:
         vision_active = self.vision_is_active()
-
-        # Assign system instructions as a string, collect input items
         instructions: str | None = None
         input_items: list[dict[str, Any]] = []
         system_chunks: list[str] = []
@@ -1986,6 +2004,38 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         if self.is_subscription:
             return transform_for_subscription(system_chunks, input_items)
         return instructions, input_items
+
+    def format_messages_for_responses(
+        self, messages: list[Message]
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Prepare (instructions, input[]) for the OpenAI Responses API.
+
+        - Skips prompt caching flags and string serializer concerns
+        - Uses Message.to_responses_value to get either instructions (system)
+          or input items (others)
+        - Concatenates system instructions into a single instructions string
+        - For subscription mode, system prompts are prepended to user content
+        - Inlines http(s) image URLs as base64 when the active model requires it
+        """
+        msgs = self._prepare_responses_messages(messages)
+        msgs = maybe_inline_image_urls(
+            msgs,
+            inline_required=self._inline_required(),
+            vision_enabled=self.vision_is_active(),
+        )
+        return self._build_responses_payload(msgs)
+
+    async def aformat_messages_for_responses(
+        self, messages: list[Message]
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Async variant that runs the blocking inline pass off-loop."""
+        msgs = self._prepare_responses_messages(messages)
+        msgs = await amaybe_inline_image_urls(
+            msgs,
+            inline_required=self._inline_required(),
+            vision_enabled=self.vision_is_active(),
+        )
+        return self._build_responses_payload(msgs)
 
     def get_token_count(self, messages: list[Message]) -> int:
         logger.debug(
