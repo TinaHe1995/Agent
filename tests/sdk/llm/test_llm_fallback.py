@@ -316,9 +316,9 @@ def test_fallback_profiles_resolved_via_store(mock_comp, tmp_path):
 # =========================================================================
 
 
+@pytest.mark.asyncio
 @patch("openhands.sdk.llm.llm.litellm_completion")
 @patch("openhands.sdk.llm.llm.litellm_acompletion", new_callable=AsyncMock)
-@pytest.mark.asyncio
 async def test_acompletion_fallback_on_transport_error(mock_acomp, mock_comp):
     """acompletion must invoke fallback when the primary transport raises."""
     primary_error = APIConnectionError(
@@ -340,8 +340,8 @@ async def test_acompletion_fallback_on_transport_error(mock_acomp, mock_comp):
     assert content.text == "fallback ok"
 
 
-@patch("openhands.sdk.llm.llm.litellm_acompletion", new_callable=AsyncMock)
 @pytest.mark.asyncio
+@patch("openhands.sdk.llm.llm.litellm_acompletion", new_callable=AsyncMock)
 async def test_acompletion_maps_context_window_error(mock_acomp):
     """acompletion must map ContextWindowExceededError to SDK type."""
     mock_acomp.side_effect = ContextWindowExceededError(
@@ -354,8 +354,8 @@ async def test_acompletion_maps_context_window_error(mock_acomp):
         await primary.acompletion(_MSGS)
 
 
-@patch("openhands.sdk.llm.llm.litellm_acompletion", new_callable=AsyncMock)
 @pytest.mark.asyncio
+@patch("openhands.sdk.llm.llm.litellm_acompletion", new_callable=AsyncMock)
 async def test_acompletion_maps_connection_error(mock_acomp):
     """acompletion must map APIConnectionError to LLMServiceUnavailableError."""
     mock_acomp.side_effect = APIConnectionError(
@@ -366,9 +366,9 @@ async def test_acompletion_maps_connection_error(mock_acomp):
         await primary.acompletion(_MSGS)
 
 
+@pytest.mark.asyncio
 @patch("openhands.sdk.llm.llm.litellm_responses")
 @patch("openhands.sdk.llm.llm.litellm_aresponses", new_callable=AsyncMock)
-@pytest.mark.asyncio
 async def test_aresponses_fallback_on_transport_error(mock_aresp, mock_resp):
     """aresponses must invoke fallback when the primary transport raises."""
     from litellm.types.llms.openai import ResponsesAPIResponse
@@ -411,8 +411,8 @@ async def test_aresponses_fallback_on_transport_error(mock_aresp, mock_resp):
     assert content.text == "fb ok"
 
 
-@patch("openhands.sdk.llm.llm.litellm_aresponses", new_callable=AsyncMock)
 @pytest.mark.asyncio
+@patch("openhands.sdk.llm.llm.litellm_aresponses", new_callable=AsyncMock)
 async def test_aresponses_maps_context_window_error(mock_aresp):
     """aresponses must map ContextWindowExceededError to SDK type."""
     mock_aresp.side_effect = ContextWindowExceededError(
@@ -422,4 +422,16 @@ async def test_aresponses_maps_context_window_error(mock_aresp):
     )
     primary = _get_llm("gpt-4o")
     with pytest.raises(LLMContextWindowExceedError):
+        await primary.aresponses(_MSGS)
+
+
+@pytest.mark.asyncio
+@patch("openhands.sdk.llm.llm.litellm_aresponses", new_callable=AsyncMock)
+async def test_aresponses_maps_connection_error(mock_aresp):
+    """aresponses must map APIConnectionError to LLMServiceUnavailableError."""
+    mock_aresp.side_effect = APIConnectionError(
+        message="down", llm_provider="openai", model="gpt-4o"
+    )
+    primary = _get_llm("gpt-4o")
+    with pytest.raises(LLMServiceUnavailableError):
         await primary.aresponses(_MSGS)
