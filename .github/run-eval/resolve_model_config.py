@@ -303,7 +303,7 @@ MODELS = {
         "id": "gpt-oss-20b",
         "display_name": "GPT OSS 20B",
         "llm_config": {
-            "model": "litellm_proxy/fireworks_ai/accounts/fireworks/models/gpt-oss-120b",
+            "model": "litellm_proxy/gpt-oss-20b",
             "temperature": 0.0,
         },
     },
@@ -314,7 +314,7 @@ MODELS = {
         "display_name": "GPT OSS 120B",
         "llm_config": {
             "model": (
-                "litellm_proxy/openai/gpt-oss-120b"
+                "litellm_proxy/fireworks_ai/accounts/fireworks/models/gpt-oss-120b"
             ),
             "temperature": 0.0,
         },
