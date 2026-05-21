@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from litellm.responses.streaming_iterator import ResponsesAPIStreamingIterator
 from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import Choices, Message as LiteLLMMessage, ModelResponse, Usage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -278,3 +279,77 @@ async def test_async_aresponses_exhausts_retries(
         )
 
     assert mock_aresponses.call_count == base_llm.num_retries
+
+
+# ------------------------------------------------------------------
+# Streaming-path retry tests (stream completes without ResponseCompletedEvent)
+# ------------------------------------------------------------------
+
+
+class _FakeAsyncStreamIterator(ResponsesAPIStreamingIterator):
+    """Minimal async stream iterator for testing stream-path failures.
+
+    Inherits from ``ResponsesAPIStreamingIterator`` so it passes the
+    ``isinstance`` check inside ``aresponses._one_attempt``, but skips
+    the heavyweight parent ``__init__``.
+    """
+
+    def __init__(
+        self,
+        events: list,
+        completed_response=None,
+    ) -> None:
+        # Intentionally skip parent __init__; we only need iteration
+        # and the completed_response attribute.
+        self._events = list(events)
+        self.completed_response = completed_response
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+
+@pytest.mark.asyncio
+@patch(
+    "openhands.sdk.llm.llm.litellm_aresponses",
+    new_callable=AsyncMock,
+)
+async def test_async_aresponses_stream_path_retry_bumps_temperature(
+    mock_aresponses: AsyncMock,
+) -> None:
+    """When a streaming response has no completed event, _finalize_stream_response
+    raises LLMNoResponseError inside the retry boundary. On retry the temperature
+    should be bumped from 0→1.0, just like the non-streaming path.
+    """
+    streaming_llm = LLM(
+        usage_id="test-stream",
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        num_retries=2,
+        retry_min_wait=1,
+        retry_max_wait=2,
+        temperature=0.0,
+        stream=True,
+    )
+
+    # First call: return an iterator that ends without a completed event
+    # → _finalize_stream_response raises LLMNoResponseError
+    # Second call: return a valid non-streaming response (fast path)
+    mock_aresponses.side_effect = [
+        _FakeAsyncStreamIterator(events=[], completed_response=None),
+        create_mock_responses_api_response("ok"),
+    ]
+
+    resp = await streaming_llm.aresponses(
+        messages=[Message(role="user", content=[TextContent(text="hi")])],
+        on_token=lambda _chunk: None,
+    )
+
+    assert isinstance(resp, LLMResponse)
+    assert mock_aresponses.call_count == 2
+    _, second_kwargs = mock_aresponses.call_args_list[1]
+    assert second_kwargs.get("temperature") == 1.0
