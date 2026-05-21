@@ -42,7 +42,14 @@ from acp.schema import (
     UsageUpdate,
 )
 from acp.transports import default_environment
-from pydantic import Field, PrivateAttr, SecretStr, field_serializer
+from pydantic import (
+    Field,
+    PrivateAttr,
+    SecretStr,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+)
 
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.state import ConversationExecutionStatus
@@ -65,7 +72,7 @@ from openhands.sdk.settings.acp_providers import (
 from openhands.sdk.tool import Tool  # noqa: TC002
 from openhands.sdk.tool.builtins.finish import FinishAction, FinishObservation
 from openhands.sdk.utils import maybe_truncate
-from openhands.sdk.utils.pydantic_secrets import serialize_secret
+from openhands.sdk.utils.pydantic_secrets import serialize_secret, validate_secret
 
 
 logger = get_logger(__name__)
@@ -108,19 +115,67 @@ _RETRIABLE_SERVER_ERROR_CODES: frozenset[int] = frozenset({-32603})
 # used by the terminal tool and the default max_message_chars in LLM config.
 MAX_ACP_CONTENT_CHARS: int = 30_000
 
-# Env vars that must be removed from the subprocess environment when a
-# particular "dominant" env var is present.
+# Env vars that must be removed from the subprocess environment when an
+# active auth mechanism would conflict with them.
 #
-# Rationale: some auth mechanisms are mutually exclusive and their env vars
-# conflict.  For example, CLAUDE_CONFIG_DIR activates Claude Code's OAuth
-# credential-file flow.  If ANTHROPIC_API_KEY or ANTHROPIC_BASE_URL are
-# also present they redirect requests to a different endpoint (e.g. a proxy)
-# that doesn't support OAuth bearer tokens, breaking authentication silently.
-# When CLAUDE_CONFIG_DIR is detected we strip the conflicting vars so the
-# subprocess can reach api.anthropic.com with its own OAuth token.
-_ENV_CONFLICT_MAP: dict[str, frozenset[str]] = {
-    "CLAUDE_CONFIG_DIR": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
-}
+# Rationale: some Claude Code auth mechanisms are mutually exclusive.  When
+# Claude Code's OAuth credential-file flow is active (an OAuth credentials
+# file is present inside ``CLAUDE_CONFIG_DIR``), the presence of
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL would redirect requests to a
+# different endpoint (e.g. a proxy) that doesn't support OAuth bearer
+# tokens, breaking authentication silently.  We strip those env vars only
+# when OAuth credentials are actually present — CLAUDE_CONFIG_DIR alone
+# does not imply OAuth (it can be set purely to relocate Claude Code's
+# session/history storage onto a persistent volume).
+_CLAUDE_OAUTH_CREDENTIALS_FILES: tuple[str, ...] = (".credentials.json",)
+_CLAUDE_AUTH_CONFLICTING_ENV: frozenset[str] = frozenset(
+    {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}
+)
+
+
+def _claude_oauth_credentials_present(config_dir: str | None) -> bool:
+    """Return ``True`` when an OAuth credentials file exists in ``config_dir``.
+
+    The presence of such a file is the only reliable signal that Claude
+    Code's OAuth flow is the active auth mechanism for this run.  When
+    ``CLAUDE_CONFIG_DIR`` is set purely to relocate session storage onto
+    a persistent volume, no credentials file is present and API-key auth
+    (``ANTHROPIC_API_KEY``) remains valid.
+    """
+    if not config_dir:
+        return False
+    base = Path(config_dir)
+    return any((base / name).is_file() for name in _CLAUDE_OAUTH_CREDENTIALS_FILES)
+
+
+# Number of trailing characters of an ACP session id retained in log lines
+# for correlation.  ACP session ids are server-issued UUIDs whose possession
+# alone is enough to call ``session/load`` — they're effectively bearer
+# tokens.  ``model_dump`` / ``model_dump_json`` already redact the
+# ``acp_resume_session_id`` field; log aggregators (Datadog, CloudWatch, …)
+# are another serialization boundary that retains lines for weeks, so the
+# same redaction applies there.  Eight trailing characters give enough
+# entropy to correlate across log lines for one conversation but not
+# enough to brute-force the full id.
+_SESSION_ID_LOG_SUFFIX_LEN: int = 8
+
+
+def _fingerprint_session_id(session_id: str | None) -> str:
+    """Render an ACP session id as a short, non-reversible fingerprint.
+
+    ACP session ids are effectively bearer tokens (anyone holding one can
+    call ``session/load`` against the ACP server), so the full value must
+    not appear in logs — see :data:`_SESSION_ID_LOG_SUFFIX_LEN`.
+
+    Returns ``"<none>"`` for ``None``, ``"<short>"`` for ids shorter than
+    the suffix length (e.g. test fixtures), and ``"...<last-N>"`` otherwise.
+    """
+    if session_id is None:
+        return "<none>"
+    if len(session_id) <= _SESSION_ID_LOG_SUFFIX_LEN:
+        return "<short>"
+    return f"...{session_id[-_SESSION_ID_LOG_SUFFIX_LEN:]}"
+
 
 # Limit for asyncio.StreamReader buffers used by the ACP subprocess pipes.
 # The default (64 KiB) is too small for session_update notifications that
@@ -720,6 +775,64 @@ class ACPAgent(AgentBase):
             "If None, the server picks its default."
         ),
     )
+    acp_resume_session_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional explicit ACP session id to resume. When set, takes "
+            "precedence over the id persisted in ``state.agent_state`` and "
+            "is used to call ``session/load`` on the ACP server. Designed "
+            "for environments where the per-conversation filesystem (and "
+            "therefore ``base_state.json``) does not survive across restarts "
+            "(e.g. cloud sandbox recycles), but the id has been mirrored "
+            "into durable storage elsewhere. Falls back to a fresh session "
+            "if the server cannot load the id. Treated as a secret on the "
+            "wire — possession of the id is enough to resume the underlying "
+            "ACP session, so default serialization redacts it; pass "
+            "``expose_secrets='plaintext'`` (trusted backend) or "
+            "``expose_secrets='encrypted'`` plus a cipher (frontend round-"
+            "trip) when the value must cross a serialization boundary."
+        ),
+    )
+
+    @field_serializer("acp_resume_session_id", when_used="always")
+    def _serialize_acp_resume_session_id(self, value: str | None, info):
+        """Mask ``acp_resume_session_id`` via :func:`serialize_secret`.
+
+        Default ``model_dump`` / ``model_dump_json`` redacts the id so it
+        cannot leak into logs, trace exports, or PR review attachments.
+        Trusted backend callers opt into plaintext via Pydantic's context
+        (``expose_secrets='plaintext'``); frontend round-trips use the
+        ``"encrypted"`` mode with a cipher in the context.
+        """
+        if value is None:
+            return None
+        return serialize_secret(SecretStr(value), info)
+
+    @field_validator("acp_resume_session_id", mode="before")
+    @classmethod
+    def _validate_acp_resume_session_id(
+        cls, value: Any, info: ValidationInfo
+    ) -> str | None:
+        """Reverse :meth:`_serialize_acp_resume_session_id` on load.
+
+        Without this validator, ``model_validate_json`` of a previously
+        serialized agent would put garbage in ``acp_resume_session_id``:
+
+        - Default-redacted dumps would reload as the literal ``"**********"``
+          sentinel — calling ``session/load`` with that fails server-side and
+          we fall back to a fresh session every time, defeating the whole
+          point of the durable mirror.
+        - Encrypted dumps (frontend round-trip) would reload as the raw
+          Fernet ciphertext — same failure mode, plus the ciphertext sits
+          in ``state.agent_state`` on disk.
+
+        :func:`validate_secret` returns ``None`` for empty/redacted values
+        and decrypts when a cipher is present in the validation context.
+        We unwrap the returned ``SecretStr`` so the field's runtime type
+        stays ``str | None`` (the rest of the SDK reads it directly).
+        """
+        secret = validate_secret(value, info)
+        return secret.get_secret_value() if secret is not None else None
 
     def model_post_init(self, __context: object) -> None:
         super().model_post_init(__context)
@@ -738,6 +851,12 @@ class ACPAgent(AgentBase):
     _executor: Any = PrivateAttr(default=None)
     _conn: Any = PrivateAttr(default=None)  # ClientSideConnection
     _session_id: str | None = PrivateAttr(default=None)
+    # Whether the active session was recovered via ``session/load`` (True)
+    # rather than freshly created via ``new_session`` (False).  Set by
+    # ``_start_acp_server`` and read by ``init_state`` to decide whether
+    # the agent_context suffix is already in the ACP server's history or
+    # still needs to be injected on the first prompt of this turn.
+    _session_loaded: bool = PrivateAttr(default=False)
     _process: Any = PrivateAttr(default=None)  # asyncio subprocess
     _client: Any = PrivateAttr(default=None)  # _OpenHandsACPBridge
     _filtered_reader: Any = PrivateAttr(default=None)  # StreamReader
@@ -909,10 +1028,6 @@ class ACPAgent(AgentBase):
         # Render the suffix once, pulling secrets from the conversation's
         # secret_registry to match the regular Agent's get_dynamic_context().
         self._installed_suffix = self._render_suffix(state)
-        # A prior session id in agent_state means we are resuming; the suffix
-        # is already in the subprocess's persisted history from the original
-        # session, so no re-injection is needed.
-        resumed = state.agent_state.get("acp_session_id") is not None
 
         try:
             self._start_acp_server(state)
@@ -920,6 +1035,16 @@ class ACPAgent(AgentBase):
             logger.error("Failed to start ACP server: %s", e)
             self._cleanup()
             raise
+
+        # ``_start_acp_server`` records ``_session_loaded`` based on the
+        # actual outcome of the ACP handshake: True iff ``session/load``
+        # succeeded against the prior id, False if we fell back to
+        # ``new_session`` (stale id, server forgot, etc.).  Driving the
+        # suffix-install decision off this signal — rather than a hopeful
+        # "we had an id to try" — guarantees the agent_context suffix is
+        # injected on the first prompt of any fresh session even when an
+        # explicit ``acp_resume_session_id`` was provided.
+        resumed = self._session_loaded
 
         self._initialized = True
 
@@ -1003,26 +1128,58 @@ class ACPAgent(AgentBase):
         env.pop("CLAUDECODE", None)
 
         # Strip env vars that conflict with an active auth mechanism.
-        # E.g. CLAUDE_CONFIG_DIR (OAuth credential file) conflicts with
-        # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (API-key + proxy auth).
-        for dominant, conflicts in _ENV_CONFLICT_MAP.items():
-            if dominant in env:
-                for conflict in conflicts:
-                    env.pop(conflict, None)
+        # Claude Code's OAuth flow conflicts with ANTHROPIC_API_KEY /
+        # ANTHROPIC_BASE_URL only when OAuth credentials are actually
+        # present in CLAUDE_CONFIG_DIR.  Setting CLAUDE_CONFIG_DIR purely
+        # for session-storage relocation must not disable API-key auth.
+        if _claude_oauth_credentials_present(env.get("CLAUDE_CONFIG_DIR")):
+            for conflict in _CLAUDE_AUTH_CONFLICTING_ENV:
+                env.pop(conflict, None)
 
         command = self.acp_command[0]
         args = list(self.acp_command[1:]) + list(self.acp_args)
 
         working_dir = str(state.workspace.working_dir)
 
-        # Prior ACP session id — survives agent-server restarts via
+        # Prior ACP session id — typically survives agent-server restarts via
         # ConversationState.agent_state (serialized into base_state.json).
         # Its presence is the signal to resume; its absence means fresh start.
         # ACP servers key persistence by ``cwd``; if the workspace moved we
         # drop the id so we don't accidentally resume (or silently load) a
         # session the server associates with a different directory.
-        prior_session_id: str | None = state.agent_state.get("acp_session_id")
-        prior_session_cwd: str | None = state.agent_state.get("acp_session_cwd")
+        #
+        # ``acp_resume_session_id`` (set on the agent config) takes precedence
+        # over the FS-persisted id.  This lets cloud deployments mirror the
+        # id into a durable store and pass it back on the first launch of a
+        # fresh sandbox, even when ``base_state.json`` was wiped along with
+        # the previous sandbox filesystem.
+        #
+        # Note the asymmetry on the cwd guard: for an FS-persisted id we
+        # have the cwd it was created under and can refuse to load when it
+        # differs, because resuming the wrong session silently would be
+        # catastrophic.  For an explicit ``acp_resume_session_id`` we do
+        # *not* have that recorded cwd — the contract is "the caller knows
+        # what they're doing", typically because the app-server only mirrors
+        # ids for conversations whose sandbox always lands in the same
+        # ``working_dir``.  We therefore assume cwd-compatibility and let
+        # the ACP server's own ``session/load`` validation be the last line
+        # of defence: if the server-side cwd doesn't match it returns an
+        # ``ACPRequestError``, which is already caught and falls back to
+        # ``new_session`` — the same recovery path as a forgotten id.
+        fs_session_id: str | None = state.agent_state.get("acp_session_id")
+        fs_session_cwd: str | None = state.agent_state.get("acp_session_cwd")
+        if self.acp_resume_session_id and self.acp_resume_session_id != fs_session_id:
+            logger.info(
+                "Using explicit acp_resume_session_id (%s); "
+                "filesystem agent_state had id=%s",
+                _fingerprint_session_id(self.acp_resume_session_id),
+                _fingerprint_session_id(fs_session_id),
+            )
+            prior_session_id: str | None = self.acp_resume_session_id
+            prior_session_cwd: str | None = working_dir
+        else:
+            prior_session_id = fs_session_id
+            prior_session_cwd = fs_session_cwd
         if prior_session_id is not None and prior_session_cwd not in (
             None,
             working_dir,
@@ -1030,13 +1187,13 @@ class ACPAgent(AgentBase):
             logger.warning(
                 "ACP session %s was created with cwd=%s; current cwd=%s differs, "
                 "starting a fresh session instead of resuming",
-                prior_session_id,
+                _fingerprint_session_id(prior_session_id),
                 prior_session_cwd,
                 working_dir,
             )
             prior_session_id = None
 
-        async def _init() -> tuple[Any, Any, Any, str, str, str]:
+        async def _init() -> tuple[Any, Any, Any, str, str, str, bool]:
             # Spawn the subprocess directly so we can install a
             # filtering reader that skips non-JSON-RPC lines some
             # ACP servers (e.g. claude-code-acp v0.1.x) write to
@@ -1119,6 +1276,7 @@ class ACPAgent(AgentBase):
             # subprocess crash) propagate — there is no working connection to
             # fall back on, and the outer init_state handler cleans up.
             session_id: str | None = None
+            session_loaded = False
             if prior_session_id is not None:
                 try:
                     await conn.load_session(
@@ -1127,15 +1285,16 @@ class ACPAgent(AgentBase):
                         mcp_servers=[],
                     )
                     session_id = prior_session_id
+                    session_loaded = True
                     logger.info(
-                        "Resumed ACP session: %s (cwd=%s)",
-                        session_id,
+                        "Resumed ACP session %s (cwd=%s)",
+                        _fingerprint_session_id(session_id),
                         working_dir,
                     )
                 except ACPRequestError as e:
                     logger.warning(
                         "ACP load_session(%s) failed (%s); starting a fresh session",
-                        prior_session_id,
+                        _fingerprint_session_id(prior_session_id),
                         e,
                     )
 
@@ -1165,7 +1324,15 @@ class ACPAgent(AgentBase):
                 logger.info("Setting ACP session mode: %s", mode_id)
                 await conn.set_session_mode(mode_id=mode_id, session_id=session_id)
 
-            return conn, process, filtered_reader, session_id, agent_name, agent_version
+            return (
+                conn,
+                process,
+                filtered_reader,
+                session_id,
+                agent_name,
+                agent_version,
+                session_loaded,
+            )
 
         result = self._executor.run_async(_init)
         (
@@ -1175,6 +1342,7 @@ class ACPAgent(AgentBase):
             self._session_id,
             self._agent_name,
             self._agent_version,
+            self._session_loaded,
         ) = result
         self._working_dir = working_dir
 
@@ -1311,7 +1479,7 @@ class ACPAgent(AgentBase):
                         logger.warning(
                             "UsageUpdate not received within %.1fs for session %s",
                             _USAGE_UPDATE_TIMEOUT,
-                            self._session_id,
+                            _fingerprint_session_id(self._session_id),
                         )
                 return response
 
@@ -1547,7 +1715,7 @@ class ACPAgent(AgentBase):
                         logger.warning(
                             "UsageUpdate not received within %.1fs for fork session %s",
                             _USAGE_UPDATE_TIMEOUT,
-                            fork_session_id,
+                            _fingerprint_session_id(fork_session_id),
                         )
                 fork_elapsed = time.monotonic() - fork_t0
 

@@ -571,10 +571,49 @@ class TestACPAgentInitState:
         state = _make_state(tmp_path)
         state.agent_state = {"acp_session_id": "prior-session-id"}
 
-        with patch("openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server"):
+        # Fake handshake that actually loaded the prior session: ``init_state``
+        # bases the suffix-install state on ``_session_loaded`` (which
+        # ``_start_acp_server`` sets only when ``session/load`` succeeds), not
+        # on the bare presence of an id in ``agent_state``.
+        def _fake_start(self, _state):
+            self._session_loaded = True
+
+        with patch(
+            "openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server", _fake_start
+        ):
             agent.init_state(state, on_event=lambda _: None)
 
         assert agent._suffix_install_state == "installed"
+
+    def test_init_state_sets_pending_when_explicit_resume_id_fell_back(self, tmp_path):
+        """Stale ``acp_resume_session_id`` falls back to ``new_session``.
+
+        The suffix is NOT yet in the fresh ACP server's history, so
+        ``init_state`` must mark the install state as ``pending_first_prompt``
+        so the next ``step()`` injects ``agent_context`` into the first user
+        message.  Regression test for the bug where the resume *signal*
+        (``acp_resume_session_id`` set) was conflated with resume *success*.
+        """
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules."),
+            acp_resume_session_id="stale-id-server-forgot",
+        )
+        state = _make_state(tmp_path)
+
+        # Simulate the exact scenario the reviewer flagged: explicit resume id
+        # supplied, but ``_start_acp_server`` had to fall back to new_session,
+        # so it left ``_session_loaded = False`` (the field's default).
+        def _fake_start(self, _state):
+            self._session_loaded = False
+
+        with patch(
+            "openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server", _fake_start
+        ):
+            agent.init_state(state, on_event=lambda _: None)
+
+        assert agent._suffix_install_state == "pending_first_prompt"
+        assert agent._installed_suffix is not None
+        assert "Team rules." in agent._installed_suffix
 
     def test_init_state_includes_registry_secrets_in_suffix(self, tmp_path):
         from pydantic import SecretStr
@@ -3349,6 +3388,76 @@ class TestACPSessionIdPersistence:
         conn.new_session.assert_awaited_once()
         assert agent._session_id == "replacement-sess"
 
+    def test_session_ids_redacted_in_resume_log_lines(self, tmp_path, caplog):
+        """Resume / fallback / cwd-mismatch log lines must not emit plaintext ids.
+
+        ACP session ids are bearer tokens; logger aggregators retain lines
+        for weeks, so they're a serialization boundary in their own right.
+        Verifies the four ``_start_acp_server`` log lines that mention a
+        session id only emit a short suffix fingerprint.
+        """
+        sensitive_explicit = "explicit-do-not-log-abc12345-XXXXLAST"
+        sensitive_fs = "fs-do-not-log-XYZWLAST"
+
+        # -- successful resume via explicit id ------------------------------
+        agent = _make_agent(acp_resume_session_id=sensitive_explicit)
+        state = _make_state(tmp_path)
+        state.agent_state = {**state.agent_state, "acp_session_id": sensitive_fs}
+        conn = self._make_conn()
+        with caplog.at_level("INFO"):
+            self._patched_start_acp_server(agent, state, conn=conn)
+        messages = "\n".join(rec.message for rec in caplog.records)
+        assert sensitive_explicit not in messages
+        assert sensitive_fs not in messages
+        assert "...XXXLAST"[-8:] in messages or "...XXXXLAST"[-8:] in messages
+        assert "...XYZWLAST"[-8:] in messages
+
+        # -- cwd mismatch warning -------------------------------------------
+        caplog.clear()
+        agent2 = _make_agent(acp_resume_session_id=sensitive_explicit)
+        state2 = _make_state(tmp_path)
+        state2.agent_state = {
+            **state2.agent_state,
+            "acp_session_id": sensitive_fs,
+            "acp_session_cwd": "/some/other/place",
+        }
+        conn2 = self._make_conn(new_session_id="fresh")
+        with caplog.at_level("WARNING"):
+            self._patched_start_acp_server(agent2, state2, conn=conn2)
+        cwd_warnings = "\n".join(
+            rec.message for rec in caplog.records if "differs" in rec.message
+        )
+        assert sensitive_explicit not in cwd_warnings
+        assert sensitive_fs not in cwd_warnings
+
+        # -- load_session failure -------------------------------------------
+        caplog.clear()
+        agent3 = _make_agent(acp_resume_session_id=sensitive_explicit)
+        state3 = _make_state(tmp_path)
+        conn3 = self._make_conn(
+            new_session_id="replacement",
+            load_exc=ACPRequestError(-32602, "unknown session"),
+        )
+        with caplog.at_level("WARNING"):
+            self._patched_start_acp_server(agent3, state3, conn=conn3)
+        fail_warnings = "\n".join(
+            rec.message for rec in caplog.records if "load_session" in rec.message
+        )
+        assert sensitive_explicit not in fail_warnings
+
+    def test_fingerprint_session_id_helper(self):
+        """``_fingerprint_session_id`` returns last-8 suffix, never the full id."""
+        from openhands.sdk.agent.acp_agent import _fingerprint_session_id
+
+        assert _fingerprint_session_id(None) == "<none>"
+        assert _fingerprint_session_id("short") == "<short>"
+        assert _fingerprint_session_id("exactly8") == "<short>"
+        long_sid = "a" * 24 + "12345678"
+        out = _fingerprint_session_id(long_sid)
+        assert long_sid not in out
+        assert out.endswith("12345678")
+        assert out.startswith("...")
+
     def test_session_id_not_on_serialized_agent(self):
         """Session id must not leak onto the agent model — it lives in
         ConversationState.agent_state, not on the frozen ACPAgent.
@@ -3357,6 +3466,110 @@ class TestACPSessionIdPersistence:
         data = json.loads(agent.model_dump_json())
         assert "acp_session_id" not in data
         assert not hasattr(agent, "acp_session_id")
+
+    def test_acp_resume_session_id_redacted_by_default(self):
+        """Default serialization must mask ``acp_resume_session_id``.
+
+        Possession of the id is enough to resume the underlying ACP
+        session, so it's a transient resume token — never include it
+        in cleartext in logs, trace exports, PR review attachments, or
+        anything reachable via plain ``model_dump`` / ``model_dump_json``.
+        """
+        sensitive = "super-secret-resume-id-do-not-leak"
+        agent = _make_agent(acp_resume_session_id=sensitive)
+
+        data_json = agent.model_dump_json()
+        assert sensitive not in data_json, (
+            f"plaintext id leaked into model_dump_json: {data_json}"
+        )
+
+        data = json.loads(data_json)
+        # The field is present (callers may want to know it exists for
+        # debugging) but the value must be the redacted sentinel.
+        assert data.get("acp_resume_session_id") == REDACTED_SECRET_VALUE
+
+        # ``model_dump`` (Python mode) should also redact: while it
+        # returns a SecretStr instance rather than a plain string, the
+        # raw secret value must never be readable from its repr/str.
+        py_dump = agent.model_dump()
+        py_value = py_dump.get("acp_resume_session_id")
+        assert sensitive not in repr(py_value)
+        assert sensitive not in str(py_value)
+
+    def test_acp_resume_session_id_plaintext_with_expose_secrets(self):
+        """Trusted backend can opt into plaintext via Pydantic context.
+
+        Required so the OpenHands app server can pass the durable id to
+        the agent server inside ``StartConversationRequest`` (using the
+        existing ``context={'expose_secrets': True}`` pattern).
+        """
+        sensitive = "super-secret-resume-id-do-not-leak"
+        agent = _make_agent(acp_resume_session_id=sensitive)
+
+        exposed = agent.model_dump_json(context={"expose_secrets": "plaintext"})
+        assert json.loads(exposed)["acp_resume_session_id"] == sensitive
+
+    def test_acp_resume_session_id_none_serializes_as_none(self):
+        """Absence is not a secret — ``None`` must round-trip as ``null``."""
+        agent = _make_agent()
+        data = json.loads(agent.model_dump_json())
+        assert data.get("acp_resume_session_id") is None
+
+    def test_acp_resume_session_id_redacted_sentinel_loads_as_none(self):
+        """Default-redacted dump must reload as ``None``, not ``'**********'``.
+
+        Without a matching ``field_validator``, ``model_validate_json`` of
+        a default ``model_dump_json`` would leave ``acp_resume_session_id``
+        set to the literal sentinel string — calling ``session/load`` with
+        that fails server-side and we'd fall back to ``new_session`` every
+        time, defeating the durable-mirror design.
+        """
+        sensitive = "super-secret-resume-id-do-not-leak"
+        agent = _make_agent(acp_resume_session_id=sensitive)
+
+        dumped = agent.model_dump_json()  # default → redacted
+        reloaded = ACPAgent.model_validate_json(dumped)
+
+        assert reloaded.acp_resume_session_id is None
+
+    def test_acp_resume_session_id_encrypted_roundtrip(self):
+        """Encrypted dump + cipher in context decrypts back to the real id.
+
+        Mirrors the frontend round-trip the OpenHands web UI uses for
+        ``acp_env``: client receives an encrypted blob, ships it back via
+        ``secrets_encrypted=True``, server decrypts on validate.
+        """
+        from openhands.sdk.utils.cipher import Cipher
+
+        sensitive = "super-secret-resume-id-do-not-leak"
+        agent = _make_agent(acp_resume_session_id=sensitive)
+        cipher = Cipher(secret_key="test-cipher-secret-key-for-roundtrip-only")
+
+        encrypted_json = agent.model_dump_json(
+            context={"expose_secrets": "encrypted", "cipher": cipher}
+        )
+        # Ciphertext, not plaintext, is on the wire.
+        assert sensitive not in encrypted_json
+
+        reloaded = ACPAgent.model_validate_json(
+            encrypted_json, context={"cipher": cipher}
+        )
+        assert reloaded.acp_resume_session_id == sensitive
+
+    def test_acp_resume_session_id_plaintext_roundtrip(self):
+        """Plaintext dump (trusted backend) reloads verbatim without a cipher.
+
+        Trusted backend path: OpenHands app-server → agent-server uses
+        ``context={'expose_secrets': True}`` and no cipher.  The agent-
+        server must accept the plaintext id on load.
+        """
+        sensitive = "super-secret-resume-id-do-not-leak"
+        agent = _make_agent(acp_resume_session_id=sensitive)
+
+        exposed = agent.model_dump_json(context={"expose_secrets": "plaintext"})
+        reloaded = ACPAgent.model_validate_json(exposed)
+
+        assert reloaded.acp_resume_session_id == sensitive
 
     def test_init_state_writes_cwd_alongside_session_id(self, tmp_path):
         """init_state records the cwd the session was created under so a later
@@ -3477,6 +3690,92 @@ class TestACPSessionIdPersistence:
             mode_id="full-access",
             session_id="stored-sess",
         )
+
+    def test_acp_resume_session_id_drives_load_session_when_no_fs_state(self, tmp_path):
+        """``acp_resume_session_id`` resumes even when ``agent_state`` is empty.
+
+        Cloud sandboxes lose ``base_state.json`` on recycle, so the FS-persisted
+        ``acp_session_id`` is gone.  The app-server mirrors the id into durable
+        storage and passes it back via ``acp_resume_session_id`` — that should
+        still drive ``load_session``.
+        """
+        agent = _make_agent(acp_resume_session_id="externally-stored-sess")
+        state = _make_state(tmp_path)
+        assert "acp_session_id" not in state.agent_state
+        conn = self._make_conn()
+
+        self._patched_start_acp_server(agent, state, conn=conn)
+
+        conn.load_session.assert_awaited_once()
+        _, kwargs = conn.load_session.call_args
+        assert kwargs["session_id"] == "externally-stored-sess"
+        assert kwargs["cwd"] == str(tmp_path)
+        conn.new_session.assert_not_awaited()
+        assert agent._session_id == "externally-stored-sess"
+
+    def test_acp_resume_session_id_overrides_fs_session_id(self, tmp_path):
+        """The explicit field wins over the FS-persisted id when they differ.
+
+        Lets the app-server's durable record take precedence over whatever a
+        previous sandbox happened to write into ``base_state.json``.
+        """
+        agent = _make_agent(acp_resume_session_id="durable-sess")
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "fs-sess",
+            "acp_session_cwd": str(tmp_path),
+        }
+        conn = self._make_conn()
+
+        self._patched_start_acp_server(agent, state, conn=conn)
+
+        conn.load_session.assert_awaited_once()
+        _, kwargs = conn.load_session.call_args
+        assert kwargs["session_id"] == "durable-sess"
+        conn.new_session.assert_not_awaited()
+        assert agent._session_id == "durable-sess"
+
+    def test_acp_resume_session_id_failure_falls_back_to_new_session(self, tmp_path):
+        """If the server can't load the explicit id, fall back to new_session.
+
+        The ACP server may have lost its own session storage (no PVC, different
+        host …); failing closed by aborting the conversation is worse than
+        starting fresh.  Matches the existing ``load_session`` failure path.
+        """
+        agent = _make_agent(acp_resume_session_id="missing-sess")
+        state = _make_state(tmp_path)
+        conn = self._make_conn(
+            new_session_id="replacement-sess",
+            load_exc=ACPRequestError(-32602, "unknown session"),
+        )
+
+        self._patched_start_acp_server(agent, state, conn=conn)
+
+        conn.load_session.assert_awaited_once()
+        conn.new_session.assert_awaited_once()
+        assert agent._session_id == "replacement-sess"
+
+    def test_acp_resume_session_id_matches_fs_id_uses_fs_cwd(self, tmp_path):
+        """When the explicit id equals the FS id, the FS cwd is used (no change).
+
+        Avoids spurious "cwd inferred from current workspace" branches when
+        the agent_state was just hydrated from the same id.
+        """
+        agent = _make_agent(acp_resume_session_id="same-sess")
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "same-sess",
+            "acp_session_cwd": str(tmp_path),
+        }
+        conn = self._make_conn()
+
+        self._patched_start_acp_server(agent, state, conn=conn)
+
+        conn.load_session.assert_awaited_once()
+        _, kwargs = conn.load_session.call_args
+        assert kwargs["session_id"] == "same-sess"
 
     def test_roundtrip_via_conversation_state_persistence(self, tmp_path):
         """End-to-end round-trip through ConversationState persistence:
@@ -3687,15 +3986,17 @@ class TestACPSecretsEnvInjection:
 
 
 class TestACPEnvConflictSuppression:
-    """CLAUDE_CONFIG_DIR OAuth auth must not coexist with API-key env vars.
+    """Claude Code OAuth credentials must not coexist with API-key env vars.
 
-    When CLAUDE_CONFIG_DIR is present in the subprocess environment the agent
-    uses a credential file for OAuth.  If ANTHROPIC_API_KEY or
+    When Claude Code's OAuth credential file is present in CLAUDE_CONFIG_DIR
+    the agent authenticates with that OAuth token.  If ANTHROPIC_API_KEY or
     ANTHROPIC_BASE_URL are also present they redirect requests to a proxy that
     does not support OAuth bearer tokens, breaking auth silently.
 
-    _start_acp_server must strip the conflicting vars regardless of where they
-    came from: acp_env, os.environ, or agent_context.secrets.
+    The stripping must only happen when OAuth is actually active (credential
+    file present).  CLAUDE_CONFIG_DIR can also be set purely to relocate
+    session storage onto a persistent volume; in that case API-key auth
+    remains valid and must not be stripped.
     """
 
     @staticmethod
@@ -3771,25 +4072,42 @@ class TestACPEnvConflictSuppression:
 
         return captured
 
+    @staticmethod
+    def _make_oauth_dir(tmp_path) -> str:
+        """Create a CLAUDE_CONFIG_DIR with a ``.credentials.json`` OAuth file."""
+        oauth_dir = tmp_path / "claude-creds"
+        oauth_dir.mkdir()
+        (oauth_dir / ".credentials.json").write_text('{"token":"oauth-x"}')
+        return str(oauth_dir)
+
+    @staticmethod
+    def _make_empty_dir(tmp_path) -> str:
+        """Create a CLAUDE_CONFIG_DIR without any OAuth credential file."""
+        persist_dir = tmp_path / "claude-persist"
+        persist_dir.mkdir()
+        return str(persist_dir)
+
     def test_claude_config_dir_suppresses_api_key_from_acp_env(self, tmp_path):
-        """ANTHROPIC_API_KEY from acp_env is stripped when CLAUDE_CONFIG_DIR present."""
+        """API key is stripped when an OAuth credentials file is present."""
+        oauth_dir = self._make_oauth_dir(tmp_path)
         agent = _make_agent(
             acp_env={
-                "CLAUDE_CONFIG_DIR": "/tmp/claude-creds",
+                "CLAUDE_CONFIG_DIR": oauth_dir,
                 "ANTHROPIC_API_KEY": "sk-conflict",
                 "ANTHROPIC_BASE_URL": "https://proxy.example.com",
             }
         )
         env = self._run_start_capturing_env(agent, tmp_path)
 
-        assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude-creds"
+        assert env["CLAUDE_CONFIG_DIR"] == oauth_dir
         assert "ANTHROPIC_API_KEY" not in env
         assert "ANTHROPIC_BASE_URL" not in env
 
     def test_claude_config_dir_suppresses_api_key_from_os_environ(self, tmp_path):
-        """ANTHROPIC_API_KEY leaking in from os.environ is stripped too."""
+        """API key leaking in from os.environ is stripped too when OAuth active."""
+        oauth_dir = self._make_oauth_dir(tmp_path)
         agent = _make_agent(
-            acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
+            acp_env={"CLAUDE_CONFIG_DIR": oauth_dir},
         )
         env = self._run_start_capturing_env(
             agent,
@@ -3805,13 +4123,14 @@ class TestACPEnvConflictSuppression:
         assert "ANTHROPIC_BASE_URL" not in env
 
     def test_claude_config_dir_suppresses_api_key_from_secrets(self, tmp_path):
-        """ANTHROPIC_API_KEY injected via agent_context.secrets is stripped too."""
+        """API key injected via agent_context.secrets is stripped too."""
         from pydantic import SecretStr
 
         from openhands.sdk.secret import StaticSecret
 
+        oauth_dir = self._make_oauth_dir(tmp_path)
         agent = _make_agent(
-            acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
+            acp_env={"CLAUDE_CONFIG_DIR": oauth_dir},
             agent_context=AgentContext(
                 secrets={
                     "ANTHROPIC_API_KEY": StaticSecret(
@@ -3828,6 +4147,27 @@ class TestACPEnvConflictSuppression:
         assert "CLAUDE_CONFIG_DIR" in env
         assert "ANTHROPIC_API_KEY" not in env
         assert "ANTHROPIC_BASE_URL" not in env
+
+    def test_persistence_only_claude_config_dir_keeps_api_key(self, tmp_path):
+        """CLAUDE_CONFIG_DIR without OAuth credentials must keep ANTHROPIC_API_KEY.
+
+        Persistence-only use of CLAUDE_CONFIG_DIR (relocating session storage
+        onto a durable volume) must not strip the API key — API-key auth and
+        the persistent storage location are independent concerns.
+        """
+        persist_dir = self._make_empty_dir(tmp_path)
+        agent = _make_agent(
+            acp_env={
+                "CLAUDE_CONFIG_DIR": persist_dir,
+                "ANTHROPIC_API_KEY": "sk-valid",
+                "ANTHROPIC_BASE_URL": "https://proxy.example.com",
+            }
+        )
+        env = self._run_start_capturing_env(agent, tmp_path)
+
+        assert env["CLAUDE_CONFIG_DIR"] == persist_dir
+        assert env.get("ANTHROPIC_API_KEY") == "sk-valid"
+        assert env.get("ANTHROPIC_BASE_URL") == "https://proxy.example.com"
 
     def test_no_suppression_without_claude_config_dir(self, tmp_path):
         """Without CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY passes through unchanged."""
