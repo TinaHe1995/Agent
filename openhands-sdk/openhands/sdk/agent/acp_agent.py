@@ -1261,10 +1261,30 @@ class ACPAgent(AgentBase):
             and self._installed_suffix
         ):
             blocks.append(text_block(self._installed_suffix))
-            self._suffix_install_state = "installed"
+            # NOTE: do NOT flip ``_suffix_install_state`` here.  If the
+            # caller (step/astep) is cancelled or fails before the ACP
+            # server persists this first turn (more likely on the async
+            # path, where ``asyncio.wait_for`` / ``task.cancel()`` can
+            # land between block construction and the await), the local
+            # state would say "installed" while the server never received
+            # the suffix — and the next turn would skip it.  The actual
+            # transition happens in ``_commit_suffix_installation``,
+            # called from ``_finalize_successful_turn`` once the prompt
+            # has returned successfully.
         if not blocks:
             return None
         return blocks
+
+    def _commit_suffix_installation(self) -> None:
+        """Mark the suffix as installed once a turn has completed.
+
+        Called from ``_finalize_successful_turn`` so that
+        ``_suffix_install_state`` only transitions after the ACP server
+        has actually received the suffix.  Idempotent: safe to call when
+        already ``installed`` or when there is no suffix to install.
+        """
+        if self._suffix_install_state == "pending_first_prompt":
+            self._suffix_install_state = "installed"
 
     async def _do_acp_prompt(
         self, prompt_blocks: list[Any]
@@ -1301,6 +1321,11 @@ class ACPAgent(AgentBase):
         on_event: ConversationCallbackType,
     ) -> None:
         """Post-prompt bookkeeping + FinishAction/Observation emission."""
+        # ACP server has acknowledged the prompt; commit any pending
+        # first-turn suffix install so a subsequent turn doesn't try to
+        # re-send it (and so a future cancellation can't unmark it).
+        self._commit_suffix_installation()
+
         session_id = self._session_id or ""
         usage_update = self._client.pop_turn_usage_update(session_id)
         self._record_usage(
@@ -1673,6 +1698,19 @@ class ACPAgent(AgentBase):
             elapsed = time.monotonic() - t0
             logger.info("ACP prompt returned in %.1fs (async)", elapsed)
             self._finalize_successful_turn(response, elapsed, state, on_event)
+        except asyncio.CancelledError:
+            # ``asyncio.CancelledError`` inherits from ``BaseException``, not
+            # ``Exception`` — so it would otherwise bypass the generic handler
+            # and only run ``finally``, where ``_clear_turn_callbacks`` unwires
+            # the bridge.  Without closing in-flight tool cards here, any
+            # ``pending`` / ``in_progress`` ``ACPToolCallEvent`` streamed
+            # before cancellation stays live in the event log forever
+            # (``LocalConversation._emit_orphaned_action_errors`` only patches
+            # ``ActionEvent``s, not ``ACPToolCallEvent``s).  Cancel-emit on
+            # the caller thread while callbacks are still wired, then re-raise
+            # so ``arun()`` can transition to PAUSED.
+            self._cancel_inflight_tool_calls()
+            raise
         except TimeoutError:
             self._emit_turn_timeout(time.monotonic() - t0, state, on_event)
         except Exception as e:

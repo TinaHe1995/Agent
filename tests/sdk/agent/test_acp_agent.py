@@ -1458,6 +1458,153 @@ class TestACPAgentAstep:
             conversation.state.execution_status == ConversationExecutionStatus.ERROR
         )
 
+    def test_astep_emits_failed_tool_calls_on_cancellation(self, tmp_path):
+        """``asyncio.CancelledError`` during astep must close in-flight
+        ``ACPToolCallEvent``s as ``failed`` and re-raise.
+
+        ``asyncio.CancelledError`` inherits from ``BaseException`` (not
+        ``Exception``), so the generic ``except Exception`` handler does
+        not catch it — without an explicit ``except asyncio.CancelledError``
+        branch, the cancel races straight to ``finally`` (which only
+        clears callbacks).  Any ``pending`` / ``in_progress`` tool cards
+        already streamed would then stay live forever
+        (``LocalConversation._emit_orphaned_action_errors`` only patches
+        ``ActionEvent``s, not ``ACPToolCallEvent``s).
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):
+                # Seed an in-flight tool call AFTER _reset_client_for_turn
+                # has run (which clears accumulated_tool_calls).  In
+                # production the bridge accumulates these inside
+                # session_update as ToolCallStart / ToolCallProgress
+                # notifications arrive.
+                mock_client.accumulated_tool_calls.append(
+                    {
+                        "tool_call_id": "tc-cancel-1",
+                        "title": "in-flight tool",
+                        "status": "in_progress",
+                        "tool_kind": None,
+                        "raw_input": None,
+                        "raw_output": None,
+                        "content": None,
+                    }
+                )
+                # Signal caller loop that we're holding inside the prompt
+                # so the cancel races deterministically.
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                # Block long enough for the cancel to land.
+                await asyncio.sleep(60)
+                return None
+
+            agent._conn.prompt = _fake_prompt
+            agent._session_id = "test-session"
+
+            task = asyncio.create_task(
+                agent.astep(conversation, on_event=emitted.append)
+            )
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancel())
+        finally:
+            executor.close()
+
+        failed_tool_events = [
+            e
+            for e in emitted
+            if isinstance(e, ACPToolCallEvent)
+            and e.tool_call_id == "tc-cancel-1"
+            and e.status == "failed"
+        ]
+        assert len(failed_tool_events) == 1, (
+            f"expected one terminal failed event for tc-cancel-1, "
+            f"got: {[(type(e).__name__, getattr(e, 'status', None)) for e in emitted]}"
+        )
+        assert failed_tool_events[0].is_error is True
+
+    def test_astep_cancellation_does_not_mark_suffix_installed(self, tmp_path):
+        """Cancellation before a turn completes must leave
+        ``_suffix_install_state`` as ``pending_first_prompt``.
+
+        Otherwise the local state would say "installed" while the ACP
+        server never received the suffix (the cancel landed before the
+        portal task could persist it), and the next turn would skip
+        re-injection.  Mirrors the ``_build_acp_prompt`` contract that
+        the install state is only committed via
+        ``_finalize_successful_turn`` → ``_commit_suffix_installation``.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                system_message_suffix="Team rules.", current_datetime=None
+            )
+        )
+        conversation = self._make_conversation_with_message(tmp_path)
+        agent._installed_suffix = agent.agent_context.to_acp_prompt_context()  # type: ignore[union-attr]
+        agent._suffix_install_state = "pending_first_prompt"
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                await asyncio.sleep(60)
+                return None
+
+            agent._conn.prompt = _fake_prompt
+            agent._session_id = "test-session"
+
+            task = asyncio.create_task(
+                agent.astep(conversation, on_event=lambda _: None)
+            )
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancel())
+        finally:
+            executor.close()
+
+        # Cancellation hit before _finalize_successful_turn ran, so the
+        # suffix install state must remain pending — a subsequent turn
+        # will re-inject the suffix.
+        assert agent._suffix_install_state == "pending_first_prompt", (
+            f"suffix install state was prematurely flipped to "
+            f"{agent._suffix_install_state!r} — next turn would skip suffix"
+        )
+
     def test_astep_does_not_deadlock_under_reentrant_state_lock(self, tmp_path):
         """End-to-end shape of the #3348 bug.
 
