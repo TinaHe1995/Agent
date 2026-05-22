@@ -4,7 +4,7 @@ import json
 import os
 import signal
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -18,7 +18,7 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.pub_sub import PubSub, Subscriber
 from openhands.sdk.logger import get_logger
-from openhands.sdk.utils import sanitized_env
+from openhands.sdk.utils import sanitized_env, utc_now
 
 
 logger = get_logger(__name__)
@@ -343,6 +343,60 @@ class BashEventService:
 
             self._save_event_to_file(error_output)
             await self._pub_sub(error_output)
+
+    async def delete_events_older_than(self, cutoff: datetime) -> int:
+        """Delete bash event files with a recorded timestamp older than ``cutoff``.
+
+        File names are prefixed with ``YYYYMMDDHHMMSS`` in ascending sort order,
+        so scanning stops as soon as a file at or after the cutoff is reached.
+
+        Returns:
+            int: The number of event files deleted.
+        """
+        cutoff_str = self._timestamp_to_str(cutoff)
+        files = self._get_event_files_by_pattern("*")  # ascending chronological order
+        count = 0
+        for path in files:
+            if path.name >= cutoff_str:
+                break  # remaining files are at or newer than cutoff
+            try:
+                path.unlink()
+                count += 1
+            except Exception as e:
+                logger.warning("Failed to delete bash event file %s: %s", path, e)
+        if count:
+            logger.info(
+                "Deleted %d bash event file(s) older than %s", count, cutoff_str
+            )
+        return count
+
+    async def run_retention_cleanup_loop(
+        self,
+        retention_seconds: int,
+        interval_seconds: float | None = None,
+    ) -> None:
+        """Periodically purge bash event files older than ``retention_seconds``.
+
+        Runs until cancelled (e.g. during application shutdown).
+
+        Args:
+            retention_seconds: Age threshold in seconds; older files are deleted.
+            interval_seconds: How often to run the cleanup. Defaults to
+                ``max(60, retention_seconds / 2)``. Pass a smaller value in
+                tests to avoid long waits.
+        """
+        interval = (
+            interval_seconds
+            if interval_seconds is not None
+            else max(60.0, retention_seconds / 2)
+        )
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                cutoff = utc_now() - timedelta(seconds=retention_seconds)
+                await self.delete_events_older_than(cutoff)
+            except Exception as e:
+                logger.warning("Bash events retention cleanup error: %s", e)
 
     async def subscribe_to_events(self, subscriber: Subscriber[BashEventBase]) -> UUID:
         """Subscribe to bash events.

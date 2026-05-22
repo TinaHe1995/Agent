@@ -139,6 +139,15 @@ class Config(BaseModel):
             "Defaults to 'workspace/bash_events'."
         ),
     )
+    bash_events_retention_seconds: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "How long bash event files are retained on disk, in seconds. "
+            "A background task purges events older than this window on a "
+            "rolling basis. None (default) retains events indefinitely."
+        ),
+    )
     static_files_path: Path | None = Field(
         default=None,
         description=(
