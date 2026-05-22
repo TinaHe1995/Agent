@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1297,6 +1298,155 @@ class TestACPAgentStep:
         assert wired_during_prompt == [on_token]
         # And unwired afterward so a late token chunk is a no-op.
         assert mock_client.on_token is None
+
+
+# ---------------------------------------------------------------------------
+# Async step (astep) — regression coverage for #3348
+# ---------------------------------------------------------------------------
+
+
+class TestACPAgentAstep:
+    """Native ``ACPAgent.astep`` must not fall back to ``AgentBase.astep``
+    (which wraps ``step`` in ``loop.run_in_executor``).  Doing so would
+    move post-prompt callbacks onto an executor worker thread,
+    deadlocking against ``LocalConversation.arun`` which holds the
+    state's reentrant ``FIFOLock`` on the loop thread.  See #3348.
+    """
+
+    def _make_conversation_with_message(self, tmp_path, text="Hello"):
+        state = _make_state(tmp_path)
+        state.events.append(
+            SystemPromptEvent(
+                source="agent",
+                system_prompt=TextContent(text="ACP-managed agent"),
+                tools=[],
+            )
+        )
+        state.events.append(
+            MessageEvent(
+                source="user",
+                llm_message=Message(role="user", content=[TextContent(text=text)]),
+            )
+        )
+        conversation = MagicMock()
+        conversation.state = state
+        return conversation
+
+    def test_astep_overrides_default_agentbase_implementation(self):
+        """Structural guard: if this flips back, ``AgentBase.astep``'s
+        ``run_in_executor`` wrapper resumes and #3348 reopens.
+        """
+        assert ACPAgent.astep is not AgentBase.astep
+
+    def test_astep_runs_post_prompt_callbacks_on_caller_thread(self, tmp_path):
+        """Post-prompt ``on_event`` callbacks must fire on the caller
+        thread (same thread that holds ``state.lock`` in ``arun``).
+        ``FIFOLock`` is reentrant per-thread; if astep schedules ``step``
+        on a worker thread (the buggy default), callbacks run cross-thread
+        and block on the lock owner forever — see #3348.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+
+        caller_thread_id = threading.get_ident()
+        prompt_thread_id: list[int] = []
+        on_event_thread_ids: list[int] = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        async def _fake_prompt(prompt_blocks, session_id):
+            # Must execute on the portal loop's thread, not the caller's
+            # — proves we actually crossed the loop boundary.
+            prompt_thread_id.append(threading.get_ident())
+            mock_client.accumulated_text.append("answer")
+            return None
+
+        agent._conn.prompt = _fake_prompt
+        agent._session_id = "test-session"
+
+        executor = AsyncExecutor()
+        try:
+            agent._executor = executor
+
+            def _capture_event(event):
+                on_event_thread_ids.append(threading.get_ident())
+
+            asyncio.run(agent.astep(conversation, on_event=_capture_event))
+        finally:
+            executor.close()
+
+        assert len(prompt_thread_id) == 1
+        assert prompt_thread_id[0] != caller_thread_id
+
+        # FinishAction + ObservationEvent — both on caller thread.
+        assert len(on_event_thread_ids) >= 2
+        for tid in on_event_thread_ids:
+            assert tid == caller_thread_id, (
+                f"on_event ran on thread {tid} instead of caller "
+                f"{caller_thread_id} — astep regressed to thread-pool path"
+            )
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+
+    def test_astep_does_not_deadlock_under_reentrant_state_lock(self, tmp_path):
+        """End-to-end shape of the #3348 bug.
+
+        Mirrors ``LocalConversation.arun``: holds ``state.lock`` on the
+        loop thread across ``await astep(...)``, while a post-prompt
+        callback re-acquires it (same shape as ``stats_callback``'s
+        ``with state:``).  With astep overridden, the callback runs on
+        the same thread as the lock owner — FIFOLock's reentrancy lets
+        it through.  Without the override, this hangs.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        state = conversation.state
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        async def _fake_prompt(prompt_blocks, session_id):
+            mock_client.accumulated_text.append("done")
+            return None
+
+        agent._conn.prompt = _fake_prompt
+        agent._session_id = "test-session"
+
+        executor = AsyncExecutor()
+        try:
+            agent._executor = executor
+
+            # stats_callback-shaped re-entry: take the state lock briefly
+            # from each event callback.  Same-thread reentry must succeed.
+            def _capture_event(event):
+                with state:
+                    pass
+
+            async def _arun_shaped() -> None:
+                with state:
+                    await asyncio.wait_for(
+                        agent.astep(conversation, on_event=_capture_event),
+                        timeout=10.0,
+                    )
+
+            asyncio.run(_arun_shaped())
+        finally:
+            executor.close()
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
 
 
 # ---------------------------------------------------------------------------
