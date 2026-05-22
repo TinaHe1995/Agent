@@ -1783,14 +1783,23 @@ class ACPAgent(AgentBase):
                     # Surface to the outer handler below so step and astep
                     # share error-event semantics.
                     #
-                    # The portal task scheduled via ``start_task_soon`` is
-                    # NOT cancelled by ``asyncio.wait_for`` — it keeps
-                    # running on the portal loop until the underlying ACP
-                    # connection eventually responds or itself times out.
-                    # This is benign: ``_clear_turn_callbacks`` in the
-                    # ``finally`` block has already muted the bridge
-                    # callbacks, and asyncio silently discards a result
-                    # arriving on an already-resolved wrap_future.
+                    # ``asyncio.wait_for`` cancels the wrapped future on
+                    # timeout; that cancellation propagates through
+                    # ``asyncio.wrap_future`` to the underlying
+                    # ``concurrent.futures.Future`` returned by
+                    # ``BlockingPortal.start_task_soon``, which AnyIO uses
+                    # to cancel the portal task — so ``_do_acp_prompt``
+                    # receives a ``CancelledError`` and tears down on the
+                    # portal loop.  Verified empirically: ``future.cancelled()``
+                    # is True after timeout and the portal task observes
+                    # ``CancelledError``.  The outer ``except TimeoutError``
+                    # below runs next (``_emit_turn_timeout`` → emits the
+                    # error message, calls ``_cancel_inflight_tool_calls``
+                    # to close orphan tool cards on the caller thread via
+                    # the marshaller's same-thread branch), and finally
+                    # ``deactivate()`` + ``_clear_turn_callbacks`` drop any
+                    # straggler bridge callback that races in before the
+                    # portal task fully unwinds.
                     raise TimeoutError(
                         f"ACP prompt timed out after {self.acp_prompt_timeout:.0f}s"
                     ) from exc
