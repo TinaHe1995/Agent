@@ -320,12 +320,15 @@ MODELS = {
             "temperature": 0.0,
         },
     },
+    # https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-super-120b-a12b
+    # NVIDIA recommends temperature=1.0 and top_p=0.95 for all Nemotron 3 models.
     "nemotron-3-ultra-550b-a55b": {
         "id": "nemotron-3-ultra-550b-a55b",
         "display_name": "NVIDIA Nemotron-3 Ultra 550B",
         "llm_config": {
-            "model": "litellm_proxy/nemotron-3-ultra-550b-a55b",
-            "temperature": 0.0,
+            "model": "litellm_proxy/nvidia/nemotron-3-ultra-550b-a55b",
+            "temperature": 1.0,
+            "top_p": 0.95,
         },
     },
     "converse-nemotron-super-3-120b": {

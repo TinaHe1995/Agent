@@ -669,6 +669,7 @@ def test_nemotron_3_ultra_550b_a55b_config():
     assert model["display_name"] == "NVIDIA Nemotron-3 Ultra 550B"
     assert (
         model["llm_config"]["model"]
-        == "litellm_proxy/private/nvidia/nemotron-3-ultra-550b-a55b"
+        == "litellm_proxy/nvidia/nemotron-3-ultra-550b-a55b"
     )
-    assert model["llm_config"]["temperature"] == 0.0
+    assert model["llm_config"]["temperature"] == 1.0
+    assert model["llm_config"]["top_p"] == 0.95
