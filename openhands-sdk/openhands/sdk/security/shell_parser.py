@@ -3,9 +3,9 @@
 Two consumers need a tree-sitter-bash parse of a shell command:
 
 - ``openhands-tools`` for command splitting and escape doubling
-  (``terminal.utils.command``, refactored in #3237).
+  (``terminal.utils.command``).
 - ``openhands-sdk`` for AST-aware security detection
-  (``security.defense_in_depth.*``, planned for Phase 2b of #2721).
+  (the planned ``security.defense_in_depth.*`` analyzers).
 
 Hosting the parser inside ``openhands-sdk`` lets both consumers depend
 on the same tree-sitter version, avoids duplicate ``Language`` setup,
@@ -20,13 +20,11 @@ field are deferred to a follow-up so the first move is a no-behavior
 shared substrate rather than an API surface enlargement.
 
 The ``Parser`` is constructed per call. ``Language`` is built once at
-import. This mirrors the convention established by ``#3237`` in
+import. This mirrors the convention in
 ``openhands-tools/openhands/tools/terminal/utils/command.py``: sharing
 one parser across calls risks interleaved state, while the language
 object is safely reusable.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -34,10 +32,12 @@ import tree_sitter_bash
 from tree_sitter import Language, Parser, Tree
 
 
+__all__ = ["ParseResult", "parse"]
+
 _BASH_LANGUAGE = Language(tree_sitter_bash.language())
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ParseResult:
     """Outcome of parsing a bash command with tree-sitter-bash.
 
@@ -73,6 +73,3 @@ def parse(command: str) -> ParseResult:
     """
     tree = Parser(_BASH_LANGUAGE).parse(command.encode())
     return ParseResult(tree=tree, has_error=tree.root_node.has_error)
-
-
-__all__ = ["ParseResult", "parse"]
