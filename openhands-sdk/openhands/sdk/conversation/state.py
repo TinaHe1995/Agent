@@ -258,8 +258,12 @@ class ConversationState(OpenHandsModel):
                     self._view.append_event(self._events[i])
                     self._view_watermark = i + 1
                 except Exception:
-                    # Incremental append failed; rebuild from scratch
-                    # with full enforcement to recover a consistent view.
+                    logger.warning(
+                        "Incremental view append failed at index %d; "
+                        "rebuilding from scratch.",
+                        i,
+                        exc_info=True,
+                    )
                     self._view = View.from_events(self._events)
                     self._view_watermark = len(self._events)
                     break
