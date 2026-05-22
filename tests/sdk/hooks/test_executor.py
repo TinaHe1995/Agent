@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
+from openhands.sdk.conversation.conversation_stats import ConversationStats
 from openhands.sdk.hooks.config import HookDefinition, HookType
 from openhands.sdk.hooks.executor import HookExecutor
 from openhands.sdk.hooks.types import HookDecision, HookEvent, HookEventType
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.utils.metrics import Metrics
 from tests.command_utils import python_command
 
 
@@ -689,6 +691,51 @@ class TestAgentHookExecution:
         assert hook_llm is not executor.llm
         assert hook_llm.usage_id == "agent-hook:default"
         assert hook_llm.metrics is not parent_metrics
+
+    def test_hook_metrics_are_merged_into_parent_stats(
+        self, tmp_path, mock_llm, sample_event
+    ):
+        """Child agent-hook spend is included in parent conversation stats."""
+        parent_stats = ConversationStats()
+        existing_hook_metrics = Metrics(model_name="gpt-4o")
+        existing_hook_metrics.add_cost(0.25)
+        parent_stats.usage_to_metrics["agent-hook:security-check"] = (
+            existing_hook_metrics
+        )
+
+        child_hook_metrics = Metrics(model_name="gpt-4o")
+        child_hook_metrics.add_cost(0.75)
+        child_stats = ConversationStats(
+            usage_to_metrics={"agent-hook:security-check": child_hook_metrics}
+        )
+        mock_conversation = MagicMock()
+        mock_conversation.conversation_stats = child_stats
+        mock_conversation.state.events = []
+
+        executor = HookExecutor(
+            working_dir=str(tmp_path),
+            llm=mock_llm,
+            conversation_stats=parent_stats,
+        )
+
+        with (
+            patch(self._AGENT_PATH),
+            patch(self._CONV_PATH, return_value=mock_conversation),
+            patch(
+                self._RESPONSE_PATH,
+                return_value='{"decision": "allow", "reason": "ok"}',
+            ),
+        ):
+            hook = HookDefinition(type=HookType.AGENT, name="security-check")
+            result = executor._execute_agent_hook(hook, sample_event)
+
+        assert result.decision == HookDecision.ALLOW
+        assert parent_stats.usage_to_metrics[
+            "agent-hook:security-check"
+        ].accumulated_cost == pytest.approx(1.0)
+        assert parent_stats.get_combined_metrics().accumulated_cost == pytest.approx(
+            1.0
+        )
 
     def test_hook_usage_id_uses_hook_name(self, executor, sample_event):
         """A named hook gets its own usage_id bucket: agent-hook:<name>."""

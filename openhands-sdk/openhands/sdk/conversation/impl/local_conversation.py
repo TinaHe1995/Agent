@@ -568,6 +568,7 @@ class LocalConversation(BaseConversation):
                 llm=self.agent.llm,
                 persistence_dir=self._state.persistence_dir,
                 visualizer=self._visualizer,
+                conversation_stats=self._state.stats,
             )
             self._hook_processor.set_conversation_state(self._state)
             self._hook_processor.run_session_start()

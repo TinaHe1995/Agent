@@ -19,6 +19,8 @@ from openhands.sdk.utils import sanitized_env
 
 
 if TYPE_CHECKING:
+    from openhands.sdk.conversation.base import BaseConversation
+    from openhands.sdk.conversation.conversation_stats import ConversationStats
     from openhands.sdk.llm import LLM
 
 
@@ -164,12 +166,14 @@ class HookExecutor:
         visualizer: type[ConversationVisualizerBase]
         | ConversationVisualizerBase
         | None = None,
+        conversation_stats: "ConversationStats | None" = None,
     ):
         self.working_dir = working_dir or os.getcwd()
         self.async_process_manager = async_process_manager or AsyncProcessManager()
         self.llm = llm
         self.persistence_dir = persistence_dir
         self.visualizer = visualizer
+        self.conversation_stats = conversation_stats
 
     def _fall_open(
         self,
@@ -258,6 +262,7 @@ class HookExecutor:
             )
         finally:
             if conversation is not None:
+                self._merge_hook_conversation_stats(conversation)
                 conversation.close()
 
         return self._parse_decision(raw, event_type)
@@ -308,6 +313,19 @@ class HookExecutor:
             decision=HookDecision.ALLOW,
             reason=reason,
         )
+
+    def _merge_hook_conversation_stats(self, conversation: "BaseConversation") -> None:
+        if self.conversation_stats is None:
+            return
+
+        child_stats = conversation.conversation_stats
+        for usage_id, metrics in child_stats.usage_to_metrics.items():
+            if usage_id in self.conversation_stats.usage_to_metrics:
+                existing = self.conversation_stats.usage_to_metrics[usage_id]
+                if existing is not metrics:
+                    existing.merge(metrics)
+            else:
+                self.conversation_stats.usage_to_metrics[usage_id] = metrics.deep_copy()
 
     def execute(
         self,

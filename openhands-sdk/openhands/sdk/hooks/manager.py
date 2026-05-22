@@ -10,6 +10,7 @@ from openhands.sdk.hooks.types import HookEvent, HookEventType
 
 
 if TYPE_CHECKING:
+    from openhands.sdk.conversation.conversation_stats import ConversationStats
     from openhands.sdk.llm import LLM
 
 
@@ -29,6 +30,7 @@ class HookManager:
         visualizer: type[ConversationVisualizerBase]
         | ConversationVisualizerBase
         | None = None,
+        conversation_stats: "ConversationStats | None" = None,
     ):
         self.config = config or HookConfig.load(working_dir=working_dir)
         self.executor = HookExecutor(
@@ -36,6 +38,7 @@ class HookManager:
             llm=llm,
             persistence_dir=persistence_dir,
             visualizer=visualizer,
+            conversation_stats=conversation_stats,
         )
         self.session_id = session_id
         self.working_dir = working_dir
