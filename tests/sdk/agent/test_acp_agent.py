@@ -565,7 +565,31 @@ class TestACPAgentInitState:
         assert agent._installed_suffix is not None
         assert "Team rules." in agent._installed_suffix
 
-    def test_init_state_sets_installed_for_resumed_session(self, tmp_path):
+    def test_init_state_sets_installed_when_suffix_marker_persisted(self, tmp_path):
+        """A successful first turn persists ``acp_suffix_installed`` — on resume
+        the ACPAgent reads that marker and skips re-injection."""
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules.")
+        )
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            "acp_session_id": "prior-session-id",
+            "acp_suffix_installed": True,
+        }
+
+        with patch("openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server"):
+            agent.init_state(state, on_event=lambda _: None)
+
+        assert agent._suffix_install_state == "installed"
+
+    def test_init_state_pending_when_session_id_only_no_suffix_marker(self, tmp_path):
+        """Persisted ``acp_session_id`` without ``acp_suffix_installed`` means
+        the prior session was created but its first prompt never completed
+        (cancelled / crashed before ``_finalize_successful_turn``).  The
+        ACP subprocess never received the suffix; on resume we must
+        re-inject it on the next turn rather than infer "installed" from
+        session-id presence alone.
+        """
         agent = _make_agent(
             agent_context=AgentContext(system_message_suffix="Team rules.")
         )
@@ -575,7 +599,7 @@ class TestACPAgentInitState:
         with patch("openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server"):
             agent.init_state(state, on_event=lambda _: None)
 
-        assert agent._suffix_install_state == "installed"
+        assert agent._suffix_install_state == "pending_first_prompt"
 
     def test_init_state_includes_registry_secrets_in_suffix(self, tmp_path):
         from pydantic import SecretStr
@@ -1140,7 +1164,11 @@ class TestACPAgentStep:
         assert "Team rules." not in prompt_text
 
     def test_step_suffix_install_state_transitions_to_installed(self, tmp_path):
-        """After the first turn the install state must be 'installed'."""
+        """After the first turn the install state must be 'installed' AND the
+        ``acp_suffix_installed`` marker must be persisted into
+        ``state.agent_state`` so a subsequent agent-server restart can tell
+        the suffix was actually installed (rather than inferring from the
+        mere presence of ``acp_session_id``)."""
         agent = _make_agent(
             agent_context=AgentContext(
                 system_message_suffix="Team rules.", current_datetime=None
@@ -1162,6 +1190,7 @@ class TestACPAgentStep:
         agent.step(conversation, on_event=lambda _: None)
 
         assert agent._suffix_install_state == "installed"
+        assert state.agent_state.get("acp_suffix_installed") is True
 
     def test_step_with_reasoning_surfaces_via_action_event(self, tmp_path):
         """Reasoning traces are preserved in ActionEvent.reasoning_content."""
@@ -1599,6 +1628,14 @@ class TestACPAgentAstep:
         assert agent._suffix_install_state == "pending_first_prompt", (
             f"suffix install state was prematurely flipped to "
             f"{agent._suffix_install_state!r} — next turn would skip suffix"
+        )
+        # ``acp_suffix_installed`` must also not be persisted into
+        # ``agent_state``: otherwise a process restart between this
+        # cancelled turn and the next would read the marker and skip
+        # re-injection (issue #3359 review thread 7).
+        assert conversation.state.agent_state.get("acp_suffix_installed") is not True, (
+            "acp_suffix_installed was persisted despite cancellation — "
+            "a process restart would skip suffix re-injection"
         )
 
     def test_astep_does_not_deadlock_under_reentrant_state_lock(self, tmp_path):

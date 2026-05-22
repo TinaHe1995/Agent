@@ -909,10 +909,18 @@ class ACPAgent(AgentBase):
         # Render the suffix once, pulling secrets from the conversation's
         # secret_registry to match the regular Agent's get_dynamic_context().
         self._installed_suffix = self._render_suffix(state)
-        # A prior session id in agent_state means we are resuming; the suffix
-        # is already in the subprocess's persisted history from the original
-        # session, so no re-injection is needed.
-        resumed = state.agent_state.get("acp_session_id") is not None
+        # ``acp_suffix_installed`` is persisted by
+        # ``_commit_suffix_installation`` only after the first prompt has
+        # actually returned successfully, so on resume we know whether the
+        # ACP subprocess received the suffix.  ``acp_session_id`` alone is
+        # not a reliable signal — it is persisted at session-creation time
+        # regardless of whether the first prompt succeeded, so inferring
+        # "installed" from session id presence would skip suffix injection
+        # for sessions whose first turn was cancelled mid-prompt.  Older
+        # persisted state (from before this PR introduced the marker)
+        # will re-inject the suffix on the first turn after upgrade, which
+        # is benign — the suffix is additive LLM-context guidance.
+        suffix_already_installed = bool(state.agent_state.get("acp_suffix_installed"))
 
         try:
             self._start_acp_server(state)
@@ -943,7 +951,7 @@ class ACPAgent(AgentBase):
 
         if self._installed_suffix:
             self._suffix_install_state = (
-                "installed" if resumed else "pending_first_prompt"
+                "installed" if suffix_already_installed else "pending_first_prompt"
             )
 
         # Emit a placeholder system prompt so the visualizer shows a section
@@ -1275,16 +1283,26 @@ class ACPAgent(AgentBase):
             return None
         return blocks
 
-    def _commit_suffix_installation(self) -> None:
+    def _commit_suffix_installation(self, state: ConversationState) -> None:
         """Mark the suffix as installed once a turn has completed.
 
-        Called from ``_finalize_successful_turn`` so that
-        ``_suffix_install_state`` only transitions after the ACP server
-        has actually received the suffix.  Idempotent: safe to call when
-        already ``installed`` or when there is no suffix to install.
+        Called from ``_finalize_successful_turn`` so the transition only
+        happens after the ACP server has actually received the suffix.
+        Persists ``acp_suffix_installed=True`` into ``state.agent_state``
+        so a subsequent agent-server restart, reading back the same
+        ``ConversationState``, can tell whether the suffix was actually
+        installed (rather than inferring it from the mere presence of
+        ``acp_session_id``, which is persisted at session-creation time
+        regardless of whether the first prompt succeeded).  Idempotent:
+        safe to call when already ``installed`` or when there is no
+        suffix to install.
         """
         if self._suffix_install_state == "pending_first_prompt":
             self._suffix_install_state = "installed"
+            state.agent_state = {
+                **state.agent_state,
+                "acp_suffix_installed": True,
+            }
 
     async def _do_acp_prompt(self, prompt_blocks: list[Any]) -> PromptResponse | None:
         """One ACP ``conn.prompt`` round-trip + UsageUpdate sync.
@@ -1322,7 +1340,7 @@ class ACPAgent(AgentBase):
         # ACP server has acknowledged the prompt; commit any pending
         # first-turn suffix install so a subsequent turn doesn't try to
         # re-send it (and so a future cancellation can't unmark it).
-        self._commit_suffix_installation()
+        self._commit_suffix_installation(state)
 
         session_id = self._session_id or ""
         usage_update = self._client.pop_turn_usage_update(session_id)
