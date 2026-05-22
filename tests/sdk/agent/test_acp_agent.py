@@ -3882,55 +3882,6 @@ class TestACPEnvConflictSuppression:
         assert "CLAUDE_CONFIG_DIR" not in env
 
 
-class TestExtractSessionModels:
-    """``_extract_session_models`` reads the model the ACP server reports.
-
-    The ``models`` capability is marked UNSTABLE in the spec — older agents
-    omit the field entirely and the helper must tolerate that without
-    raising, returning ``(None, [])``.
-    """
-
-    def test_returns_model_id_when_response_carries_one(self):
-        response = MagicMock()
-        response.models = MagicMock()
-        response.models.current_model_id = "claude-opus-4-1"
-        response.models.available_models = []
-        assert _extract_session_models(response) == ("claude-opus-4-1", [])
-
-    def test_returns_none_when_response_is_none(self):
-        # ``load_session`` can return ``None`` for servers that don't
-        # implement the call — the helper must not crash.
-        assert _extract_session_models(None) == (None, [])
-
-    def test_returns_none_when_models_field_is_absent(self):
-        # Older agents predate the UNSTABLE ``models`` capability and don't
-        # surface it on the response object.
-        response = MagicMock(spec=[])  # spec=[] → no attributes
-        assert _extract_session_models(response) == (None, [])
-
-    def test_returns_none_when_models_field_is_none(self):
-        response = MagicMock()
-        response.models = None
-        assert _extract_session_models(response) == (None, [])
-
-    def test_returns_none_when_current_model_id_is_empty_string(self):
-        # An empty string is treated the same as a missing field — we don't
-        # want to surface "" as a real model name.
-        response = MagicMock()
-        response.models = MagicMock()
-        response.models.current_model_id = ""
-        response.models.available_models = []
-        assert _extract_session_models(response) == (None, [])
-
-    def test_returns_none_when_current_model_id_is_not_a_string(self):
-        # Defensive: an agent returning a non-string here is malformed.
-        response = MagicMock()
-        response.models = MagicMock()
-        response.models.current_model_id = 42
-        response.models.available_models = []
-        assert _extract_session_models(response) == (None, [])
-
-
 class TestACPAgentCurrentModelIdProperty:
     """``current_model_id`` is a read-only property backed by a PrivateAttr.
 
@@ -3974,7 +3925,12 @@ class TestACPAgentCurrentModelIdProperty:
 
 
 class TestExtractSessionModels:
-    """``_extract_session_models`` reads both id and available_models."""
+    """``_extract_session_models`` reads the model the ACP server reports.
+
+    The ``models`` capability is marked UNSTABLE in the spec — older agents
+    omit the field entirely and the helper must tolerate that without
+    raising, returning ``(None, [])``.
+    """
 
     def test_returns_both_when_response_carries_them(self):
         m1 = MagicMock()
@@ -4005,6 +3961,33 @@ class TestExtractSessionModels:
         cur, avail = _extract_session_models(response)
         assert cur == "gpt-5"
         assert avail == []
+
+    def test_returns_none_when_response_is_none(self):
+        # ``load_session`` can return ``None`` for servers that don't
+        # implement the call — the helper must not crash.
+        assert _extract_session_models(None) == (None, [])
+
+    def test_returns_none_when_models_field_is_none(self):
+        response = MagicMock()
+        response.models = None
+        assert _extract_session_models(response) == (None, [])
+
+    def test_returns_none_when_current_model_id_is_empty_string(self):
+        # An empty string is treated the same as a missing field — we don't
+        # want to surface "" as a real model name.
+        response = MagicMock()
+        response.models = MagicMock()
+        response.models.current_model_id = ""
+        response.models.available_models = []
+        assert _extract_session_models(response) == (None, [])
+
+    def test_returns_none_when_current_model_id_is_not_a_string(self):
+        # Defensive: an agent returning a non-string here is malformed.
+        response = MagicMock()
+        response.models = MagicMock()
+        response.models.current_model_id = 42
+        response.models.available_models = []
+        assert _extract_session_models(response) == (None, [])
 
 
 class TestResolveModelName:
