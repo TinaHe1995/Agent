@@ -343,6 +343,76 @@ async def _filter_jsonrpc_lines(source: Any, dest: Any) -> None:
         dest.feed_eof()
 
 
+class _CallerLoopMarshaller:
+    """Thread-hopping wrapper for ``ACPAgent.astep``'s bridge callbacks.
+
+    Constructed by :meth:`ACPAgent._make_caller_loop_marshaller` for each
+    per-turn ``on_event`` / ``on_token`` callback wired into
+    :class:`_OpenHandsACPBridge`.  Same-thread invocations call through
+    synchronously (so ``_finalize_successful_turn`` /
+    ``_cancel_inflight_tool_calls`` keep their sync semantics);
+    portal-thread invocations hop back to the caller loop via
+    ``loop.call_soon_threadsafe``.
+
+    Late-callback safety: ``deactivate()`` flips an internal flag that
+    short-circuits BOTH the entry call and the deferred dispatch.  Any
+    ``call_soon_threadsafe`` entry queued before deactivation but not yet
+    ticked by the loop becomes a no-op, so portal-thread
+    ``session_update`` racing with prompt completion can no longer leak
+    stale ``ACPToolCallEvent``s into the event stream after ``arun()``
+    has released the state lock.
+    """
+
+    __slots__ = ("_loop", "_caller_thread_id", "_callback", "_active")
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        caller_thread_id: int,
+        callback: Callable[..., Any],
+    ) -> None:
+        self._loop = loop
+        self._caller_thread_id = caller_thread_id
+        self._callback = callback
+        self._active = True
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        if not self._active:
+            return
+        if threading.get_ident() == self._caller_thread_id:
+            self._callback(*args, **kwargs)
+            return
+        try:
+            # ``call_soon_threadsafe`` only takes positional ``*args``;
+            # wrap in a tiny adapter so we can carry kwargs through and
+            # re-check ``_active`` at dispatch time.
+            self._loop.call_soon_threadsafe(self._deferred, args, kwargs)
+        except RuntimeError:
+            # Caller loop is closed (e.g. astep already returned and the
+            # bridge fired a trailing notification).  Dropping is the
+            # right behavior — ``_clear_turn_callbacks`` should have
+            # already unwired this, but guard the race.
+            logger.debug(
+                "caller loop closed; dropping marshalled ACP callback",
+                exc_info=True,
+            )
+
+    def _deferred(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        if not self._active:
+            return
+        self._callback(*args, **kwargs)
+
+    def deactivate(self) -> None:
+        """Drop any in-flight and future invocations.
+
+        Idempotent.  Must be called BEFORE ``_clear_turn_callbacks``
+        unwires the bridge — otherwise a ``session_update`` racing with
+        teardown could schedule a callback via the still-wired marshaller
+        that fires after the state lock has been released.
+        """
+        self._active = False
+
+
 class _OpenHandsACPBridge:
     """Bridge between OpenHands and ACP that accumulates session updates.
 
@@ -1467,7 +1537,7 @@ class ACPAgent(AgentBase):
         loop: asyncio.AbstractEventLoop,
         caller_thread_id: int,
         callback: Callable[..., Any] | None,
-    ) -> Callable[..., None] | None:
+    ) -> _CallerLoopMarshaller | None:
         """Wrap ``callback`` so portal-thread invocations hop back to ``loop``.
 
         ``_OpenHandsACPBridge.session_update`` runs on the portal thread (the
@@ -1479,16 +1549,26 @@ class ACPAgent(AgentBase):
         the wrong thread and deadlock the conversation (same failure class as
         #3348, just mid-turn instead of post-turn).
 
-        The returned wrapper:
+        The returned :class:`_CallerLoopMarshaller` is itself callable:
 
-        * Runs synchronously if invoked from the caller thread — direct
-          paths like ``_cancel_inflight_tool_calls`` / ``_finalize_successful_turn``
-          go straight through, preserving sync invariants.
+        * Runs ``callback`` synchronously if invoked from the caller
+          thread — direct paths like ``_cancel_inflight_tool_calls`` /
+          ``_finalize_successful_turn`` go straight through, preserving
+          sync invariants.
         * Marshals to the caller loop via ``call_soon_threadsafe`` when
           invoked from any other thread (the portal thread is the
           motivating case, but third-party threads would be handled too).
           ``call_soon_threadsafe`` is FIFO per loop, so ordering of bridge
           callbacks is preserved relative to each other.
+
+        On turn cleanup, callers must invoke ``deactivate()`` BEFORE
+        clearing bridge wiring (see ``_clear_turn_callbacks``).  After
+        deactivation, any ``call_soon_threadsafe`` entries the loop has
+        not yet ticked become no-ops — without this, a portal-thread
+        ``session_update`` racing with prompt completion can queue a
+        bridge callback that fires AFTER ``arun()`` has released the
+        state lock, leaking stale ``ACPToolCallEvent``s into the event
+        stream outside the lock.
 
         Returns ``None`` if ``callback`` is ``None`` so callers can wire
         ``self._reset_client_for_turn(None, None)`` semantics through
@@ -1496,24 +1576,7 @@ class ACPAgent(AgentBase):
         """
         if callback is None:
             return None
-
-        def _invoke(*args: Any, **kwargs: Any) -> None:
-            if threading.get_ident() == caller_thread_id:
-                callback(*args, **kwargs)
-                return
-            try:
-                loop.call_soon_threadsafe(lambda: callback(*args, **kwargs))
-            except RuntimeError:
-                # Caller loop is closed (e.g. astep already returned and the
-                # bridge fired a trailing notification).  Dropping is the
-                # right behavior — _clear_turn_callbacks should have already
-                # unwired this, but guard the race.
-                logger.debug(
-                    "caller loop closed; dropping marshalled ACP callback",
-                    exc_info=True,
-                )
-
-        return _invoke
+        return _CallerLoopMarshaller(loop, caller_thread_id, callback)
 
     def _build_prompt_blocks_for_latest_user_message(
         self, state: ConversationState
@@ -1683,7 +1746,11 @@ class ACPAgent(AgentBase):
         marshalled_on_token = self._make_caller_loop_marshaller(
             loop, caller_thread_id, on_token
         )
-        assert marshalled_on_event is not None  # on_event is required
+        if marshalled_on_event is None:
+            # on_event is a required, non-Optional parameter — guard
+            # unconditionally so the invariant survives ``python -O``
+            # (where ``assert`` is a no-op).
+            raise TypeError("on_event is required and must not be None")
         self._reset_client_for_turn(marshalled_on_token, marshalled_on_event)
 
         t0 = time.monotonic()
@@ -1795,6 +1862,16 @@ class ACPAgent(AgentBase):
             self._emit_turn_error(e, state, on_event)
             raise
         finally:
+            # Deactivate marshallers BEFORE unwiring the bridge.  A
+            # portal-thread ``session_update`` racing with prompt
+            # completion could have queued a ``call_soon_threadsafe``
+            # entry that hasn't ticked yet — without deactivation, it
+            # would fire on the next loop tick (potentially after
+            # ``arun()`` has exited its ``with state:`` block), leaking
+            # stale events into the stream outside the lock.
+            marshalled_on_event.deactivate()
+            if marshalled_on_token is not None:
+                marshalled_on_token.deactivate()
             self._clear_turn_callbacks()
 
     def ask_agent(self, question: str) -> str | None:

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import anyio
-from anyio.from_thread import start_blocking_portal
+from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from openhands.sdk.logger import get_logger
 
@@ -27,7 +27,7 @@ class AsyncExecutor:
         self._atexit_registered = False
 
     @property
-    def portal(self):
+    def portal(self) -> BlockingPortal:
         """The underlying ``BlockingPortal``, lazily started.
 
         Public accessor for callers that need to schedule work directly on
@@ -37,7 +37,7 @@ class AsyncExecutor:
         """
         return self._ensure_portal()
 
-    def _ensure_portal(self):
+    def _ensure_portal(self) -> BlockingPortal:
         with self._lock:
             if self._portal is None:
                 self._portal_cm = start_blocking_portal()

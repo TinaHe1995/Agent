@@ -1660,6 +1660,101 @@ class TestACPAgentAstep:
         )
         assert failed_tool_events[0].is_error is True
 
+    def test_astep_drops_late_bridge_callbacks_after_turn(self, tmp_path):
+        """Pending ``call_soon_threadsafe`` bridge entries must NOT fire
+        after the turn ends.
+
+        Reproduction: a portal-thread ``session_update`` racing with
+        prompt completion queues a marshalled callback via
+        ``call_soon_threadsafe``.  The loop ticks it AFTER astep's
+        ``finally`` has run.  Without the marshaller's ``deactivate()``
+        gate, the user's ``on_event`` would be invoked outside ``arun()``'s
+        ``with state:`` block, leaking stale ``ACPToolCallEvent``s into
+        the event stream.  With the gate, the late entry is dropped.
+        """
+        from openhands.sdk.event import ACPToolCallEvent
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        user_callback_invocations: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        # Hold onto the marshaller wired into the bridge so we can
+        # simulate a portal-thread fire AFTER the turn's finally has
+        # deactivated it.
+        stashed_marshaller: list = []
+
+        async def _fake_prompt(prompt_blocks, session_id):
+            stashed_marshaller.append(mock_client.on_event)
+            mock_client.accumulated_text.append("ok")
+            return None
+
+        agent._conn.prompt = _fake_prompt
+        agent._session_id = "test-session"
+
+        executor = AsyncExecutor()
+        try:
+            agent._executor = executor
+
+            def _capture(event):
+                user_callback_invocations.append(event)
+
+            async def _drive() -> None:
+                await agent.astep(conversation, on_event=_capture)
+                # astep's finally has run deactivate() + _clear_turn_callbacks.
+                # Now simulate a stragglerportal-thread session_update that
+                # somehow still holds the (now stale) marshaller reference
+                # and fires.  call_soon_threadsafe schedules onto our
+                # running loop; one more loop tick processes it.
+                assert len(stashed_marshaller) == 1
+                marshaller = stashed_marshaller[0]
+                # Run from a worker thread so the cross-thread branch
+                # (call_soon_threadsafe) is exercised, not the same-thread
+                # shortcut.
+                done = threading.Event()
+
+                def _fire_from_other_thread():
+                    marshaller(
+                        ACPToolCallEvent(
+                            tool_call_id="tc-late-1",
+                            title="late",
+                            status="in_progress",
+                            tool_kind=None,
+                            raw_input=None,
+                            raw_output=None,
+                            content=None,
+                            is_error=False,
+                        )
+                    )
+                    done.set()
+
+                t = threading.Thread(target=_fire_from_other_thread)
+                t.start()
+                t.join()
+                # Yield twice so any pending call_soon_threadsafe entry
+                # gets a chance to tick.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+            asyncio.run(_drive())
+        finally:
+            executor.close()
+
+        late_events = [
+            e
+            for e in user_callback_invocations
+            if isinstance(e, ACPToolCallEvent) and e.tool_call_id == "tc-late-1"
+        ]
+        assert late_events == [], (
+            f"late marshalled callback should have been dropped after "
+            f"deactivate(), but reached user on_event: {late_events}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Cleanup
