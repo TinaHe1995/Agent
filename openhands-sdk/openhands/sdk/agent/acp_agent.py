@@ -1036,7 +1036,8 @@ class ACPAgent(AgentBase):
         # A prior session id in agent_state means we are resuming; the suffix
         # is already in the subprocess's persisted history from the original
         # session, so no re-injection is needed.
-        resumed = state.agent_state.get("acp_session_id") is not None
+        prior_session_id = state.agent_state.get("acp_session_id")
+        resumed = prior_session_id is not None
 
         try:
             self._start_acp_server(state)
@@ -1044,6 +1045,15 @@ class ACPAgent(AgentBase):
             logger.error("Failed to start ACP server: %s", e)
             self._cleanup()
             raise
+
+        # A successful resume keeps the prior id; cwd mismatch and load_session
+        # failure both fall back to ``new_session``, which mints a fresh one.
+        # The session-id comparison is the only authoritative signal — the
+        # decision happens inside ``_start_acp_server`` and isn't otherwise
+        # observable here.
+        truly_resumed = (
+            prior_session_id is not None and self._session_id == prior_session_id
+        )
 
         self._initialized = True
 
@@ -1071,8 +1081,12 @@ class ACPAgent(AgentBase):
         # capability is UNSTABLE, and some servers only attach it to
         # ``new_session`` responses) — in that case ``_current_model_id`` is
         # ``None`` here even though we *did* know the model on the previous
-        # launch.  Preserve whatever the persisted ``agent_state`` already
-        # holds rather than blanking it; the chip should survive a resume.
+        # launch.  Preserve the persisted ``agent_state`` values for that
+        # case so the chip survives the resume.  But when ``_start_acp_server``
+        # fell back to a fresh ``new_session`` (cwd mismatch or load_session
+        # failure) and the response also omits ``models``, the persisted
+        # values describe the *previous* session — clear them so we don't
+        # mislabel the new one.
         new_agent_state = {
             **state.agent_state,
             "acp_agent_name": self._agent_name,
@@ -1083,6 +1097,9 @@ class ACPAgent(AgentBase):
         if self._current_model_id is not None:
             new_agent_state["acp_current_model_id"] = self._current_model_id
             new_agent_state["acp_current_model_name"] = self.current_model_name
+        elif not truly_resumed:
+            new_agent_state.pop("acp_current_model_id", None)
+            new_agent_state.pop("acp_current_model_name", None)
         state.agent_state = new_agent_state
 
         if self._installed_suffix:

@@ -3459,6 +3459,79 @@ class TestACPSessionIdPersistence:
         assert state.agent_state["acp_current_model_id"] == "claude-opus-4-1"
         assert state.agent_state["acp_current_model_name"] == "Opus 4.1"
 
+    def test_fresh_replacement_clears_stale_model_when_new_session_omits_models(
+        self, tmp_path
+    ):
+        """Fresh replacement (load_session failed → new_session) with no
+        ``models`` block in the response must clear the persisted
+        ``acp_current_model_*`` rather than carry the old session's values
+        forward.
+
+        Otherwise ``acp_session_id`` points at the replacement session while
+        the model fields still describe the dead one — ``ConversationInfo``
+        renders the wrong chip.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "stale-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_current_model_id": "claude-opus-4-1",
+            "acp_current_model_name": "Opus 4.1",
+        }
+        # load_session fails → new_session runs; its response has no .models.
+        new_session_response = MagicMock(spec=["session_id"])
+        new_session_response.session_id = "replacement-sess"
+        conn = self._make_conn(
+            load_exc=ACPRequestError(-32602, "unknown session"),
+        )
+        conn.new_session = AsyncMock(return_value=new_session_response)
+
+        agent._executor = AsyncExecutor()
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        # Replacement id wins, and the stale model fields are gone.
+        assert state.agent_state["acp_session_id"] == "replacement-sess"
+        assert "acp_current_model_id" not in state.agent_state
+        assert "acp_current_model_name" not in state.agent_state
+
+    def test_cwd_mismatch_clears_stale_model_when_new_session_omits_models(
+        self, tmp_path
+    ):
+        """Same contract as the load_session-failure case, but reached via
+        the cwd-mismatch branch in ``_start_acp_server`` (which sets
+        ``prior_session_id = None`` before falling through to new_session).
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "old-sess",
+            "acp_session_cwd": "/some/other/place",
+            "acp_current_model_id": "claude-opus-4-1",
+            "acp_current_model_name": "Opus 4.1",
+        }
+        new_session_response = MagicMock(spec=["session_id"])
+        new_session_response.session_id = "fresh-sess"
+        conn = self._make_conn()
+        conn.new_session = AsyncMock(return_value=new_session_response)
+
+        agent._executor = AsyncExecutor()
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        conn.load_session.assert_not_awaited()
+        conn.new_session.assert_awaited_once()
+        assert state.agent_state["acp_session_id"] == "fresh-sess"
+        assert "acp_current_model_id" not in state.agent_state
+        assert "acp_current_model_name" not in state.agent_state
+
     def test_fallback_replacement_id_lands_in_agent_state(self, tmp_path):
         """When load_session fails and new_session runs, init_state must
         overwrite state.agent_state['acp_session_id'] with the new id so
