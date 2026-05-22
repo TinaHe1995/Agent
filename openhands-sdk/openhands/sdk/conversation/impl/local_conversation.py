@@ -559,6 +559,11 @@ class LocalConversation(BaseConversation):
         if final_hook_config is not None:
             # Store final hook_config in state for observability
             self._state.hook_config = final_hook_config
+            hook_persistence_dir = (
+                str(Path(self._state.persistence_dir).parent)
+                if self._state.persistence_dir is not None
+                else None
+            )
 
             self._hook_processor, self._on_event = create_hook_callback(
                 hook_config=final_hook_config,
@@ -566,7 +571,7 @@ class LocalConversation(BaseConversation):
                 session_id=str(self._state.id),
                 original_callback=self._base_callback,
                 llm=self.agent.llm,
-                persistence_dir=self._state.persistence_dir,
+                persistence_dir=hook_persistence_dir,
                 visualizer=self._visualizer,
                 conversation_stats=self._state.stats,
             )
