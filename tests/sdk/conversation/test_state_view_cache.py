@@ -68,6 +68,21 @@ def test_view_matches_full_rebuild(state):
     assert incremental_ids == full_ids
 
 
+def test_view_matches_full_rebuild_with_condensation(state):
+    """Parity holds on sequences that include a Condensation."""
+    for i in range(5):
+        state.events.append(_msg(f"msg-{i}"))
+    condensation = Condensation(
+        forgotten_event_ids={state.events[0].id},
+        summary="drop first",
+        llm_response_id="test-resp",
+    )
+    state.events.append(condensation)
+    incremental_ids = [e.id for e in state.view.events]
+    full_ids = [e.id for e in View.from_events(state.events).events]
+    assert incremental_ids == full_ids
+
+
 def test_condensation_applied_incrementally(state):
     m1 = _msg("first")
     m2 = _msg("second")
