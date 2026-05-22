@@ -1693,7 +1693,7 @@ class ACPAgent(AgentBase):
                 self.acp_prompt_timeout,
                 len(prompt_blocks),
             )
-            portal = self._executor._ensure_portal()
+            portal = self._executor.portal
 
             response: PromptResponse | None = None
             max_retries = _ACP_PROMPT_MAX_RETRIES
@@ -1710,14 +1710,23 @@ class ACPAgent(AgentBase):
                         timeout=self.acp_prompt_timeout,
                     )
                     break
-                except TimeoutError:
+                except TimeoutError as exc:
                     # ``asyncio.TimeoutError`` aliases ``TimeoutError`` on
                     # Python 3.11+ — same except clause catches both.
                     # Surface to the outer handler below so step and astep
                     # share error-event semantics.
+                    #
+                    # The portal task scheduled via ``start_task_soon`` is
+                    # NOT cancelled by ``asyncio.wait_for`` — it keeps
+                    # running on the portal loop until the underlying ACP
+                    # connection eventually responds or itself times out.
+                    # This is benign: ``_clear_turn_callbacks`` in the
+                    # ``finally`` block has already muted the bridge
+                    # callbacks, and asyncio silently discards a result
+                    # arriving on an already-resolved wrap_future.
                     raise TimeoutError(
                         f"ACP prompt timed out after {self.acp_prompt_timeout:.0f}s"
-                    )
+                    ) from exc
                 except _RETRIABLE_CONNECTION_ERRORS as e:
                     if attempt < max_retries:
                         delay = _ACP_PROMPT_RETRY_DELAYS[

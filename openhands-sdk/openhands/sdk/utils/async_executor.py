@@ -26,6 +26,17 @@ class AsyncExecutor:
         self._lock = threading.Lock()
         self._atexit_registered = False
 
+    @property
+    def portal(self):
+        """The underlying ``BlockingPortal``, lazily started.
+
+        Public accessor for callers that need to schedule work directly on
+        the portal loop (e.g. ``ACPAgent.astep`` uses
+        ``portal.start_task_soon`` + ``asyncio.wrap_future`` to bridge ACP
+        calls across loops).  Equivalent to ``_ensure_portal()``.
+        """
+        return self._ensure_portal()
+
     def _ensure_portal(self):
         with self._lock:
             if self._portal is None:

@@ -1583,39 +1583,55 @@ class TestACPAgentAstep:
         agent._client = mock_client
         agent._conn = MagicMock()
 
-        async def _fake_prompt(prompt_blocks, session_id):
-            # Seed an in-flight tool call AFTER _reset_client_for_turn has
-            # run (which clears accumulated_tool_calls).  In production
-            # the bridge accumulates these inside session_update as
-            # ToolCallStart / ToolCallProgress notifications arrive.
-            mock_client.accumulated_tool_calls.append(
-                {
-                    "tool_call_id": "tc-cancel-1",
-                    "title": "in-flight tool",
-                    "status": "in_progress",
-                    "tool_kind": None,
-                    "raw_input": None,
-                    "raw_output": None,
-                    "content": None,
-                }
-            )
-            # Block long enough for the cancel to land.  Real ACP prompt
-            # would be similarly blocked in await self._conn.prompt(...).
-            await asyncio.sleep(60)
-            return None
-
-        agent._conn.prompt = _fake_prompt
-        agent._session_id = "test-session"
-
         executor = AsyncExecutor()
 
         async def _run_with_cancel() -> None:
+            # Signal the moment ``_fake_prompt`` has entered (after
+            # ``_reset_client_for_turn`` has run and the bridge
+            # callbacks are wired) so the cancel races deterministically.
+            # ``asyncio.Event`` MUST be created inside the running loop —
+            # creating it at module/test scope would bind it to the wrong
+            # loop and ``set()`` would silently no-op.
+            prompt_entered = asyncio.Event()
+            # ``set`` lives on the portal loop, ``wait`` lives on the
+            # caller loop — go through ``call_soon_threadsafe`` so the
+            # event sees a consistent loop owner.
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):
+                # Seed an in-flight tool call AFTER _reset_client_for_turn
+                # has run (which clears accumulated_tool_calls).  In
+                # production the bridge accumulates these inside
+                # session_update as ToolCallStart / ToolCallProgress
+                # notifications arrive.
+                mock_client.accumulated_tool_calls.append(
+                    {
+                        "tool_call_id": "tc-cancel-1",
+                        "title": "in-flight tool",
+                        "status": "in_progress",
+                        "tool_kind": None,
+                        "raw_input": None,
+                        "raw_output": None,
+                        "content": None,
+                    }
+                )
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                # Block long enough for the cancel to land.  Real ACP
+                # prompt would be similarly blocked in
+                # ``await self._conn.prompt(...)``.
+                await asyncio.sleep(60)
+                return None
+
+            agent._conn.prompt = _fake_prompt
+            agent._session_id = "test-session"
+
             task = asyncio.create_task(
                 agent.astep(conversation, on_event=emitted_events.append)
             )
-            # Yield enough for astep to wire callbacks and start awaiting
-            # the prompt future, then cancel.
-            await asyncio.sleep(0.1)
+            # Deterministic: wait until the fake prompt has actually
+            # entered (and seeded the in-flight tool call) before
+            # cancelling.  Removes the CI-load timing race.
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
