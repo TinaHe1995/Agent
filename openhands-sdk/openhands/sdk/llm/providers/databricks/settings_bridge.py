@@ -58,6 +58,8 @@ _BRIDGE_FIELDS: tuple[str, ...] = (
     "databricks_read_timeout_s",
     "databricks_chunk_timeout_s",
     "stored_u2m_tokens",
+    "databricks_u2m_client_id",
+    "databricks_u2m_redirect_uri",
 )
 
 # Fields present on ``DatabricksLLM`` that are deliberately NOT bridged from

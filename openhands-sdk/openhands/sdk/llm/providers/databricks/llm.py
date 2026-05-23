@@ -193,6 +193,15 @@ class DatabricksLLM(LLM):
     """U2M OAuth tokens from browser login flow. Passed from app layer.
     Highest-priority auth path (PWAF: OAuth primary)."""
 
+    databricks_u2m_client_id: str | None = None
+    """Custom OAuth application client ID for the U2M browser PKCE flow.
+    When set, PKCE uses this client_id instead of the default Databricks CLI
+    OAuth app. Preserved across sessions so the user only enters it once."""
+
+    databricks_u2m_redirect_uri: str | None = None
+    """Redirect URI for the custom U2M OAuth app (PKCE flow).
+    Defaults to 'http://localhost:8080/callback' when not set."""
+
     # --- Resilience knobs ---
 
     databricks_max_retries: int = 3
