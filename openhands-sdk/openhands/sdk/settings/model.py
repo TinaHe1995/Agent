@@ -889,7 +889,10 @@ class OpenHandsAgentSettings(AgentSettingsBase):
 
         from openhands.sdk.context.condenser import LLMSummarizingCondenser
 
-        return LLMSummarizingCondenser(llm=llm, max_size=self.condenser.max_size)
+        condenser_llm = llm.model_copy(update={"usage_id": "condenser"})
+        return LLMSummarizingCondenser(
+            llm=condenser_llm, max_size=self.condenser.max_size
+        )
 
     def build_critic(self) -> CriticBase | None:
         """Create an :class:`APIBasedCritic` from these settings.
