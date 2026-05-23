@@ -198,6 +198,12 @@ class DatabricksLLM(LLM):
     When set, PKCE uses this client_id instead of the default Databricks CLI
     OAuth app. Preserved across sessions so the user only enters it once."""
 
+    databricks_u2m_client_secret: SecretStr | None = None
+    """Client secret for confidential U2M OAuth apps (PKCE flow).
+    Required when the Databricks App Connection is configured as a confidential
+    app. Leave None for public apps. Persisted so re-authentication only needed
+    when the secret rotates."""
+
     databricks_u2m_redirect_uri: str | None = None
     """Redirect URI for the custom U2M OAuth app (PKCE flow).
     Defaults to 'http://localhost:8080/callback' when not set."""
@@ -255,15 +261,12 @@ class DatabricksLLM(LLM):
             )
         return v.rstrip("/")
 
-    @field_serializer("databricks_client_secret", when_used="always")
-    def _serialize_databricks_secret(
-        self, v: SecretStr | None, info
-    ) -> str | None:
-        """Serialize databricks_client_secret respecting the expose_secrets context.
+    def _serialize_secret_field(self, v: SecretStr | None, info) -> str | None:
+        """Shared serializer body for all DatabricksLLM SecretStr fields.
 
         DatabricksLLM-specific secret fields are not in the base LLM_SECRET_FIELDS
         tuple so they don't benefit from the base _serialize_secrets serializer.
-        This serializer mirrors the same logic so save/load round-trips work:
+        This method mirrors the same logic so save/load round-trips work:
           - expose_secrets=True  → plaintext (AgentStore.save path)
           - default              → redacted string "**********"
         Always returns str | None (never SecretStr) to avoid Pydantic warnings.
@@ -275,10 +278,21 @@ class DatabricksLLM(LLM):
             serialize_secret,
         )
         result = serialize_secret(v, info)
-        # serialize_secret returns the SecretStr object in redact mode; convert to str.
         if isinstance(result, SecretStr):
             return REDACTED_SECRET_VALUE
         return result
+
+    @field_serializer("databricks_client_secret", when_used="always")
+    def _serialize_databricks_secret(
+        self, v: SecretStr | None, info
+    ) -> str | None:
+        return self._serialize_secret_field(v, info)
+
+    @field_serializer("databricks_u2m_client_secret", when_used="always")
+    def _serialize_databricks_u2m_secret(
+        self, v: SecretStr | None, info
+    ) -> str | None:
+        return self._serialize_secret_field(v, info)
 
     @model_validator(mode="after")
     def _init_databricks(self) -> "DatabricksLLM":
