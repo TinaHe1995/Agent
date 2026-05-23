@@ -75,6 +75,7 @@ _SECRET_FIELDS: frozenset[str] = frozenset(
     {
         "api_key",
         "databricks_client_secret",
+        "databricks_u2m_client_secret",
     }
 )
 

@@ -282,6 +282,16 @@ class DatabricksLLM(LLM):
             return REDACTED_SECRET_VALUE
         return result
 
+    @field_validator("databricks_u2m_client_secret", mode="before")
+    @classmethod
+    def _validate_u2m_secret(
+        cls, v: "str | SecretStr | None", info
+    ) -> "SecretStr | None":
+        """Coerce str → SecretStr and discard redacted placeholder values."""
+        from openhands.sdk.utils.pydantic_secrets import validate_secret
+
+        return validate_secret(v, info)
+
     @field_serializer("databricks_client_secret", when_used="always")
     def _serialize_databricks_secret(
         self, v: SecretStr | None, info

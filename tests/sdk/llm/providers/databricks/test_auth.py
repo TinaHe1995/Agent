@@ -204,6 +204,23 @@ def test_u2m_refresh_uses_no_client_secret() -> None:
     assert captured_data.get("grant_type") == "refresh_token"
 
 
+def test_u2m_refresh_sends_client_secret_for_confidential_apps() -> None:
+    """U2M confidential-app refresh MUST include client_secret."""
+    stored = _make_stored_tokens(expires_at=time.time() + 100)
+    creds = _resolve_u2m(_HOST, stored, client_secret="my-secret")
+    captured_data: dict = {}
+
+    def mock_post(url, data=None, headers=None, timeout=None):
+        captured_data.update(data or {})
+        return _make_refresh_response()
+
+    with patch("httpx.post", side_effect=mock_post):
+        creds.get_token()
+
+    assert captured_data.get("client_secret") == "my-secret"
+    assert captured_data.get("grant_type") == "refresh_token"
+
+
 def test_u2m_refresh_failure_raises_auth_error() -> None:
     """U2M refresh HTTP error → AuthenticationError with re-auth guidance."""
     from litellm.exceptions import AuthenticationError
@@ -226,6 +243,7 @@ def _make_mock_llm(
     stored_u2m_tokens: StoredU2MTokens | None = None,
     databricks_client_id: str | None = None,
     databricks_client_secret: SecretStr | None = None,
+    databricks_u2m_client_secret: SecretStr | None = None,
     databricks_profile: str | None = None,
     base_url: str | None = None,
 ) -> MagicMock:
@@ -237,6 +255,7 @@ def _make_mock_llm(
     llm.stored_u2m_tokens = stored_u2m_tokens
     llm.databricks_client_id = databricks_client_id
     llm.databricks_client_secret = databricks_client_secret
+    llm.databricks_u2m_client_secret = databricks_u2m_client_secret
     llm.databricks_profile = databricks_profile
     return llm
 
@@ -252,6 +271,28 @@ def test_resolve_credentials_u2m_wins_over_all() -> None:
     )
     creds = resolve_credentials(llm)
     assert creds.auth_method == "u2m"
+
+
+def test_resolve_credentials_u2m_forwards_client_secret() -> None:
+    """resolve_credentials passes databricks_u2m_client_secret to _resolve_u2m."""
+    stored = _make_stored_tokens(expires_at=time.time() + 100)
+    llm = _make_mock_llm(
+        stored_u2m_tokens=stored,
+        databricks_u2m_client_secret=SecretStr("confidential-secret"),
+    )
+    creds = resolve_credentials(llm)
+    assert creds.auth_method == "u2m"
+
+    captured_data: dict = {}
+
+    def mock_post(url, data=None, headers=None, timeout=None):
+        captured_data.update(data or {})
+        return _make_refresh_response()
+
+    with patch("httpx.post", side_effect=mock_post):
+        creds.get_token()
+
+    assert captured_data.get("client_secret") == "confidential-secret"
 
 
 def test_resolve_credentials_pat_path() -> None:

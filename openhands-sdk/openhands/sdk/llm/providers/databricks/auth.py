@@ -152,7 +152,12 @@ def resolve_credentials(llm: "DatabricksLLM") -> DatabricksCredentials:
         if not host:
             raise ValueError("databricks_host is required for U2M auth.")
         validate_databricks_config(host, AuthStrategy.U2M, stored_tokens=stored)
-        return _resolve_u2m(host, stored)
+        # Forward the OAuth client secret (confidential app) if present.
+        u2m_secret = llm.databricks_u2m_client_secret
+        u2m_secret_str: str | None = (
+            u2m_secret.get_secret_value() if u2m_secret is not None else None
+        )
+        return _resolve_u2m(host, stored, client_secret=u2m_secret_str)
 
     # Path 2: M2M — service principal client credentials
     if llm.databricks_client_id and llm.databricks_client_secret:
@@ -200,11 +205,19 @@ def resolve_credentials(llm: "DatabricksLLM") -> DatabricksCredentials:
 # Strategy implementations
 # ---------------------------------------------------------------------------
 
-def _resolve_u2m(host: str, stored: StoredU2MTokens) -> DatabricksCredentials:
+def _resolve_u2m(
+    host: str,
+    stored: StoredU2MTokens,
+    client_secret: str | None = None,
+) -> DatabricksCredentials:
     """U2M: return current access token, refreshing silently via refresh_token.
 
     Proactive refresh: 5 minutes before expiry (300s buffer).
     Uses threading.Lock for thread safety in the synchronous call path.
+
+    ``client_secret`` must be supplied for confidential OAuth apps (apps that
+    have a client secret configured in Databricks App Connections). Public
+    PKCE apps leave it ``None``.
     """
     lock = threading.Lock()
     state: dict[str, object] = {
@@ -224,21 +237,28 @@ def _resolve_u2m(host: str, stored: StoredU2MTokens) -> DatabricksCredentials:
                 "databricks_u2m_token_refresh",
                 extra={"remaining_s": round(remaining, 1)},
             )
+            token_data: dict[str, str] = {
+                "grant_type": "refresh_token",
+                "refresh_token": stored.refresh_token,
+                "client_id": stored.client_id,
+            }
+            if client_secret:
+                # Confidential OAuth apps require the client secret on refresh.
+                token_data["client_secret"] = client_secret
             resp = httpx.post(
                 f"{host}/oidc/v1/token",
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": stored.refresh_token,
-                    "client_id": stored.client_id,
-                    # No client_secret for PKCE (public client)
-                },
+                data=token_data,
                 headers={"User-Agent": USER_AGENT},  # PWAF: UA on token endpoint
                 timeout=15.0,
             )
             if not resp.is_success:
+                hint = (
+                    "Re-authenticate via browser sign-in."
+                    if client_secret
+                    else "Re-authenticate at /auth/databricks/initiate."
+                )
                 raise AuthenticationError(
-                    f"U2M token refresh failed [{resp.status_code}]. "
-                    "Re-authenticate at /auth/databricks/initiate.",
+                    f"U2M token refresh failed [{resp.status_code}]. {hint}",
                     model="",
                     llm_provider="databricks",
                 )
