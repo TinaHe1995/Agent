@@ -227,6 +227,17 @@ class HookExecutor:
         # Isolate Metrics so hook spend doesn't accrue to the parent's bucket.
         hook_llm.reset_metrics()
 
+        # Never hand the parent's already-initialized visualizer instance to the
+        # sub-conversation: LocalConversation.__init__ calls initialize() on it,
+        # which would rebind the parent visualizer to the hook's child state. Mirror
+        # the delegate pattern and ask the parent visualizer for a fresh sub-
+        # visualizer (returns None for visualizers that don't support sub-agents).
+        hook_visualizer = self.visualizer
+        if isinstance(self.visualizer, ConversationVisualizerBase):
+            hook_visualizer = self.visualizer.create_sub_visualizer(
+                f"agent-hook:{hook.name or 'default'}"
+            )
+
         conversation = None
         try:
             agent = Agent(
@@ -242,7 +253,7 @@ class HookExecutor:
                 plugins=None,
                 hook_config=None,
                 persistence_dir=self.persistence_dir,
-                visualizer=self.visualizer,
+                visualizer=hook_visualizer,
                 max_iteration_per_run=hook.max_iterations,
             )
             conversation.send_message(
@@ -299,7 +310,7 @@ class HookExecutor:
                 "Agent hook returned no parseable JSON — defaulting to allow"
             )
 
-        decision_str = str(data.get("decision", "allow")).lower()
+        decision_str = str(data.get("decision", "")).lower()
         reason = str(data.get("reason", ""))
         if decision_str == "deny":
             return HookResult(
@@ -308,10 +319,21 @@ class HookExecutor:
                 decision=HookDecision.DENY,
                 reason=reason,
             )
-        return HookResult(
-            success=True,
-            decision=HookDecision.ALLOW,
-            reason=reason,
+        if decision_str == "allow":
+            return HookResult(
+                success=True,
+                decision=HookDecision.ALLOW,
+                reason=reason,
+            )
+        # Missing or unknown decision: this is not a deliberate verdict, so it
+        # must be a detectable fall-open (success=False) rather than a silent
+        # allow that masquerades as a real decision.
+        logger.warning(
+            f"Agent hook returned an invalid decision for event '{event_type}'"
+            f" — defaulting to allow: {repr(decision_str)[:200]}"
+        )
+        return self._fall_open(
+            "Agent hook returned an invalid decision — defaulting to allow"
         )
 
     def _merge_hook_conversation_stats(self, conversation: "BaseConversation") -> None:

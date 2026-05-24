@@ -529,6 +529,31 @@ class TestAgentHookExecution:
         assert result.decision == HookDecision.ALLOW
         assert result.reason == "Looks safe"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"reason": "no decision field"}',
+            '{"decision": "maybe", "reason": "not allow or deny"}',
+            '{"decision": "", "reason": "empty decision"}',
+        ],
+    )
+    def test_invalid_decision_falls_open(self, executor, sample_event, payload):
+        """Missing/unknown decision is a fall-open, not a deliberate allow."""
+        with (
+            patch(self._AGENT_PATH),
+            patch(self._CONV_PATH) as mock_conv_cls,
+            patch(self._RESPONSE_PATH, return_value=payload),
+        ):
+            mock_conv_cls.return_value = MagicMock()
+            hook = HookDefinition(type=HookType.AGENT)
+            result = executor._execute_agent_hook(hook, sample_event)
+
+        assert not result.blocked
+        assert result.decision == HookDecision.ALLOW
+        assert result.should_continue
+        assert result.success is False
+        assert result.error is not None
+
     def test_markdown_wrapped_deny_is_parsed(self, executor, sample_event):
         """```json fenced JSON is honoured, not treated as non-JSON."""
         fenced = '```json\n{"decision": "deny", "reason": "Sensitive file read"}\n```'
@@ -755,6 +780,51 @@ class TestAgentHookExecution:
         hook_llm = captured_llm.get("llm")
         assert hook_llm is not None
         assert hook_llm.usage_id == "agent-hook:security-check"
+
+    def test_parent_visualizer_instance_is_not_rebound(self, tmp_path, mock_llm):
+        """The parent visualizer instance must never be handed to the hook conv.
+
+        LocalConversation.initialize() rebinds a visualizer instance to its own
+        state, so the executor must request a fresh sub-visualizer instead.
+        """
+        from openhands.sdk.conversation.visualizer import ConversationVisualizerBase
+
+        sub_viz = MagicMock(spec=ConversationVisualizerBase)
+
+        class _Viz(ConversationVisualizerBase):
+            def on_event(self, event):  # pragma: no cover - not exercised
+                pass
+
+            def create_sub_visualizer(self, agent_id):
+                self.requested_agent_id = agent_id
+                return sub_viz
+
+        parent_viz = _Viz()
+        executor = HookExecutor(
+            working_dir=str(tmp_path),
+            llm=mock_llm,
+            visualizer=parent_viz,
+        )
+
+        captured = {}
+
+        def capture_conv_init(**kwargs):
+            captured["visualizer"] = kwargs.get("visualizer")
+            raise RuntimeError("stop early")
+
+        sample_event = HookEvent(
+            event_type=HookEventType.PRE_TOOL_USE, tool_name="BashTool"
+        )
+        with (
+            patch(self._AGENT_PATH),
+            patch(self._CONV_PATH, side_effect=capture_conv_init),
+        ):
+            hook = HookDefinition(type=HookType.AGENT, name="security-check")
+            executor._execute_agent_hook(hook, sample_event)
+
+        assert captured["visualizer"] is sub_viz
+        assert captured["visualizer"] is not parent_viz
+        assert parent_viz.requested_agent_id == "agent-hook:security-check"
 
 
 class TestPromptHookNotImplemented:

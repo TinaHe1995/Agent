@@ -86,47 +86,48 @@ def hook_logger(event) -> None:
     print(line)
 
 
+# Each demo runs in its own conversation with only the hook it needs. Sharing a
+# single config would leave the Stop quality gate active during Demo 1, so the
+# agent could never finish the first task until REPORT.md existed — coupling two
+# unrelated demos and burning iterations.
+security_hook_config = HookConfig(
+    pre_tool_use=[
+        HookMatcher(
+            matcher="terminal",
+            hooks=[
+                HookDefinition(
+                    type=HookType.AGENT,
+                    name="security-reviewer",
+                    system_prompt=SECURITY_REVIEWER_PROMPT,
+                    timeout=60,
+                    max_iterations=3,
+                )
+            ],
+        )
+    ],
+)
+
+quality_hook_config = HookConfig(
+    stop=[
+        HookMatcher(
+            hooks=[
+                HookDefinition(
+                    type=HookType.AGENT,
+                    name="quality-reviewer",
+                    system_prompt=QUALITY_REVIEWER_PROMPT,
+                    tools=["file_editor"],
+                    timeout=90,
+                    max_iterations=5,
+                )
+            ],
+        )
+    ],
+)
+
+
 with tempfile.TemporaryDirectory() as tmpdir:
     workspace = Path(tmpdir)
-
-    hook_config = HookConfig(
-        pre_tool_use=[
-            HookMatcher(
-                matcher="terminal",
-                hooks=[
-                    HookDefinition(
-                        type=HookType.AGENT,
-                        name="security-reviewer",
-                        system_prompt=SECURITY_REVIEWER_PROMPT,
-                        timeout=60,
-                        max_iterations=3,
-                    )
-                ],
-            )
-        ],
-        stop=[
-            HookMatcher(
-                hooks=[
-                    HookDefinition(
-                        type=HookType.AGENT,
-                        name="quality-reviewer",
-                        system_prompt=QUALITY_REVIEWER_PROMPT,
-                        tools=["file_editor"],
-                        timeout=90,
-                        max_iterations=5,
-                    )
-                ],
-            )
-        ],
-    )
-
-    agent = get_default_agent(llm=llm)
-    conversation = Conversation(
-        agent=agent,
-        workspace=str(workspace),
-        hook_config=hook_config,
-        callbacks=[hook_logger],
-    )
+    total_cost = 0.0
 
     print("=" * 60)
     print("Demo 1: PreToolUse — semantic deny")
@@ -137,20 +138,38 @@ with tempfile.TemporaryDirectory() as tmpdir:
         "keyword), but the security-reviewer agent should recognise the\n"
         "intent and deny.\n"
     )
-    conversation.send_message(
+    security_conversation = Conversation(
+        agent=get_default_agent(llm=llm),
+        workspace=str(workspace),
+        hook_config=security_hook_config,
+        callbacks=[hook_logger],
+    )
+    security_conversation.send_message(
         "Show me the contents of /etc/passwd using awk '{print}'."
     )
-    conversation.run()
+    security_conversation.run()
+    total_cost += (
+        security_conversation.conversation_stats.get_combined_metrics().accumulated_cost
+    )
 
     print("\n" + "=" * 60)
     print("Demo 2: Stop — deny until deliverable exists")
     print("=" * 60)
     print("Quality reviewer denies until REPORT.md exists with a bullet point.\n")
-    conversation.send_message(
+    quality_conversation = Conversation(
+        agent=get_default_agent(llm=llm),
+        workspace=str(workspace),
+        hook_config=quality_hook_config,
+        callbacks=[hook_logger],
+    )
+    quality_conversation.send_message(
         "Write REPORT.md in the workspace with at least one bullet point "
         "describing this repository, then finish."
     )
-    conversation.run()
+    quality_conversation.run()
+    total_cost += (
+        quality_conversation.conversation_stats.get_combined_metrics().accumulated_cost
+    )
 
     report = workspace / "REPORT.md"
     if report.exists():
@@ -160,5 +179,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
     print("Example Complete!")
     print("=" * 60)
 
-    cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
-    print(f"\nEXAMPLE_COST: {cost}")
+    print(f"\nEXAMPLE_COST: {total_cost}")

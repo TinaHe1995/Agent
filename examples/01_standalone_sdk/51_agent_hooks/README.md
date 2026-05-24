@@ -15,7 +15,7 @@ exact tool name used.
 
 ## Example
 
-- **51_agent_hooks.py** — Two agent hooks wired onto a single conversation:
+- **main.py** — Two agent hooks, each in its own conversation:
   - **PreToolUse** "security reviewer" denies a command whose intent is to
     read `/etc/passwd`, even though no obvious keyword appears in a blacklist.
   - **Stop** "quality reviewer" refuses to let the main agent finish until
@@ -31,7 +31,7 @@ export LLM_API_KEY="your-key"
 export LLM_MODEL="anthropic/claude-sonnet-4-5-20250929"  # optional
 export LLM_BASE_URL="https://your-endpoint"              # optional
 
-python 51_agent_hooks.py
+python main.py
 ```
 
 ## How an agent hook is configured
