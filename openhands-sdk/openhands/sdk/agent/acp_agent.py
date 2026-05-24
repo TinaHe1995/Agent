@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Generator
+from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -1307,7 +1308,10 @@ class ACPAgent(AgentBase):
         except Exception:
             logger.warning("Failed to send ACP session cancel", exc_info=True)
 
-    async def _drain_cancelled_prompt(self, future: Any | None) -> None:
+    async def _drain_cancelled_prompt(
+        self,
+        future: Future[PromptResponse | None] | None,
+    ) -> None:
         """Let a cancelled/timed-out portal prompt quiesce before rewiring."""
         if future is None or future.done():
             return
@@ -1729,7 +1733,7 @@ class ACPAgent(AgentBase):
         self._reset_client_for_turn(on_token, on_event)
 
         t0 = time.monotonic()
-        prompt_future: Any | None = None
+        prompt_future: Future[PromptResponse | None] | None = None
         try:
             logger.info(
                 "Sending ACP prompt (timeout=%.0fs, blocks=%d, async)",
@@ -1748,12 +1752,15 @@ class ACPAgent(AgentBase):
                     # the timeout/cancellation handlers can send session/cancel
                     # and briefly drain the task before the next turn rewires
                     # callbacks.
-                    prompt_future = portal.start_task_soon(
-                        self._do_acp_prompt,
-                        prompt_blocks,
+                    current_prompt_future: Future[PromptResponse | None] = (
+                        portal.start_task_soon(
+                            self._do_acp_prompt,
+                            prompt_blocks,
+                        )
                     )
+                    prompt_future = current_prompt_future
                     response = await asyncio.wait_for(
-                        asyncio.shield(asyncio.wrap_future(prompt_future)),
+                        asyncio.shield(asyncio.wrap_future(current_prompt_future)),
                         timeout=self.acp_prompt_timeout,
                     )
                     break
