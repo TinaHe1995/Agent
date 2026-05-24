@@ -49,7 +49,13 @@ class HookDefinition(BaseModel):
 
     type: HookType = HookType.COMMAND
     name: str | None = None
-    command: str | None = None
+    # `command` is kept a non-nullable string that is always present in the
+    # serialized output and reported as required in the JSON schema (see
+    # __get_pydantic_json_schema__). This preserves the published REST response
+    # contract for ConversationInfo.hook_config: making it optional/nullable
+    # would be flagged as a breaking change by the oasdiff REST API check.
+    # Command-less hook types (PROMPT/AGENT) simply leave it as "".
+    command: str = ""
     prompt: str | None = None
     system_prompt: str | None = None
     tools: list[str] = Field(default_factory=list)
@@ -61,13 +67,29 @@ class HookDefinition(BaseModel):
         "populate_by_name": True,  # Allow both 'async' and 'async_' in input
     }
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):  # type: ignore[override]
+        # Report `command` as a required, non-defaulted string to keep the
+        # published REST response contract identical to releases where the field
+        # had no default. The runtime default ("") only eases construction of
+        # command-less hook types; it never surfaces as null in responses.
+        json_schema = handler(core_schema)
+        json_schema = handler.resolve_ref_schema(json_schema)
+        command_schema = json_schema.get("properties", {}).get("command")
+        if command_schema is not None:
+            command_schema.pop("default", None)
+        required = json_schema.setdefault("required", [])
+        if "command" not in required:
+            required.append("command")
+        return json_schema
+
     @model_validator(mode="after")
     def _validate_type_fields(self) -> "HookDefinition":
         if self.type == HookType.COMMAND and not self.command:
             raise ValueError("'command' is required when type is 'command'")
         if self.type == HookType.PROMPT and not self.prompt:
             raise ValueError("'prompt' is required when type is 'prompt'")
-        if self.type == HookType.AGENT and self.command is not None:
+        if self.type == HookType.AGENT and self.command:
             raise ValueError(
                 "'command' must not be set when type is 'agent'; "
                 "use 'system_prompt' instead"
@@ -79,7 +101,7 @@ class HookDefinition(BaseModel):
     @property
     def display_command(self) -> str:
         """Human-readable label for this hook used in logs and events."""
-        if self.command is not None:
+        if self.command:
             return self.command
         if self.name is not None:
             return f"agent-hook:{self.name}"

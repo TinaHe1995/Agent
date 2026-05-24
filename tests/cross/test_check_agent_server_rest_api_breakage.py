@@ -667,6 +667,11 @@ def test_split_breaking_changes_separates_three_buckets():
             "text": "added body anyOf member",
         },
         {
+            "id": "response-property-enum-value-added",
+            "details": {},
+            "text": "added the new `agent` enum value to the `type` response property",
+        },
+        {
             "id": "response-property-removed",
             "details": {},
             "text": "removed the optional property `agent/llm/old_field`",
@@ -688,6 +693,7 @@ def test_split_breaking_changes_separates_three_buckets():
         "response-property-one-of-added",
         "response-body-one-of-added",
         "response-body-any-of-added",
+        "response-property-enum-value-added",
     }
     assert len(other) == 1
     assert other[0]["id"] == "response-body-changed"
@@ -723,7 +729,7 @@ def test_main_passes_when_only_additive_oneof(monkeypatch, capsys):
     assert _prod.main() == 0
 
     captured = capsys.readouterr()
-    assert "Additive oneOf/anyOf expansion detected" in captured.out
+    assert "Additive oneOf/anyOf expansion or enum-value additions" in captured.out
     assert "additive response oneOf expansions" in captured.out
 
 
@@ -790,7 +796,7 @@ def test_main_passes_when_body_union_addition_reports_removed_properties(
     assert _prod.main() == 0
 
     captured = capsys.readouterr()
-    assert "Additive oneOf/anyOf expansion detected" in captured.out
+    assert "Additive oneOf/anyOf expansion or enum-value additions" in captured.out
     assert "ignored 3 request/response-property removal artifact" in captured.out
     assert "ignored 1 request/response type-change artifact" in captured.out
 
@@ -878,7 +884,7 @@ def test_main_fails_when_additive_oneof_mixed_with_real_breakage(monkeypatch, ca
     assert _prod.main() == 1
 
     captured = capsys.readouterr()
-    assert "Additive oneOf/anyOf expansion detected" in captured.out
+    assert "Additive oneOf/anyOf expansion or enum-value additions" in captured.out
     assert "other than removing previously-deprecated operations" in captured.out
 
 

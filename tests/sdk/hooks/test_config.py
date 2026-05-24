@@ -11,7 +11,7 @@ from openhands.sdk.hooks.types import HookEventType
 
 
 def test_command_hook_requires_command():
-    with pytest.raises(Exception, match="'command' is required"):
+    with pytest.raises(ValidationError, match="'command' is required"):
         HookDefinition(type=HookType.COMMAND)
 
 

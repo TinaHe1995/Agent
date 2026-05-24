@@ -390,7 +390,7 @@ class HookExecutor:
         self.async_process_manager.cleanup_expired()
 
         command = hook.command
-        if command is None:
+        if not command:
             return HookResult(
                 success=False,
                 exit_code=-1,

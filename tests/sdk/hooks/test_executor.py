@@ -856,4 +856,4 @@ class TestPromptHookNotImplemented:
     def test_prompt_hook_without_command_validates(self):
         """PROMPT hook with no command is valid at config time (future use)."""
         hook = HookDefinition(type=HookType.PROMPT, prompt="evaluate this event")
-        assert hook.command is None
+        assert hook.command == ""

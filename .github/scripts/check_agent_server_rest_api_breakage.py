@@ -557,6 +557,19 @@ _ADDITIVE_RESPONSE_BODY_ONEOF_IDS = frozenset(
 )
 
 
+# oasdiff rule IDs for additive enum-value additions in response schemas.
+# Adding a value to a response enum is additive evolution for extensible APIs
+# (e.g. a new hook type / discriminator value): clients MUST tolerate unknown
+# values and skip/ignore them, the same contract that makes additive oneOf/anyOf
+# expansion safe above. We downgrade these to informational notices.
+_ADDITIVE_RESPONSE_ENUM_IDS = frozenset(
+    {
+        "response-property-enum-value-added",
+        "response-write-only-property-enum-value-added",
+    }
+)
+
+
 def _is_union_property_removal_artifact(change: dict) -> bool:
     """Return True for property removals that are artifacts of union widening.
 
@@ -606,7 +619,9 @@ def _split_breaking_changes(
             removed_schema_properties.append(change)
             continue
 
-        if change_id in _ADDITIVE_RESPONSE_ONEOF_IDS:
+        if change_id in _ADDITIVE_RESPONSE_ONEOF_IDS or (
+            change_id in _ADDITIVE_RESPONSE_ENUM_IDS
+        ):
             additive_response_oneof.append(change)
             continue
 
@@ -799,9 +814,10 @@ def main() -> int:
         if additive_response_oneof:
             print(
                 f"\n::notice title={PYPI_DISTRIBUTION} REST API::"
-                "Additive oneOf/anyOf expansion detected in response schemas. "
-                "This is expected for extensible discriminated-union APIs and "
-                "does not break backward compatibility."
+                "Additive oneOf/anyOf expansion or enum-value additions detected "
+                "in response schemas. This is expected for extensible "
+                "discriminated-union APIs and does not break backward "
+                "compatibility."
             )
             for item in additive_response_oneof:
                 print(f"  - {item.get('text', str(item))}")
