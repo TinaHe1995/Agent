@@ -1634,27 +1634,22 @@ class ACPAgent(AgentBase):
         ``on_event(observation)``, ``state.execution_status`` — runs
         entirely on the caller's thread.
 
-        Why this matters: ``LocalConversation.arun`` holds the
-        conversation state's reentrant ``FIFOLock`` on its loop thread
-        across ``await self.agent.astep(...)``.  The default
+        Why this matters: ``LocalConversation.arun`` deliberately does
+        not hold the conversation state's reentrant ``FIFOLock`` across
+        long ACP prompt awaits, so remote user messages can be persisted
+        while the subprocess is still working. The default
         ``AgentBase.astep`` would wrap sync ``step`` in
-        ``loop.run_in_executor(None, self.step, ...)``, moving every
-        post-prompt callback to a worker thread.  Any ``with state:``
-        inside that chain (today: ``stats_callback``; tomorrow: any
-        callback added to LLM telemetry or the event pipeline) then
-        blocks on a lock owned by the loop thread that is itself
-        ``await``-ing ``astep`` to return.  Keeping post-prompt work on
-        the caller's thread sidesteps the whole class of cross-thread
-        state-lock deadlocks.  See #3348 / #3350 for the full diagnosis.
+        ``loop.run_in_executor(None, self.step, ...)``, moving post-prompt
+        callbacks and state updates to a worker thread. Keeping this path
+        native-async leaves finalization on the caller's loop task, where
+        ``LocalConversation`` can serialize each emitted event with a
+        short state-lock acquire and avoid the cross-thread deadlocks
+        diagnosed in #3348 / #3350.
 
         Bridge ``session_update`` notifications continue to fire on the
-        portal thread (no marshalling here) — they reach the user's
-        ``on_event`` chain via the agent-server's
-        ``_emit_event_from_thread`` queue, which already handles the
-        thread hop.  Real-time mid-turn delivery of those events is a
-        separate concern (the queue waits for ``arun()`` to release the
-        state lock between iterations); it is not part of the deadlock
-        this fix removes.
+        portal thread (no marshalling here). The ``on_event`` callback
+        supplied by ``LocalConversation.arun`` is responsible for taking
+        the state lock around each individual event.
         """
         state = conversation.state
 

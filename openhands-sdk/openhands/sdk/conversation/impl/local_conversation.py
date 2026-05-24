@@ -34,6 +34,7 @@ from openhands.sdk.event import (
     ActionEvent,
     AgentErrorEvent,
     CondensationRequest,
+    Event,
     InterruptEvent,
     MessageEvent,
     ObservationEvent,
@@ -765,6 +766,11 @@ class LocalConversation(BaseConversation):
             )
             self._on_event(user_msg_event)
 
+    def _on_event_with_state_lock(self, event: Event) -> None:
+        """Emit an event while holding the conversation state lock."""
+        with self._state:
+            self._on_event(event)
+
     @observe(name="conversation.run")
     def run(self) -> None:
         """Runs the conversation until the agent finishes.
@@ -950,6 +956,7 @@ class LocalConversation(BaseConversation):
         try:
             while True:
                 logger.debug(f"Conversation arun iteration {iteration}")
+                acp_step_user_message_id: str | None = None
                 with self._state:
                     if self._state.execution_status in [
                         ConversationExecutionStatus.PAUSED,
@@ -1000,12 +1007,70 @@ class LocalConversation(BaseConversation):
                             ConversationExecutionStatus.RUNNING
                         )
 
-                    await self.agent.astep(
-                        self,
-                        on_event=self._on_event,
-                        on_token=self._on_token,
-                    )
+                    if isinstance(self.agent, ACPAgent):
+                        acp_step_user_message_id = self._state.last_user_message_id
+                    else:
+                        await self.agent.astep(
+                            self,
+                            on_event=self._on_event,
+                            on_token=self._on_token,
+                        )
+                        iteration += 1
+
+                        if (
+                            self.state.execution_status
+                            == ConversationExecutionStatus.WAITING_FOR_CONFIRMATION
+                        ):
+                            break
+
+                        if iteration >= self.max_iteration_per_run:
+                            if (
+                                self._state.execution_status
+                                == ConversationExecutionStatus.FINISHED
+                            ):
+                                break
+                            error_msg = (
+                                f"Agent reached maximum iterations limit "
+                                f"({self.max_iteration_per_run})."
+                            )
+                            logger.error(error_msg)
+                            self._state.execution_status = (
+                                ConversationExecutionStatus.ERROR
+                            )
+                            self._on_event(
+                                ConversationErrorEvent(
+                                    source="environment",
+                                    code="MaxIterationsReached",
+                                    detail=error_msg,
+                                )
+                            )
+                            break
+
+                        continue
+
+                # ACP prompt round-trips can run for minutes. Keep the state
+                # lock free while awaiting them so incoming user messages can
+                # be persisted immediately; event callbacks take the lock only
+                # for each individual mutation.
+                await self.agent.astep(
+                    self,
+                    on_event=self._on_event_with_state_lock,
+                    on_token=self._on_token,
+                )
+                with self._state:
                     iteration += 1
+                    if (
+                        self._state.execution_status
+                        == ConversationExecutionStatus.FINISHED
+                        and self._state.last_user_message_id is not None
+                        and self._state.last_user_message_id != acp_step_user_message_id
+                    ):
+                        logger.info(
+                            "User message arrived during ACP step; continuing run"
+                        )
+                        self._state.execution_status = (
+                            ConversationExecutionStatus.RUNNING
+                        )
 
                     if (
                         self.state.execution_status

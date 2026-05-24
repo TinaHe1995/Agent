@@ -1,5 +1,7 @@
+import asyncio
 from unittest.mock import patch
 
+import pytest
 from pydantic import SecretStr
 
 from openhands.sdk.agent.acp_agent import ACPAgent
@@ -201,3 +203,74 @@ def test_acp_send_message_defers_initialization_until_run(tmp_path):
             conversation.state.execution_status == ConversationExecutionStatus.FINISHED
         )
         assert conversation.state.events[-1] == user_event
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_accepts_user_message_while_step_is_in_flight(tmp_path):
+    """ACP user messages should be persisted while a long async turn is running."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=4,
+        stuck_detection=False,
+    )
+    conversation.send_message("initial request")
+
+    first_step_started = asyncio.Event()
+    release_first_step = asyncio.Event()
+    second_step_seen = asyncio.Event()
+    prompts_seen: list[str] = []
+
+    def latest_user_text(conv: LocalConversation) -> str:
+        for event in reversed(list(conv.state.events)):
+            if isinstance(event, MessageEvent) and event.source == "user":
+                content = event.llm_message.content[0]
+                assert isinstance(content, TextContent)
+                return content.text
+        raise AssertionError("expected at least one user message")
+
+    async def blocking_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+    ) -> None:
+        prompts_seen.append(latest_user_text(conv))
+        if len(prompts_seen) == 1:
+            first_step_started.set()
+            await release_first_step.wait()
+        else:
+            second_step_seen.set()
+        conv.state.execution_status = ConversationExecutionStatus.FINISHED
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=blocking_astep),
+    ):
+        run_task = asyncio.create_task(conversation.arun())
+        send_done = asyncio.Event()
+
+        async def send_intervening_message() -> None:
+            await asyncio.to_thread(conversation.send_message, "intervening request")
+            send_done.set()
+
+        await asyncio.wait_for(first_step_started.wait(), timeout=1.0)
+        send_task = asyncio.create_task(send_intervening_message())
+
+        completed_promptly = True
+        try:
+            await asyncio.wait_for(send_done.wait(), timeout=0.2)
+        except TimeoutError:
+            completed_promptly = False
+        finally:
+            release_first_step.set()
+            await asyncio.wait_for(send_task, timeout=1.0)
+            await asyncio.wait_for(second_step_seen.wait(), timeout=1.0)
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert completed_promptly, (
+        "send_message() should not wait for the in-flight ACP prompt to finish"
+    )
+    assert prompts_seen == ["initial request", "intervening request"]

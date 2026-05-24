@@ -1369,9 +1369,9 @@ class TestACPAgentStep:
 class TestACPAgentAstep:
     """Native ``ACPAgent.astep`` must not fall back to ``AgentBase.astep``
     (which wraps ``step`` in ``loop.run_in_executor``).  Doing so would
-    move post-prompt callbacks onto an executor worker thread,
-    deadlocking against ``LocalConversation.arun`` which holds the
-    state's reentrant ``FIFOLock`` on the loop thread.  See #3348.
+    move post-prompt callbacks and state updates onto an executor worker
+    thread, outside ``LocalConversation.arun``'s controlled event
+    serialization. See #3348.
     """
 
     def _make_conversation_with_message(self, tmp_path, text="Hello"):
@@ -1401,10 +1401,9 @@ class TestACPAgentAstep:
 
     def test_astep_runs_post_prompt_callbacks_on_caller_thread(self, tmp_path):
         """Post-prompt ``on_event`` callbacks must fire on the caller
-        thread (same thread that holds ``state.lock`` in ``arun``).
-        ``FIFOLock`` is reentrant per-thread; if astep schedules ``step``
-        on a worker thread (the buggy default), callbacks run cross-thread
-        and block on the lock owner forever — see #3348.
+        thread. If astep schedules ``step`` on a worker thread (the buggy
+        default), callbacks and final state updates run outside the async
+        run task's serialization model — see #3348.
         """
         from openhands.sdk.utils.async_executor import AsyncExecutor
 
@@ -1673,12 +1672,11 @@ class TestACPAgentAstep:
     def test_astep_does_not_deadlock_under_reentrant_state_lock(self, tmp_path):
         """End-to-end shape of the #3348 bug.
 
-        Mirrors ``LocalConversation.arun``: holds ``state.lock`` on the
-        loop thread across ``await astep(...)``, while a post-prompt
-        callback re-acquires it (same shape as ``stats_callback``'s
-        ``with state:``).  With astep overridden, the callback runs on
-        the same thread as the lock owner — FIFOLock's reentrancy lets
-        it through.  Without the override, this hangs.
+        Covers direct callers that hold ``state.lock`` on the loop thread
+        across ``await astep(...)`` while a post-prompt callback
+        re-acquires it. With astep overridden, the callback runs on the
+        same thread as the lock owner — FIFOLock's reentrancy lets it
+        through. Without the override, this hangs.
         """
         from openhands.sdk.utils.async_executor import AsyncExecutor
 
