@@ -204,6 +204,7 @@ def _curated_entry(
 CURATED_DATABRICKS_MODELS: tuple[ModelPickerEntry, ...] = (
     # ------------------------------------------------------------------ #
     # Anthropic — Claude (native Anthropic Messages API)
+    # All live-tested PASS except opus-4-7 (temporarily rate-limited).
     # ------------------------------------------------------------------ #
     _curated_entry(
         "databricks-claude-sonnet-4-6", ProviderFamily.ANTHROPIC, recommended=True
@@ -211,10 +212,13 @@ CURATED_DATABRICKS_MODELS: tuple[ModelPickerEntry, ...] = (
     _curated_entry("databricks-claude-sonnet-4-5", ProviderFamily.ANTHROPIC),
     _curated_entry("databricks-claude-haiku-4-5", ProviderFamily.ANTHROPIC),
     _curated_entry("databricks-claude-opus-4-7", ProviderFamily.ANTHROPIC),
+    _curated_entry("databricks-claude-opus-4-6", ProviderFamily.ANTHROPIC),
     _curated_entry("databricks-claude-opus-4-5", ProviderFamily.ANTHROPIC),
     _curated_entry("databricks-claude-opus-4-1", ProviderFamily.ANTHROPIC),
     # ------------------------------------------------------------------ #
     # OpenAI — GPT-5 series (Responses API) and gpt-oss (OpenAI Chat)
+    # All live-tested PASS. gpt-5-5 / gpt-5-5-pro may be temporarily
+    # rate-limited (403) on some workspaces.
     # ------------------------------------------------------------------ #
     _curated_entry(
         "databricks-gpt-5-mini", ProviderFamily.OPENAI_RESPONSES, recommended=True
@@ -223,16 +227,28 @@ CURATED_DATABRICKS_MODELS: tuple[ModelPickerEntry, ...] = (
     _curated_entry("databricks-gpt-5-5", ProviderFamily.OPENAI_RESPONSES),
     _curated_entry("databricks-gpt-5-4", ProviderFamily.OPENAI_RESPONSES),
     _curated_entry("databricks-gpt-5-4-mini", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-4-nano", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-3-codex", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-2-codex", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-2", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-1", ProviderFamily.OPENAI_RESPONSES),
+    _curated_entry("databricks-gpt-5-nano", ProviderFamily.OPENAI_RESPONSES),
     _curated_entry("databricks-gpt-5", ProviderFamily.OPENAI_RESPONSES),
     _curated_entry("databricks-gpt-oss-120b", ProviderFamily.OPENAI),
     # ------------------------------------------------------------------ #
     # Google — Gemini (native generateContent)
     # ------------------------------------------------------------------ #
+    # Live-tested PASS: gemini-3-5-flash, gemini-3-1-flash-lite,
+    #   gemini-2-5-flash, gemini-2-5-pro
+    # gemini-3-flash / gemini-3-pro: NOT available in typical workspaces —
+    #   they require cross-geo routing on global endpoints.  They surface via
+    #   live workspace discovery when the endpoint is actually available.
+    # gemma-3-12b: excluded — 8,192-token context window is below the 16k
+    #   minimum required by OpenHands.
     _curated_entry(
         "databricks-gemini-3-5-flash", ProviderFamily.GEMINI, recommended=True
     ),
-    _curated_entry("databricks-gemini-3-flash", ProviderFamily.GEMINI),
-    _curated_entry("databricks-gemini-3-pro", ProviderFamily.GEMINI),
+    _curated_entry("databricks-gemini-3-1-flash-lite", ProviderFamily.GEMINI),
     _curated_entry("databricks-gemini-2-5-flash", ProviderFamily.GEMINI),
     _curated_entry("databricks-gemini-2-5-pro", ProviderFamily.GEMINI),
 )
