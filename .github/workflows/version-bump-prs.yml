@@ -27,7 +27,11 @@ jobs:
                   VERSION_INPUT: ${{ github.event.inputs.version }}
               run: |
                   VERSION="$VERSION_INPUT"
-                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "❌ Invalid version format. Expected: X.Y.Z (e.g., 1.2.3)"
+                    exit 1
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
                   echo "📦 Version: $VERSION"
 
             - name: Validate version
