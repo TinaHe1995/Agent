@@ -92,7 +92,9 @@ def _walk_mcp_secret_values(
     return config
 
 
-def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
+def _decrypt_secret_value_or_keep(
+    cipher: Cipher, value: str, *, value_description: str
+) -> str:
     """Decrypt ``value`` with ``cipher``; return the original string if the
     value isn't a Fernet token (legacy plaintext) or fails to decrypt
     (cipher mismatch / corruption — logged once).
@@ -104,12 +106,18 @@ def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
     decrypted = cipher.try_decrypt_str(value)
     if decrypted is None:
         logger.warning(
-            "MCP env/headers value looks encrypted but could not be "
+            f"{value_description} value looks encrypted but could not be "
             "decrypted (cipher mismatch or corruption); leaving the "
             "ciphertext in place."
         )
         return value
     return decrypted
+
+
+def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
+    return _decrypt_secret_value_or_keep(
+        cipher, value, value_description="MCP env/headers"
+    )
 
 
 SettingsValueType = Literal[
@@ -505,7 +513,7 @@ class ConversationSettings(BaseModel):
     agent_definitions: list[AgentDefinition] = Field(
         default_factory=list,
         exclude=True,
-        description="Agent definitions for DelegateTool / TaskSetTool.",
+        description="Agent definitions for task tools.",
     )
     plugins: list[PluginSource] | None = Field(
         default=None,
@@ -881,7 +889,11 @@ class OpenHandsAgentSettings(AgentSettingsBase):
 
         from openhands.sdk.context.condenser import LLMSummarizingCondenser
 
-        return LLMSummarizingCondenser(llm=llm, max_size=self.condenser.max_size)
+        condenser_llm = llm.model_copy(update={"usage_id": "condenser"})
+        condenser_llm.reset_metrics()
+        return LLMSummarizingCondenser(
+            llm=condenser_llm, max_size=self.condenser.max_size
+        )
 
     def build_critic(self) -> CriticBase | None:
         """Create an :class:`APIBasedCritic` from these settings.
@@ -1018,6 +1030,28 @@ class ACPAgentSettings(AgentSettingsBase):
             ).model_dump(),
         },
     )
+
+    @field_validator("acp_env", mode="before")
+    @classmethod
+    def _decrypt_acp_env_values(cls, value: Any, info: ValidationInfo) -> Any:
+        """Decrypt persisted ACP environment values when a cipher is available.
+
+        Legacy plaintext values pass through unchanged so the next save can
+        re-encrypt them, matching MCP env/header handling.
+        """
+        if not isinstance(value, dict):
+            return value
+        cipher: Cipher | None = info.context.get("cipher") if info.context else None
+        if cipher is None:
+            return value
+        return {
+            k: (
+                _decrypt_secret_value_or_keep(cipher, v, value_description="ACP env")
+                if isinstance(v, str)
+                else v
+            )
+            for k, v in value.items()
+        }
 
     @field_serializer("acp_env", when_used="always")
     def _serialize_acp_env(self, value: dict[str, str], info):
@@ -1160,10 +1194,13 @@ class ACPAgentSettings(AgentSettingsBase):
         """Return the effective ACP subprocess environment.
 
         Explicit :attr:`acp_env` entries override provider-derived env vars.
-        ``ACPAgent`` then injects :attr:`agent_context` secrets only for keys
-        that are still absent, preserving the overall priority:
+        The returned dict becomes ``ACPAgent.acp_env``; at spawn time
+        ``ACPAgent`` then fills still-missing keys from the conversation's
+        ``secret_registry`` (the canonical conversation-secret channel) and
+        finally from :attr:`agent_context` secrets, preserving the overall
+        priority:
 
-        ``acp_env > provider env > agent_context.secrets``.
+        ``acp_env > provider env > secret_registry > agent_context.secrets``.
         """
         return {
             **self.resolve_provider_env(),
@@ -1271,8 +1308,9 @@ to validate/construct instances from raw payloads. Use
 :func:`default_agent_settings` for the default (LLM-agent) shape.
 
 Named ``AgentSettingsConfig`` rather than ``AgentSettings`` because the
-latter is retained as a (deprecated) concrete class for backwards
-compatibility with v1.17.x callers — see :class:`AgentSettings`.
+old concrete ``AgentSettings`` class was removed after its deprecation
+deadline. Use this union for fields that accept any supported settings
+variant.
 """
 
 
@@ -1283,74 +1321,24 @@ _AGENT_SETTINGS_ADAPTER: TypeAdapter[
 
 def validate_agent_settings(
     data: Any,
+    *,
+    context: Mapping[str, Any] | None = None,
 ) -> OpenHandsAgentSettings | LLMAgentSettings | ACPAgentSettings:
-    """Validate ``data`` as an :data:`AgentSettingsConfig` discriminated union.
+    """Load and validate an agent-settings payload.
 
-    This is the drop-in replacement for the old
-    ``AgentSettings.model_validate(...)`` classmethod.
+    Persisted payloads are migrated to the current schema version before
+    validation, including legacy ``agent_kind: "llm"`` payloads from before the
+    ``OpenHandsAgentSettings`` rename.
     """
-    return _AGENT_SETTINGS_ADAPTER.validate_python(data)
-
-
-class AgentSettings(LLMAgentSettings):
-    """Deprecated legacy name for :class:`OpenHandsAgentSettings`.
-
-    Before the discriminated-union redesign, ``AgentSettings`` was the
-    single concrete class for agent configuration. It is kept as a
-    :class:`LLMAgentSettings` subclass (which itself is a
-    :class:`OpenHandsAgentSettings` subclass) so every v1.17 attribute and
-    method (``agent``, ``llm``, ``tools``, ``mcp_config``,
-    ``condenser``, ``verification``, ``build_condenser``,
-    ``build_critic``, ``create_agent``, …) resolves through
-    inheritance — existing callers keep working, though direct
-    construction now emits a :class:`DeprecationWarning`.
-
-    Inherits from :class:`LLMAgentSettings` so that ``agent_kind`` remains
-    ``"llm"`` (matching the PyPI 1.19.x API surface seen by the breakage
-    checker), while new code should use :class:`OpenHandsAgentSettings`
-    directly.
-
-    For new code:
-
-    * Use :class:`OpenHandsAgentSettings` to build an explicit LLM-backed
-      agent, or :class:`ACPAgentSettings` for an ACP-delegating one.
-    * Use :data:`AgentSettingsConfig` as the type for fields that may
-      hold either variant (FastAPI / Pydantic pick the variant from
-      the ``agent_kind`` discriminator).
-    * Use :func:`validate_agent_settings` to validate raw payloads
-      into the correct variant.
-
-    Scheduled for removal in v1.23.0.
-    """
-
-    @classmethod
-    def from_persisted(
-        cls, data: Any
-    ) -> OpenHandsAgentSettings | LLMAgentSettings | ACPAgentSettings:
-        """Load persisted agent settings, applying any schema migrations."""
-        payload = _apply_persisted_migrations(
-            data,
-            current_version=AGENT_SETTINGS_SCHEMA_VERSION,
-            migrations=_AGENT_SETTINGS_MIGRATIONS,
-            payload_name="AgentSettings",
-        )
-        return validate_agent_settings(payload)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        from openhands.sdk.utils.deprecation import warn_deprecated
-
-        warn_deprecated(
-            "AgentSettings",
-            deprecated_in="1.17.0",
-            removed_in="1.23.0",
-            details=(
-                "Use ``OpenHandsAgentSettings`` (for an LLM agent) or "
-                "``ACPAgentSettings`` (for an ACP agent) directly; use "
-                "``AgentSettingsConfig`` as the type for fields that accept "
-                "either variant."
-            ),
-        )
-        super().__init__(*args, **kwargs)
+    if isinstance(data, OpenHandsAgentSettings | ACPAgentSettings):
+        return data
+    payload = _apply_persisted_migrations(
+        data,
+        current_version=AGENT_SETTINGS_SCHEMA_VERSION,
+        migrations=_AGENT_SETTINGS_MIGRATIONS,
+        payload_name="AgentSettings",
+    )
+    return _AGENT_SETTINGS_ADAPTER.validate_python(payload, context=context)
 
 
 def default_agent_settings() -> OpenHandsAgentSettings:
@@ -1374,7 +1362,7 @@ def create_agent_from_settings(
 
 
 def export_agent_settings_schema() -> SettingsSchema:
-    """Export a combined schema for the :data:`AgentSettings` union.
+    """Export a combined schema for the :data:`AgentSettingsConfig` union.
 
     Walks both variants, tags each non-shared section with its variant,
     and returns a single :class:`SettingsSchema`. The discriminator

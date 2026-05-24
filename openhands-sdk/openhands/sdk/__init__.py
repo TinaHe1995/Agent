@@ -26,6 +26,7 @@ from openhands.sdk.event.llm_convertible import MessageEvent
 from openhands.sdk.io import FileStore, LocalFileStore
 from openhands.sdk.llm import (
     LLM,
+    LLM_PROFILE_SCHEMA_VERSION,
     FallbackStrategy,
     ImageContent,
     LLMProfileStore,
@@ -51,7 +52,6 @@ from openhands.sdk.settings import (
     ACP_PROVIDERS,
     ACPAgentSettings,
     ACPProviderInfo,
-    AgentSettings,
     AgentSettingsBase,
     AgentSettingsConfig,
     CondenserSettings,
@@ -150,6 +150,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "LLM",
+    "LLM_PROFILE_SCHEMA_VERSION",
     "LLMRegistry",
     "LLMProfileStore",
     "LLMStreamChunk",
@@ -192,7 +193,6 @@ __all__ = [
     "ACP_PROVIDERS",
     "ACPAgentSettings",
     "ACPProviderInfo",
-    "AgentSettings",
     "AgentSettingsBase",
     "AgentSettingsConfig",
     "LLMAgentSettings",

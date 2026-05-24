@@ -48,6 +48,7 @@ from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.secret import SecretSource, StaticSecret
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 from openhands.sdk.security.risk import SecurityRisk
+from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
 from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
 
@@ -134,6 +135,82 @@ def conversation_service():
         # Initialize the _event_services dict to simulate an active service
         service._event_services = {}
         yield service
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_decrypts_encrypted_agent_settings_mcp_env(
+    conversation_service, tmp_path
+):
+    cipher = Cipher("mcp-env-test-key")
+    conversation_service.cipher = cipher
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    encrypted_llm_key = cipher.encrypt(SecretStr("sk-plaintext"))
+    encrypted_mcp_token = cipher.encrypt(SecretStr("ghp-plaintext"))
+    request = StartConversationRequest(
+        agent_settings={
+            "schema_version": 1,
+            "agent_kind": "llm",
+            "llm": {
+                "model": "gpt-4o",
+                "usage_id": "test-llm",
+                "api_key": encrypted_llm_key,
+            },
+            "tools": [],
+            "mcp_config": {
+                "mcpServers": {
+                    "github": {
+                        "command": "npx",
+                        "env": {
+                            "GITHUB_PERSONAL_ACCESS_TOKEN": encrypted_mcp_token,
+                        },
+                    }
+                }
+            },
+        },
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        secrets_encrypted=True,
+    )
+    assert (
+        request.agent.mcp_config["mcpServers"]["github"]["env"][
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+        ]
+        == encrypted_mcp_token
+    )
+
+    captured: dict[str, StoredConversation] = {}
+
+    async def fake_start_event_service(stored: StoredConversation):
+        captured["stored"] = stored
+        service = AsyncMock(spec=EventService)
+        service.stored = stored
+        service.get_state.return_value = ConversationState(
+            id=stored.id,
+            agent=stored.agent,
+            workspace=stored.workspace,
+            execution_status=ConversationExecutionStatus.IDLE,
+            confirmation_policy=stored.confirmation_policy,
+        )
+        return service
+
+    with patch.object(
+        conversation_service,
+        "_start_event_service",
+        side_effect=fake_start_event_service,
+    ):
+        await conversation_service.start_conversation(request)
+
+    stored = captured["stored"]
+    assert isinstance(stored.agent.llm.api_key, SecretStr)
+    assert stored.agent.llm.api_key.get_secret_value() == "sk-plaintext"
+    assert (
+        stored.agent.mcp_config["mcpServers"]["github"]["env"][
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+        ]
+        == "ghp-plaintext"
+    )
 
 
 @pytest.mark.asyncio
@@ -239,6 +316,83 @@ async def test_stale_owner_cannot_append_after_lease_takeover(tmp_path):
 
             with pytest.raises(ConversationOwnershipLostError):
                 primary_state.execution_status = ConversationExecutionStatus.ERROR
+
+
+@pytest.mark.asyncio
+async def test_event_services_use_centralized_lease_renewal(tmp_path):
+    """Event services created by ConversationService should not spawn
+    their own lease renewal tasks — renewal is handled centrally."""
+    conversations_dir = tmp_path / "conversations"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+    )
+
+    async with ConversationService(conversations_dir=conversations_dir) as svc:
+        info, _ = await svc.start_conversation(request)
+        assert svc._event_services is not None
+        es = svc._event_services[info.id]
+
+        # Per-service renewal task should NOT be created
+        assert es._lease_task is None
+        assert es._external_lease_renewal is True
+
+        # Centralized task should exist
+        assert svc._lease_renewal_task is not None
+        assert not svc._lease_renewal_task.done()
+
+    # After __aexit__, centralized task should be cleaned up
+    assert svc._lease_renewal_task is None
+
+
+@pytest.mark.asyncio
+async def test_centralized_lease_renewal_invokes_renew(tmp_path):
+    """The centralized loop calls renew_lease() on every active service."""
+    conversations_dir = tmp_path / "conversations"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+    )
+
+    with patch(
+        "openhands.agent_server.conversation_service.LEASE_RENEW_INTERVAL_SECONDS",
+        0.05,
+    ):
+        async with ConversationService(conversations_dir=conversations_dir) as svc:
+            info1, _ = await svc.start_conversation(request)
+            info2, _ = await svc.start_conversation(request)
+            assert svc._event_services is not None
+            es1 = svc._event_services[info1.id]
+            es2 = svc._event_services[info2.id]
+
+            renew_calls: dict[str, int] = {"es1": 0, "es2": 0}
+            original_renew1 = es1.renew_lease
+            original_renew2 = es2.renew_lease
+
+            def counting_renew1():
+                renew_calls["es1"] += 1
+                original_renew1()
+
+            def counting_renew2():
+                renew_calls["es2"] += 1
+                original_renew2()
+
+            es1.renew_lease = counting_renew1  # type: ignore[method-assign]
+            es2.renew_lease = counting_renew2  # type: ignore[method-assign]
+
+            # Wait for at least 2 renewal cycles
+            await asyncio.sleep(0.15)
+
+            assert renew_calls["es1"] >= 1, "renew_lease not called on es1"
+            assert renew_calls["es2"] >= 1, "renew_lease not called on es2"
 
 
 @pytest.mark.asyncio

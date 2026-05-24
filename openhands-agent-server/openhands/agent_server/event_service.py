@@ -18,6 +18,7 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.pub_sub import PubSub, Subscriber
 from openhands.sdk import LLM, AgentBase, Event, Message, get_logger
+from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 from openhands.sdk.conversation.secret_registry import SecretValue
@@ -63,13 +64,19 @@ class EventService:
     cipher: Cipher | None = None
     owner_instance_id: str = field(default_factory=lambda: uuid4().hex)
     _conversation: LocalConversation | None = field(default=None, init=False)
-    _pub_sub: PubSub[Event] = field(default_factory=lambda: PubSub[Event](), init=False)
+    _pub_sub: PubSub[Event] = field(
+        default_factory=lambda: PubSub[Event](max_subscribers=50), init=False
+    )
     _run_task: asyncio.Task | None = field(default=None, init=False)
+    # Set when a send_message(run=True) is rejected because a run is still
+    # wrapping up; consumed by _run_and_publish to re-run the stranded message.
+    _rerun_requested: bool = field(default=False, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
     _lease: ConversationLease | None = field(default=None, init=False)
     _lease_generation: int | None = field(default=None, init=False)
     _lease_task: asyncio.Task | None = field(default=None, init=False)
+    _external_lease_renewal: bool = field(default=False, init=False)
     _run_executor: ThreadPoolExecutor | None = field(default=None, init=False)
 
     @property
@@ -101,15 +108,16 @@ class EventService:
             return nullcontext()
         return self._lease.guarded_write(self._lease_generation)
 
-    async def _renew_lease_loop(self) -> None:
+    def renew_lease(self) -> None:
+        """Renew this service's conversation lease.
+
+        Called by a centralized renewal loop (when ``_external_lease_renewal``
+        is True) or by the per-service ``_renew_lease_loop`` background task.
+        """
         if self._lease is None or self._lease_generation is None:
             return
         try:
-            while True:
-                await asyncio.sleep(LEASE_RENEW_INTERVAL_SECONDS)
-                self._lease.renew(self._lease_generation)
-        except asyncio.CancelledError:
-            raise
+            self._lease.renew(self._lease_generation)
         except ConversationOwnershipLostError:
             logger.warning(
                 "Conversation lease lost while renewing: %s",
@@ -120,6 +128,16 @@ class EventService:
                 "Failed to renew conversation lease for %s",
                 self.stored.id,
             )
+
+    async def _renew_lease_loop(self) -> None:
+        if self._lease is None or self._lease_generation is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(LEASE_RENEW_INTERVAL_SECONDS)
+                self.renew_lease()
+        except asyncio.CancelledError:
+            raise
 
     def get_conversation(self):
         if not self._conversation:
@@ -404,9 +422,19 @@ class EventService:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
-            # Already running or inactive — message was sent, skip run.
-            with suppress(ValueError):
+            try:
                 await self.run()
+            except ValueError as e:
+                # run() refused. If a run is still wrapping up (its
+                # wait_for_pending tail), the message we just appended won't be
+                # picked up by it, so record explicit run intent for
+                # _run_and_publish to honor once that task clears. Tracking the
+                # request — rather than inferring it later from an IDLE status —
+                # is what keeps a deliberate run=False append, or an IDLE reached
+                # via another path, from triggering an unwanted run.
+                # "inactive_service" is terminal and must not re-arm.
+                if str(e) == "conversation_already_running":
+                    self._rerun_requested = True
 
     async def subscribe_to_events(self, subscriber: Subscriber[Event]) -> UUID:
         subscriber_id = self._pub_sub.subscribe(subscriber)
@@ -508,13 +536,29 @@ class EventService:
         """Configure stats update callbacks to stream stats changes via events."""
 
         def stats_callback() -> None:
-            """Callback to emit stats updates."""
+            """Callback to emit stats updates.
+
+            Invoked synchronously by ``Telemetry.on_response`` (regular
+            Agent path) and ``ACPAgent._record_usage`` (ACP path) — both
+            run inside ``LocalConversation.run()``'s ``with self._state:``
+            block, so the caller already owns the conversation state lock.
+
+            DO NOT re-acquire the state lock here (``with state:``). It
+            looks safe — ``FIFOLock`` documents itself as reentrant — but
+            on the ACP code path it deadlocks (silently) before the rest
+            of ``step()`` can emit the assistant's FinishAction +
+            ObservationEvent, leaving every conversation hung in
+            ``running`` status forever. ``_emit_event_from_thread`` below
+            already acquires the lock on the executor thread before
+            persisting the event; that's the only place serialization
+            needs the lock anyway.
+            """
             # Publish only the stats field to avoid sending entire state
             if not self._conversation:
                 return
-            state = self._conversation._state
-            with state:
-                event = ConversationStateUpdateEvent(key="stats", value=state.stats)
+            event = ConversationStateUpdateEvent(
+                key="stats", value=self._conversation._state.stats
+            )
             self._emit_event_from_thread(event)
 
         for llm in agent.get_all_llms():
@@ -631,13 +675,15 @@ class EventService:
             cipher=self.cipher,
             hook_config=self.stored.hook_config,
             tags=self.stored.tags,
+            user_id=self.stored.user_id,
         )
 
         conversation.set_confirmation_policy(self.stored.confirmation_policy)
         conversation.set_security_analyzer(self.stored.security_analyzer)
         self._conversation = conversation
         self._conversation._state.set_write_guard(self._write_guard)
-        self._lease_task = asyncio.create_task(self._renew_lease_loop())
+        if not self._external_lease_renewal:
+            self._lease_task = asyncio.create_task(self._renew_lease_loop())
 
         # Register state change callback to automatically publish updates
         self._conversation._state.set_on_state_change(self._conversation._on_event)
@@ -691,8 +737,11 @@ class EventService:
         """Run the conversation asynchronously in the background.
 
         This method starts the conversation run in a background task and returns
-        immediately. The conversation status can be monitored via the
-        GET /api/conversations/{id} endpoint or WebSocket events.
+        immediately.  When possible, the conversation is driven via its native
+        ``arun()`` coroutine so LLM I/O does not tie up a thread-pool worker.
+        For conversations that do not expose ``arun()`` (e.g., custom
+        subclasses), the synchronous ``run()`` is executed in the thread pool as
+        before.
 
         Raises:
             ValueError: If the service is inactive or conversation is already running.
@@ -720,7 +769,28 @@ class EventService:
 
             async def _run_and_publish():
                 try:
-                    await loop.run_in_executor(self._run_executor, conversation.run)
+                    # Prefer the native async path when available so the event
+                    # loop is free during LLM I/O.  Fall back to thread-pool
+                    # execution for backward compatibility.
+                    #
+                    # Both guards are required:
+                    #  • iscoroutinefunction – filters out non-async objects
+                    #    (e.g. MagicMock in tests).
+                    #  • override check – BaseConversation defines a default
+                    #    ``async def arun()`` that delegates to sync ``run()``,
+                    #    so iscoroutinefunction alone is always True for real
+                    #    subclasses.  We detect an *actual* override to avoid
+                    #    running a sync-only subclass on the event loop.
+                    arun = getattr(conversation, "arun", None)
+                    has_native_arun = (
+                        arun is not None
+                        and asyncio.iscoroutinefunction(arun)
+                        and type(conversation).arun is not BaseConversation.arun
+                    )
+                    if has_native_arun:
+                        await conversation.arun()
+                    else:
+                        await loop.run_in_executor(self._run_executor, conversation.run)
                 except Exception:
                     logger.exception("Error during conversation run")
                 finally:
@@ -737,6 +807,26 @@ class EventService:
                     # Clear task reference and publish state update
                     self._run_task = None
                     await self._publish_state_update()
+
+                    # Re-arm a run for input stranded while this task was
+                    # wrapping up. A send_message(run=True) that arrived during
+                    # the wait_for_pending() tail above had its run() rejected as
+                    # "conversation_already_running" and suppressed, setting
+                    # _rerun_requested. Honor it only while the conversation is
+                    # still IDLE — i.e. that message is genuinely pending. If the
+                    # run loop was still alive it already absorbed the message
+                    # (LocalConversation.run() keeps looping on FINISHED) and we
+                    # are FINISHED here, so the IDLE guard avoids a redundant run.
+                    # A deliberate run=False append, or an IDLE reached via
+                    # another path, never sets the flag.
+                    if self._rerun_requested:
+                        self._rerun_requested = False
+                        if (
+                            await self._get_execution_status()
+                            == ConversationExecutionStatus.IDLE
+                        ):
+                            with suppress(ValueError):
+                                await self.run()
 
             # Create task but don't await it - runs in background
             self._run_task = asyncio.create_task(_run_and_publish())
@@ -770,6 +860,28 @@ class EventService:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._conversation.pause)
             # Publish state update after pause to ensure stats are updated
+            await self._publish_state_update()
+
+    async def interrupt(self):
+        """Immediately cancel an in-flight async LLM call.
+
+        Delegates to :meth:`LocalConversation.interrupt` which cancels the
+        ``arun()`` task.  If no async run is in progress the call falls
+        back to :meth:`pause`.
+        """
+        if self._conversation:
+            self._conversation.interrupt()
+            # Wait for the run task to finish so we can publish the final
+            # state update (PAUSED + InterruptEvent) cleanly.
+            if self._run_task is not None and not self._run_task.done():
+                with suppress(Exception):
+                    await asyncio.wait_for(self._run_task, timeout=5.0)
+                # Only clear _run_task if it actually finished; if
+                # wait_for timed out the task may still be running and
+                # clearing prematurely would allow a second run() to
+                # start while the first is still in progress.
+                if self._run_task is not None and self._run_task.done():
+                    self._run_task = None
             await self._publish_state_update()
 
     async def update_secrets(self, secrets: dict[str, SecretValue]):
@@ -817,8 +929,15 @@ class EventService:
                     logger.warning(
                         "Failed to pause conversation during close", exc_info=True
                     )
+            # Cancel the run task so arun()'s CancelledError handler can
+            # transition to PAUSED cleanly.  For the legacy thread-pool
+            # path the underlying thread keeps running but the wrapper
+            # task still settles, unblocking the wait below.
+            self._run_task.cancel()
             try:
                 await asyncio.wait_for(self._run_task, timeout=10.0)
+            except asyncio.CancelledError:
+                pass  # Expected after cancel()
             except Exception as exc:
                 logger.warning("Run task did not exit cleanly during close: %s", exc)
             self._run_task = None
