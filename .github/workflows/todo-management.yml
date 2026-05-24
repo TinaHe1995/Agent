@@ -71,11 +71,14 @@ jobs:
 
             - name: Scan for TODOs
               id: scan
+              env:
+                  TODO_IDENTIFIER_INPUT: ${{ github.event.inputs.todo_identifier || 'TODO(openhands)' }}
+                  MAX_TODOS_INPUT: ${{ github.event.inputs.max_todos || '3' }}
               run: |
                   echo "Scanning for TODO comments..."
 
                   # Run the scanner and capture output
-                  TODO_IDENTIFIER="${{ github.event.inputs.todo_identifier || 'TODO(openhands)' }}"
+                  TODO_IDENTIFIER="$TODO_IDENTIFIER_INPUT"
                   python /tmp/scanner.py . --identifier "$TODO_IDENTIFIER" > todos.json
 
                   # Count TODOs
@@ -84,7 +87,7 @@ jobs:
                   echo "Found $TODO_COUNT $TODO_IDENTIFIER items"
 
                   # Limit the number of TODOs to process
-                  MAX_TODOS="${{ github.event.inputs.max_todos || '3' }}"
+                  MAX_TODOS="$MAX_TODOS_INPUT"
                   if [ "$TODO_COUNT" -gt "$MAX_TODOS" ]; then
                     echo "Limiting to first $MAX_TODOS TODOs"
                     python -c "
@@ -175,6 +178,7 @@ jobs:
                   TODO_FILE: ${{ matrix.todo.file }}
                   TODO_LINE: ${{ matrix.todo.line }}
                   TODO_DESCRIPTION: ${{ matrix.todo.description }}
+                  BASE_REF: ${{ github.ref_name }}
                   PYTHONPATH: ''
               run: |
                   echo "Processing TODO: $TODO_DESCRIPTION"
@@ -291,7 +295,7 @@ jobs:
                       \"title\": \"$PR_TITLE\",
                       \"body\": \"$PR_BODY\",
                       \"head\": \"$BRANCH_NAME\",
-                      \"base\": \"${{ github.ref_name }}\"
+                      \"base\": \"$BASE_REF\"
                     }"
 
     summary:
@@ -300,11 +304,13 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
             - name: Generate Summary
+              env:
+                  TODO_COUNT_OUTPUT: ${{ needs.scan-todos.outputs.todo-count || '0' }}
               run: |
                   echo "# 🤖 TODO Management Summary" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
 
-                  TODO_COUNT="${{ needs.scan-todos.outputs.todo-count || '0' }}"
+                  TODO_COUNT="$TODO_COUNT_OUTPUT"
                   echo "**TODOs Found:** $TODO_COUNT" >> $GITHUB_STEP_SUMMARY
 
                   if [ "$TODO_COUNT" -gt 0 ]; then

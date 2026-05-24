@@ -260,16 +260,20 @@ jobs:
 
             # Run integration test evaluation
             - name: Determine test selection
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  LABEL_NAME: ${{ github.event.label.name }}
+                  TEST_TYPE_INPUT: ${{ github.event.inputs.test_type }}
               run: |
                   TEST_TYPE_ARGS=""
-                  if [ "${{ github.event_name }}" = "pull_request_target" ] && [ "${{ github.event.label.name }}" = "behavior-test" ]; then
+                  if [ "$EVENT_NAME" = "pull_request_target" ] && [ "$LABEL_NAME" = "behavior-test" ]; then
                     TEST_TYPE_ARGS="--test-type behavior"
                     echo "behavior-test label detected; running behavior tests only."
-                  elif [ "${{ github.event_name }}" = "pull_request_target" ] && [ "${{ github.event.label.name }}" = "integration-test" ]; then
+                  elif [ "$EVENT_NAME" = "pull_request_target" ] && [ "$LABEL_NAME" = "integration-test" ]; then
                     TEST_TYPE_ARGS="--test-type integration"
                     echo "integration-test label detected; running integration tests only."
-                  elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-                    test_type="${{ github.event.inputs.test_type }}"
+                  elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                    test_type="$TEST_TYPE_INPUT"
                     case "$test_type" in
                       behavior)
                         TEST_TYPE_ARGS="--test-type behavior"
@@ -286,7 +290,7 @@ jobs:
                         echo "workflow_dispatch provided unknown test_type '$test_type'; defaulting to full suite."
                         ;;
                     esac
-                  elif [ "${{ github.event_name }}" = "schedule" ]; then
+                  elif [ "$EVENT_NAME" = "schedule" ]; then
                     TEST_TYPE_ARGS="--test-type integration"
                     echo "Scheduled run; running integration tests only."
                   else
@@ -447,9 +451,10 @@ jobs:
                   # Sanitize @OpenHands mentions to prevent self-mention loops
                   COMMENT_BODY=$(uv run python -c "from openhands.sdk.utils.github import sanitize_openhands_mentions; import sys; print(sanitize_openhands_mentions(sys.stdin.read()), end='')" < consolidated_report.md)
                   # Use GitHub CLI to create comment with explicit PR number
-                  echo "$COMMENT_BODY" | gh pr comment ${{ github.event.pull_request.number }} --body-file -
+                  echo "$COMMENT_BODY" | gh pr comment "$PR_NUMBER" --body-file -
               env:
                   GH_TOKEN: ${{ github.token }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
 
             - name: Comment on specified issue/PR (workflow_dispatch)
               if: github.event_name == 'workflow_dispatch' && needs.setup-matrix.outputs.issue_number != ''

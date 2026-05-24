@@ -83,6 +83,7 @@ jobs:
                   ANTHROPIC_API_KEY: ${{ secrets.LLM_API_KEY }}
                   OPENAI_BASE_URL: https://llm-proxy.app.all-hands.dev
                   OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
+                  GITHUB_EVENT_NAME: ${{ github.event_name }}
               run: |
                   RESULTS_DIR=".example-test-results"
                   REPORT_PATH="examples_report.md"
@@ -135,7 +136,7 @@ jobs:
                   API_URL=""
                   COMMENT_ID=""
 
-                  if [ "${{ github.event_name }}" = "pull_request" ]; then
+                  if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
                       API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments"
                       initial_comment="## 🔄 Running Examples with \`${LLM_MODEL}\`"
                       initial_comment+=$'\n\n'
@@ -163,7 +164,7 @@ jobs:
                   COMMENT_BODY="$(cat "$REPORT_PATH")"
                   echo "$COMMENT_BODY"
 
-                  if [ "${{ github.event_name }}" = "pull_request" ]; then
+                  if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
                       echo "Publishing PR comment..."
                       update_comment "$COMMENT_BODY"
                   fi

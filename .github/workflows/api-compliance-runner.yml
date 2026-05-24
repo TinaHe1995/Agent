@@ -49,11 +49,15 @@ jobs:
 
             - name: Determine test parameters
               id: params
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PATTERNS_INPUT: ${{ github.event.inputs.patterns }}
+                  MODELS_INPUT: ${{ github.event.inputs.models }}
               run: |
                   # Use input values or defaults
-                  if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-                    PATTERNS="${{ github.event.inputs.patterns }}"
-                    MODELS="${{ github.event.inputs.models }}"
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                    PATTERNS="$PATTERNS_INPUT"
+                    MODELS="$MODELS_INPUT"
                   else
                     PATTERNS=""
                     MODELS=""
@@ -78,9 +82,10 @@ jobs:
                   LLM_API_KEY: ${{ secrets.LLM_API_KEY_EVAL }}
                   LLM_BASE_URL: https://llm-proxy.eval.all-hands.dev
                   GITHUB_RUN_ID: ${{ github.run_id }}
+                  PARAM_ARGS: ${{ steps.params.outputs.args }}
               run: |
                   uv run python tests/integration/api_compliance/run_compliance.py \
-                    ${{ steps.params.outputs.args }} \
+                    $PARAM_ARGS \
                     --output-dir compliance-results/
               continue-on-error: true  # Tests may "fail" but that's expected
 
