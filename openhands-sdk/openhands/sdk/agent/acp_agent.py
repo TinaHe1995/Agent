@@ -768,6 +768,7 @@ class ACPAgent(AgentBase):
     # "installed"            — already in subprocess history; skip further injection
     _suffix_install_state: str = PrivateAttr(default="unused")
     _installed_suffix: str | None = PrivateAttr(default=None)
+    _restart_session_on_next_turn: bool = PrivateAttr(default=False)
 
     # -- Helpers -----------------------------------------------------------
 
@@ -1304,7 +1305,12 @@ class ACPAgent(AgentBase):
 
         try:
             future = self._executor.portal.start_task_soon(_cancel)
-            await asyncio.wrap_future(future)
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)),
+                timeout=_ACP_CANCEL_DRAIN_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning("Timed out sending ACP session cancel; continuing cleanup")
         except Exception:
             logger.warning("Failed to send ACP session cancel", exc_info=True)
 
@@ -1346,8 +1352,9 @@ class ACPAgent(AgentBase):
         state.agent_state = {
             key: value
             for key, value in state.agent_state.items()
-            if key not in {"acp_session_id", "acp_session_cwd"}
+            if key not in {"acp_session_id", "acp_session_cwd", "acp_suffix_installed"}
         }
+        self._restart_session_on_next_turn = False
         self.init_state(state, on_event=on_event)
 
     def _request_session_cancel(self) -> None:
@@ -1739,6 +1746,9 @@ class ACPAgent(AgentBase):
         """
         state = conversation.state
 
+        if self._restart_session_on_next_turn:
+            self._restart_session_after_drain_timeout(state, on_event)
+
         prompt_blocks: list[Any] | None = None
         if prompt_message is not None:
             prompt_blocks = self._build_acp_prompt(prompt_message)
@@ -1855,7 +1865,7 @@ class ACPAgent(AgentBase):
             drained = await self._drain_cancelled_prompt(prompt_future)
             self._cancel_inflight_tool_calls()
             if not drained:
-                self._restart_session_after_drain_timeout(state, on_event)
+                self._restart_session_on_next_turn = True
             raise
         except TimeoutError:
             await self._arequest_session_cancel()

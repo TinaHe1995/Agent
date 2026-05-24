@@ -953,6 +953,7 @@ class LocalConversation(BaseConversation):
                 self._state.execution_status = ConversationExecutionStatus.RUNNING
 
         iteration = 0
+        last_acp_prompt_user_message_id: str | None = None
         try:
             while True:
                 logger.debug(f"Conversation arun iteration {iteration}")
@@ -1009,15 +1010,35 @@ class LocalConversation(BaseConversation):
                         )
 
                     if isinstance(self.agent, ACPAgent):
-                        acp_step_user_message_id = self._state.last_user_message_id
-                        acp_step_user_message = next(
-                            (
-                                event
-                                for event in reversed(self._state.events)
-                                if isinstance(event, MessageEvent)
-                                and event.source == "user"
-                            ),
-                            None,
+                        user_messages = [
+                            event
+                            for event in self._state.events
+                            if isinstance(event, MessageEvent)
+                            and event.source == "user"
+                        ]
+                        if last_acp_prompt_user_message_id is None:
+                            acp_step_user_message = (
+                                user_messages[-1] if user_messages else None
+                            )
+                        else:
+                            last_prompt_index = next(
+                                (
+                                    index
+                                    for index, event in enumerate(user_messages)
+                                    if event.id == last_acp_prompt_user_message_id
+                                ),
+                                None,
+                            )
+                            acp_step_user_message = (
+                                user_messages[last_prompt_index + 1]
+                                if last_prompt_index is not None
+                                and last_prompt_index + 1 < len(user_messages)
+                                else None
+                            )
+                        acp_step_user_message_id = (
+                            acp_step_user_message.id
+                            if acp_step_user_message is not None
+                            else None
                         )
                     else:
                         await self.agent.astep(
@@ -1070,6 +1091,15 @@ class LocalConversation(BaseConversation):
                 )
                 with self._state:
                     iteration += 1
+                    if acp_step_user_message_id is not None:
+                        last_acp_prompt_user_message_id = acp_step_user_message_id
+
+                    if self._state.execution_status in (
+                        ConversationExecutionStatus.ERROR,
+                        ConversationExecutionStatus.STUCK,
+                    ):
+                        break
+
                     acp_user_message_changed = (
                         self._state.last_user_message_id is not None
                         and self._state.last_user_message_id != acp_step_user_message_id

@@ -901,7 +901,7 @@ class EventService:
             # state update (PAUSED + InterruptEvent) cleanly.
             if self._run_task is not None and not self._run_task.done():
                 with suppress(Exception):
-                    await asyncio.wait_for(self._run_task, timeout=5.0)
+                    await asyncio.wait_for(asyncio.shield(self._run_task), timeout=5.0)
                 # Only clear _run_task if it actually finished; if
                 # wait_for timed out the task may still be running and
                 # clearing prematurely would allow a second run() to

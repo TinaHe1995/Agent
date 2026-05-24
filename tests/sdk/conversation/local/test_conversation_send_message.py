@@ -334,6 +334,95 @@ async def test_acp_arun_marks_queued_message_running_after_finish_gap(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_arun_processes_multiple_queued_messages_fifo(tmp_path):
+    """ACP arun should not skip earlier messages queued during a prompt."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=4,
+        stuck_detection=False,
+    )
+    conversation.send_message("initial request")
+
+    first_step_finished = asyncio.Event()
+    release_first_step = asyncio.Event()
+    all_queued_steps_seen = asyncio.Event()
+    prompts_seen: list[str] = []
+
+    def user_text(event: MessageEvent | None) -> str:
+        assert event is not None
+        content = event.llm_message.content[0]
+        assert isinstance(content, TextContent)
+        return content.text
+
+    async def blocking_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,
+    ) -> None:
+        prompts_seen.append(user_text(prompt_message))
+        conv.state.execution_status = ConversationExecutionStatus.FINISHED
+        if len(prompts_seen) == 1:
+            first_step_finished.set()
+            await release_first_step.wait()
+        elif prompts_seen[-2:] == ["queued one", "queued two"]:
+            all_queued_steps_seen.set()
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=blocking_astep),
+    ):
+        run_task = asyncio.create_task(conversation.arun())
+        await asyncio.wait_for(first_step_finished.wait(), timeout=1.0)
+        await asyncio.to_thread(conversation.send_message, "queued one")
+        await asyncio.to_thread(conversation.send_message, "queued two")
+        release_first_step.set()
+        await asyncio.wait_for(all_queued_steps_seen.wait(), timeout=1.0)
+        await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert prompts_seen == ["initial request", "queued one", "queued two"]
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_stops_after_agent_sets_error(tmp_path):
+    """ACP timeout/error statuses should not be replaced by max-iteration errors."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=3,
+        stuck_detection=False,
+    )
+    conversation.send_message("initial request")
+    prompts_seen: list[str] = []
+
+    async def failing_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,
+    ) -> None:
+        assert prompt_message is not None
+        prompts_seen.append("prompt")
+        conv.state.execution_status = ConversationExecutionStatus.ERROR
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=failing_astep),
+    ):
+        await asyncio.wait_for(conversation.arun(), timeout=1.0)
+
+    assert prompts_seen == ["prompt"]
+    assert conversation.state.execution_status == ConversationExecutionStatus.ERROR
+
+
+@pytest.mark.asyncio
 async def test_acp_arun_leaves_queued_message_idle_at_iteration_cap(tmp_path):
     """A queued ACP message at the run cap should wait for another run."""
 
