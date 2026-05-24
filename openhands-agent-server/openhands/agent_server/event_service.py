@@ -611,11 +611,14 @@ class EventService:
             self._pub_sub, loop=asyncio.get_running_loop()
         )
 
-        # Only wire token streaming if at least one LLM has stream=True.
-        # The LLM silently ignores on_token when stream is off, but skipping
-        # the wiring lets us log the decision so operators can tell from a
-        # log line whether deltas will flow.
-        streaming_enabled = any(llm.stream for llm in agent.get_all_llms())
+        from openhands.sdk.agent import ACPAgent
+
+        # Only wire token streaming for agents that can actually emit token
+        # callbacks. SDK LLM agents need stream=True, while ACP agents emit
+        # AgentMessageChunk text through their bridge without exposing an LLM.
+        streaming_enabled = isinstance(agent, ACPAgent) or any(
+            llm.stream for llm in agent.get_all_llms()
+        )
         logger.debug(
             "Token streaming: %s",
             "enabled" if streaming_enabled else "disabled (no LLM has stream=True)",
