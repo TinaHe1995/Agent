@@ -196,7 +196,7 @@ jobs:
                   Results will be posted here when complete.
                   EOF
                   )
-                  gh issue comment "$ISSUE_NUMBER" --body "$COMMENT_BODY"
+                  gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body "$COMMENT_BODY"
 
     run-integration-tests:
         # Security: Only run when integration-related labels are present, via workflow_dispatch, or on schedule
