@@ -304,6 +304,35 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
 
         return data
 
+    @model_validator(mode="after")
+    def _validate_unique_llm_usage_ids(self) -> AgentBase:
+        """Validate that all LLMs reachable from this agent have unique usage_ids.
+
+        This prevents confusing behavior where multiple LLMs with the same usage_id
+        (e.g., agent LLM and condenser LLM both using 'default') would result in
+        only one being registered for metrics tracking.
+        """
+        usage_id_to_llms: dict[str, list[LLM]] = {}
+        for llm in self.get_all_llms():
+            usage_id_to_llms.setdefault(llm.usage_id, []).append(llm)
+
+        duplicates = {
+            uid: llms for uid, llms in usage_id_to_llms.items() if len(llms) > 1
+        }
+        if duplicates:
+            details = []
+            for usage_id, llms in duplicates.items():
+                models = ", ".join(llm.model for llm in llms)
+                details.append(f"usage_id='{usage_id}' used by: {models}")
+            raise ValueError(
+                f"Multiple LLMs share the same usage_id. Each LLM must have a "
+                f"unique usage_id for proper metrics tracking. Duplicates found: "
+                f"{'; '.join(details)}. Set distinct usage_id values, e.g.: "
+                f"LLM(model='gpt-4o', usage_id='agent'), "
+                f"LLM(model='gpt-4o-mini', usage_id='condenser')"
+            )
+        return self
+
     @model_serializer(mode="wrap")
     def _serialize_with_mcp_handling(self, handler, info: SerializationInfo):
         """Serialize the agent, handling mcp_config encryption/redaction.

@@ -308,27 +308,25 @@ def test_llm_registry_does_not_reset_metrics_for_independent_llms():
     assert llm2.metrics.accumulated_cost == 0.0
 
 
-def test_conversation_handles_duplicate_usage_id_llms():
-    """Test conversation gracefully handles multiple LLM objects with same usage_id.
+def test_agent_rejects_duplicate_usage_id_llms():
+    """Test agent validation rejects duplicate usage_ids at construction time.
 
-    This regression test verifies the fix for:
+    When an agent has multiple LLMs with the same usage_id (e.g., both the agent
+    LLM and condenser LLM using 'default'), validation should fail with a clear
+    error message guiding the user to set distinct usage_id values.
+
+    This is the proper fix for:
     ValueError: Usage ID 'default' already exists in registry
 
-    The bug occurred when an agent had both its own LLM and a condenser with a
-    separate LLM object (different Python objects but same usage_id='default').
-    The _ensure_agent_ready method would try to add both to the registry, and
-    the second add would fail.
-
-    The fix ensures we track newly-added usage_ids during the loop to skip
-    duplicates.
+    Rather than silently skipping duplicates during registration (which could
+    cause confusion if the LLMs have different settings), we now catch this
+    at agent construction time.
     """
-    import tempfile
-
+    import pytest
     from pydantic import SecretStr
 
     from openhands.sdk.agent import Agent
     from openhands.sdk.context.condenser import LLMSummarizingCondenser
-    from openhands.sdk.conversation import Conversation
 
     # Create two separate LLM objects with the same default usage_id
     agent_llm = LLM(
@@ -337,7 +335,7 @@ def test_conversation_handles_duplicate_usage_id_llms():
         # usage_id defaults to "default"
     )
     condenser_llm = LLM(
-        model="gpt-4o",
+        model="gpt-4o-mini",  # Different model!
         api_key=SecretStr("test-key"),
         # usage_id defaults to "default" - same as agent_llm
     )
@@ -348,21 +346,58 @@ def test_conversation_handles_duplicate_usage_id_llms():
 
     # Create condenser with its own LLM
     condenser = LLMSummarizingCondenser(llm=condenser_llm, max_size=100)
+
+    # Agent construction should fail with a clear error message
+    with pytest.raises(ValueError) as exc_info:
+        Agent(llm=agent_llm, condenser=condenser, tools=[])
+
+    error_msg = str(exc_info.value)
+    assert "Multiple LLMs share the same usage_id" in error_msg
+    assert "usage_id='default'" in error_msg
+    assert "gpt-4o" in error_msg
+    assert "gpt-4o-mini" in error_msg
+
+
+def test_agent_accepts_distinct_usage_id_llms():
+    """Test agent accepts LLMs with distinct usage_ids."""
+    import tempfile
+
+    from pydantic import SecretStr
+
+    from openhands.sdk.agent import Agent
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+    from openhands.sdk.conversation import Conversation
+
+    # Create LLMs with distinct usage_ids
+    agent_llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="agent",
+    )
+    condenser_llm = LLM(
+        model="gpt-4o-mini",
+        api_key=SecretStr("test-key"),
+        usage_id="condenser",
+    )
+
+    # Create condenser with its own LLM
+    condenser = LLMSummarizingCondenser(llm=condenser_llm, max_size=100)
+
+    # Agent construction should succeed
     agent = Agent(llm=agent_llm, condenser=condenser, tools=[])
 
-    # Verify agent has two LLM objects with the same usage_id
+    # Verify both LLMs are discoverable
     llms = list(agent.get_all_llms())
     assert len(llms) == 2
-    assert llms[0].usage_id == llms[1].usage_id == "default"
+    usage_ids = {llm.usage_id for llm in llms}
+    assert usage_ids == {"agent", "condenser"}
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create conversation - this should not raise ValueError
+        # Create conversation - this should work fine
         convo = Conversation(agent=agent, workspace=tmpdir, persistence_dir=tmpdir)
-
-        # Trigger _ensure_agent_ready by sending a message
-        # This previously raised: ValueError: Usage ID 'default' already exists
         convo.send_message("Hello")
 
-        # Verify only one LLM was registered (first one wins)
-        assert "default" in convo.llm_registry.list_usage_ids()
-        assert len(convo.llm_registry.list_usage_ids()) == 1
+        # Verify both LLMs were registered
+        assert "agent" in convo.llm_registry.list_usage_ids()
+        assert "condenser" in convo.llm_registry.list_usage_ids()
+        assert len(convo.llm_registry.list_usage_ids()) == 2

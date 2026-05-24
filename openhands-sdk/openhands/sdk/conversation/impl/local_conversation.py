@@ -633,9 +633,18 @@ class LocalConversation(BaseConversation):
             self.llm_registry.subscribe(self._state.stats.register_llm)
             registered = set(self.llm_registry.list_usage_ids())
             for llm in list(self.agent.get_all_llms()):
-                if llm.usage_id not in registered:
-                    self.llm_registry.add(llm)
-                    registered.add(llm.usage_id)
+                if llm.usage_id in registered:
+                    # Skip duplicates but warn - this shouldn't happen if agent
+                    # was validated properly, but can occur with deserialized
+                    # agents that have the same usage_id on multiple LLMs
+                    logger.warning(
+                        f"Skipping duplicate LLM registration for usage_id "
+                        f"'{llm.usage_id}' (model={llm.model}). Consider using "
+                        f"distinct usage_id values for each LLM."
+                    )
+                    continue
+                self.llm_registry.add(llm)
+                registered.add(llm.usage_id)
 
             self._agent_ready = True
 
