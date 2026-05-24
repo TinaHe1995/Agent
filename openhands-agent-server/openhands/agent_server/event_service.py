@@ -1023,10 +1023,16 @@ class EventService:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_agent_final_response_sync)
 
-    async def get_state(self) -> ConversationState:
+    def _get_state_sync(self) -> ConversationState:
         if not self._conversation:
             raise ValueError("inactive_service")
-        return self._conversation._state
+        with self._conversation._state:
+            return self._conversation._state
+
+    async def get_state(self) -> ConversationState:
+        """Return conversation state after synchronizing with in-flight mutations."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._get_state_sync)
 
     async def _publish_state_update(self):
         """Publish a ConversationStateUpdateEvent with the current state."""
