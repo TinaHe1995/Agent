@@ -23,7 +23,9 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.pub_sub import Subscriber
 from openhands.sdk import LLM, Agent, Conversation, Message
+from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.fifo_lock import FIFOLock
+from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -824,6 +826,79 @@ class TestEventServiceSendMessage:
 
         # Verify run was called since agent was idle
         conversation.run.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_message_with_run_true_interrupts_running_acp_turn(
+        self, event_service, tmp_path
+    ):
+        """A new user message should interrupt an in-flight ACP prompt."""
+        agent = ACPAgent(acp_command=["echo", "test"])
+        conversation = LocalConversation(
+            agent=agent,
+            workspace=str(tmp_path),
+            max_iteration_per_run=4,
+            stuck_detection=False,
+        )
+        conversation.send_message("initial request")
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+
+        first_step_started = asyncio.Event()
+        first_step_cancelled = asyncio.Event()
+        second_step_seen = asyncio.Event()
+        prompts_seen: list[str] = []
+
+        def latest_user_text(conv: LocalConversation) -> str:
+            for event in reversed(list(conv.state.events)):
+                if isinstance(event, MessageEvent) and event.source == "user":
+                    content = event.llm_message.content[0]
+                    assert isinstance(content, TextContent)
+                    return content.text
+            raise AssertionError("expected at least one user message")
+
+        async def blocking_astep(
+            self,  # noqa: ARG001
+            conv: LocalConversation,
+            on_event,  # noqa: ARG001
+            on_token=None,  # noqa: ARG001
+        ) -> None:
+            prompts_seen.append(latest_user_text(conv))
+            if len(prompts_seen) == 1:
+                first_step_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    first_step_cancelled.set()
+                    raise
+
+            second_step_seen.set()
+            conv.state.execution_status = ConversationExecutionStatus.FINISHED
+
+        with (
+            patch.object(ACPAgent, "init_state", autospec=True),
+            patch.object(ACPAgent, "astep", new=blocking_astep),
+        ):
+            try:
+                await event_service.run()
+                await asyncio.wait_for(first_step_started.wait(), timeout=1.0)
+
+                await event_service.send_message(
+                    Message(role="user", content=[TextContent(text="intervening")]),
+                    run=True,
+                )
+
+                await asyncio.wait_for(first_step_cancelled.wait(), timeout=1.0)
+                await asyncio.wait_for(second_step_seen.wait(), timeout=1.0)
+            finally:
+                if (
+                    event_service._run_task is not None
+                    and not event_service._run_task.done()
+                ):
+                    conversation.interrupt()
+                    with suppress(asyncio.CancelledError, TimeoutError):
+                        await asyncio.wait_for(event_service._run_task, timeout=1.0)
+
+        assert prompts_seen == ["initial request", "intervening"]
 
     @pytest.mark.asyncio
     async def test_send_message_with_run_true_logs_exception(self, event_service):

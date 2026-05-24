@@ -18,6 +18,7 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.pub_sub import PubSub, Subscriber
 from openhands.sdk import LLM, AgentBase, Event, Message, get_logger
+from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.response_utils import get_agent_final_response
@@ -419,9 +420,20 @@ class EventService:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
+            if await self._should_interrupt_running_acp_turn():
+                await self.interrupt()
             # Already running or inactive — message was sent, skip run.
             with suppress(ValueError):
                 await self.run()
+
+    async def _should_interrupt_running_acp_turn(self) -> bool:
+        if not self._conversation:
+            return False
+        if self._run_task is None or self._run_task.done():
+            return False
+        if not isinstance(self._conversation.agent, ACPAgent):
+            return False
+        return await self._get_execution_status() == ConversationExecutionStatus.RUNNING
 
     async def subscribe_to_events(self, subscriber: Subscriber[Event]) -> UUID:
         subscriber_id = self._pub_sub.subscribe(subscriber)

@@ -17,6 +17,7 @@ See https://agentclientprotocol.com/protocol/overview
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import threading
@@ -1282,6 +1283,22 @@ class ACPAgent(AgentBase):
                     exc_info=True,
                 )
 
+    def _request_session_cancel(self) -> None:
+        """Ask the ACP server to cancel the active session prompt."""
+        if self._conn is None or self._executor is None or self._session_id is None:
+            return
+        session_id = self._session_id
+
+        async def _cancel() -> None:
+            result = self._conn.cancel(session_id)
+            if inspect.isawaitable(result):
+                await result
+
+        try:
+            self._executor.portal.start_task_soon(_cancel)
+        except Exception:
+            logger.warning("Failed to send ACP session cancel", exc_info=True)
+
     def _build_acp_prompt(
         self, event: MessageEvent
     ) -> list[TextContentBlock | ImageContentBlock] | None:
@@ -1607,6 +1624,7 @@ class ACPAgent(AgentBase):
             logger.info("ACP prompt returned in %.1fs", elapsed)
             self._finalize_successful_turn(response, elapsed, state, on_event)
         except TimeoutError:
+            self._request_session_cancel()
             self._emit_turn_timeout(time.monotonic() - t0, state, on_event)
         except Exception as e:
             self._emit_turn_error(e, state, on_event)
@@ -1757,9 +1775,11 @@ class ACPAgent(AgentBase):
             # ``ActionEvent``s, not ``ACPToolCallEvent``s).  Cancel-emit on
             # the caller thread while callbacks are still wired, then re-raise
             # so ``arun()`` can transition to PAUSED.
+            self._request_session_cancel()
             self._cancel_inflight_tool_calls()
             raise
         except TimeoutError:
+            self._request_session_cancel()
             self._emit_turn_timeout(time.monotonic() - t0, state, on_event)
         except Exception as e:
             self._emit_turn_error(e, state, on_event)
