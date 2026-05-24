@@ -1814,7 +1814,8 @@ class ACPAgent(AgentBase):
 
             elapsed = time.monotonic() - t0
             logger.info("ACP prompt returned in %.1fs (async)", elapsed)
-            self._finalize_successful_turn(response, elapsed, state, on_event)
+            with state:
+                self._finalize_successful_turn(response, elapsed, state, on_event)
         except asyncio.CancelledError:
             # ``asyncio.CancelledError`` inherits from ``BaseException``, not
             # ``Exception`` — so it would otherwise bypass the generic handler
@@ -1824,12 +1825,12 @@ class ACPAgent(AgentBase):
             # before cancellation stays live in the event log forever
             # (``LocalConversation._emit_orphaned_action_errors`` only patches
             # ``ActionEvent``s, not ``ACPToolCallEvent``s).  Cancel-emit on
-            # the caller thread while callbacks are still wired, then wait
-            # briefly for the portal prompt to observe the session/cancel
-            # before allowing the next turn to rewire shared accumulators.
+            # the caller thread after the portal prompt has observed
+            # session/cancel, so late cancelled-turn updates cannot overwrite
+            # the terminal synthetic failures.
             await self._arequest_session_cancel()
-            self._cancel_inflight_tool_calls()
             await self._drain_cancelled_prompt(prompt_future)
+            self._cancel_inflight_tool_calls()
             raise
         except TimeoutError:
             await self._arequest_session_cancel()

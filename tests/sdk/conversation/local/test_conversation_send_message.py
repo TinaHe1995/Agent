@@ -273,3 +273,61 @@ async def test_acp_arun_accepts_user_message_while_step_is_in_flight(tmp_path):
         "send_message() should not wait for the in-flight ACP prompt to finish"
     )
     assert prompts_seen == ["initial request", "intervening request"]
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_marks_queued_message_running_after_finish_gap(tmp_path):
+    """Queued ACP messages should resume RUNNING even if send sees FINISHED."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=4,
+        stuck_detection=False,
+    )
+    conversation.send_message("initial request")
+
+    first_step_finished = asyncio.Event()
+    release_first_step = asyncio.Event()
+    second_step_seen = asyncio.Event()
+    second_step_statuses: list[ConversationExecutionStatus] = []
+    prompts_seen: list[str] = []
+
+    def user_text(event: MessageEvent | None) -> str:
+        assert event is not None
+        content = event.llm_message.content[0]
+        assert isinstance(content, TextContent)
+        return content.text
+
+    async def blocking_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,
+    ) -> None:
+        prompts_seen.append(user_text(prompt_message))
+        if len(prompts_seen) == 1:
+            conv.state.execution_status = ConversationExecutionStatus.FINISHED
+            first_step_finished.set()
+            await release_first_step.wait()
+        else:
+            second_step_statuses.append(conv.state.execution_status)
+            conv.state.execution_status = ConversationExecutionStatus.FINISHED
+            second_step_seen.set()
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=blocking_astep),
+    ):
+        run_task = asyncio.create_task(conversation.arun())
+        await asyncio.wait_for(first_step_finished.wait(), timeout=1.0)
+        await asyncio.to_thread(conversation.send_message, "intervening request")
+        assert conversation.state.execution_status == ConversationExecutionStatus.IDLE
+        release_first_step.set()
+        await asyncio.wait_for(second_step_seen.wait(), timeout=1.0)
+        await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert prompts_seen == ["initial request", "intervening request"]
+    assert second_step_statuses == [ConversationExecutionStatus.RUNNING]

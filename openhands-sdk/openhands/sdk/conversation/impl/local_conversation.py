@@ -1070,11 +1070,13 @@ class LocalConversation(BaseConversation):
                 )
                 with self._state:
                     iteration += 1
-                    if (
-                        self._state.execution_status
-                        == ConversationExecutionStatus.FINISHED
-                        and self._state.last_user_message_id is not None
+                    acp_user_message_changed = (
+                        self._state.last_user_message_id is not None
                         and self._state.last_user_message_id != acp_step_user_message_id
+                    )
+                    if acp_user_message_changed and self._state.execution_status in (
+                        ConversationExecutionStatus.FINISHED,
+                        ConversationExecutionStatus.IDLE,
                     ):
                         logger.info(
                             "User message arrived during ACP step; continuing run"
