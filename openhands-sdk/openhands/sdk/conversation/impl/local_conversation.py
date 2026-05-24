@@ -635,6 +635,7 @@ class LocalConversation(BaseConversation):
             for llm in list(self.agent.get_all_llms()):
                 if llm.usage_id not in registered:
                     self.llm_registry.add(llm)
+                    registered.add(llm.usage_id)
 
             self._agent_ready = True
 

@@ -306,3 +306,63 @@ def test_llm_registry_does_not_reset_metrics_for_independent_llms():
     # llm2 should have its own independent metrics
     assert llm2.metrics is not llm1.metrics
     assert llm2.metrics.accumulated_cost == 0.0
+
+
+def test_conversation_handles_duplicate_usage_id_llms():
+    """Test conversation gracefully handles multiple LLM objects with same usage_id.
+
+    This regression test verifies the fix for:
+    ValueError: Usage ID 'default' already exists in registry
+
+    The bug occurred when an agent had both its own LLM and a condenser with a
+    separate LLM object (different Python objects but same usage_id='default').
+    The _ensure_agent_ready method would try to add both to the registry, and
+    the second add would fail.
+
+    The fix ensures we track newly-added usage_ids during the loop to skip
+    duplicates.
+    """
+    import tempfile
+
+    from pydantic import SecretStr
+
+    from openhands.sdk.agent import Agent
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+    from openhands.sdk.conversation import Conversation
+
+    # Create two separate LLM objects with the same default usage_id
+    agent_llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        # usage_id defaults to "default"
+    )
+    condenser_llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        # usage_id defaults to "default" - same as agent_llm
+    )
+
+    # Verify they are different objects with the same usage_id
+    assert id(agent_llm) != id(condenser_llm)
+    assert agent_llm.usage_id == condenser_llm.usage_id == "default"
+
+    # Create condenser with its own LLM
+    condenser = LLMSummarizingCondenser(llm=condenser_llm, max_size=100)
+    agent = Agent(llm=agent_llm, condenser=condenser, tools=[])
+
+    # Verify agent has two LLM objects with the same usage_id
+    llms = list(agent.get_all_llms())
+    assert len(llms) == 2
+    assert llms[0].usage_id == llms[1].usage_id == "default"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create conversation - this should not raise ValueError
+        convo = Conversation(agent=agent, workspace=tmpdir, persistence_dir=tmpdir)
+
+        # Trigger _ensure_agent_ready by sending a message
+        # This previously raised: ValueError: Usage ID 'default' already exists
+        convo.send_message("Hello")
+
+        # Verify only one LLM was registered (first one wins)
+        assert "default" in convo.llm_registry.list_usage_ids()
+        assert len(convo.llm_registry.list_usage_ids()) == 1
