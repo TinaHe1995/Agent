@@ -740,7 +740,7 @@ jobs:
               env:
                   BUILD_SUMMARY_JSON: ${{ needs.consolidate-build-info.outputs.build_summary }}
               run: |
-                  echo "Event: $GITHUB_EVENT_NAME"
+                  echo "Event: ${{ github.event_name }}"
                   echo "PR number: ${{ github.event.number }}"
                   echo "Run attempt: ${{ github.run_attempt }}"
 
