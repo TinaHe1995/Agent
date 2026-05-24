@@ -223,21 +223,20 @@ async def test_acp_arun_accepts_user_message_while_step_is_in_flight(tmp_path):
     second_step_seen = asyncio.Event()
     prompts_seen: list[str] = []
 
-    def latest_user_text(conv: LocalConversation) -> str:
-        for event in reversed(list(conv.state.events)):
-            if isinstance(event, MessageEvent) and event.source == "user":
-                content = event.llm_message.content[0]
-                assert isinstance(content, TextContent)
-                return content.text
-        raise AssertionError("expected at least one user message")
+    def user_text(event: MessageEvent | None) -> str:
+        assert event is not None
+        content = event.llm_message.content[0]
+        assert isinstance(content, TextContent)
+        return content.text
 
     async def blocking_astep(
         self,  # noqa: ARG001
-        conv: LocalConversation,
+        conv: LocalConversation,  # noqa: ARG001
         on_event: ConversationCallbackType,  # noqa: ARG001
         on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,
     ) -> None:
-        prompts_seen.append(latest_user_text(conv))
+        prompts_seen.append(user_text(prompt_message))
         if len(prompts_seen) == 1:
             first_step_started.set()
             await release_first_step.wait()
