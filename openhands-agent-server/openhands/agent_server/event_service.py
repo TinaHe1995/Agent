@@ -636,31 +636,42 @@ class EventService:
             "enabled" if streaming_enabled else "disabled (no LLM has stream=True)",
         )
 
-        def _token_streaming_callback(chunk: LLMStreamChunk) -> None:
+        def _publish_stream_delta(
+            content: str | None = None,
+            reasoning_content: str | None = None,
+        ) -> None:
             # Published directly to _pub_sub (not via _callback_wrapper) so
             # deltas reach subscribers but are NOT persisted to
             # ConversationState.events. See StreamingDeltaEvent docstring.
             if not self._main_loop or not self._main_loop.is_running():
                 return
+            # Use `is not None` rather than truthiness: some providers
+            # emit legitimate empty-string chunks at stream boundaries
+            # (e.g. after a tool call) that we still want to forward.
+            if content is None and reasoning_content is None:
+                return
+            event = StreamingDeltaEvent(
+                content=content,
+                reasoning_content=reasoning_content,
+            )
+            with suppress(RuntimeError):
+                asyncio.run_coroutine_threadsafe(self._pub_sub(event), self._main_loop)
+
+        def _token_streaming_callback(chunk: LLMStreamChunk | str) -> None:
+            if isinstance(chunk, str):
+                _publish_stream_delta(content=chunk)
+                return
+
             for choice in chunk.choices or ():
                 delta = choice.delta
                 if delta is None:
                     continue
                 content = getattr(delta, "content", None)
                 reasoning = getattr(delta, "reasoning_content", None)
-                # Use `is not None` rather than truthiness: some providers
-                # emit legitimate empty-string chunks at stream boundaries
-                # (e.g. after a tool call) that we still want to forward.
-                if content is None and reasoning is None:
-                    continue
-                event = StreamingDeltaEvent(
+                _publish_stream_delta(
                     content=content if isinstance(content, str) else None,
                     reasoning_content=reasoning if isinstance(reasoning, str) else None,
                 )
-                with suppress(RuntimeError):
-                    asyncio.run_coroutine_threadsafe(
-                        self._pub_sub(event), self._main_loop
-                    )
 
         conversation = LocalConversation(
             agent=agent,

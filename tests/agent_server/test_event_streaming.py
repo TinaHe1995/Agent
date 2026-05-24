@@ -243,6 +243,40 @@ async def test_acp_agents_wire_token_callback_without_llm_streaming(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_string_token_callback_publishes_delta(tmp_path):
+    """ACPAgent invokes token callbacks with plain text chunks."""
+    service = EventService(
+        stored=StoredConversation(
+            id=uuid4(),
+            agent=ACPAgent(acp_command=["echo", "test"]),
+            workspace=LocalWorkspace(working_dir=str(tmp_path / "workspace")),
+        ),
+        conversations_dir=tmp_path / "conversations",
+    )
+    collector = _CollectorSubscriber()
+    service._pub_sub.subscribe(collector)
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+
+    with _mock_local_conversation() as MockConv:
+        mock_conv = MagicMock()
+        mock_conv.state = MagicMock(execution_status="idle")
+        mock_conv._state = MagicMock()
+        mock_conv._on_event = MagicMock()
+        MockConv.return_value = mock_conv
+
+        await service.start()
+        callback = MockConv.call_args.kwargs["token_callbacks"][0]
+
+    callback("ACP live text")
+    await asyncio.sleep(0.05)
+
+    delta_events = [e for e in collector.events if isinstance(e, StreamingDeltaEvent)]
+    assert len(delta_events) == 1
+    assert delta_events[0].content == "ACP live text"
+    assert delta_events[0].reasoning_content is None
+
+
+@pytest.mark.asyncio
 async def test_multiple_chunks_produce_multiple_events(event_service, tmp_path):
     collector = _CollectorSubscriber()
     event_service._pub_sub.subscribe(collector)
