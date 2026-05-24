@@ -115,7 +115,7 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         description="LLM configuration for the agent.",
         examples=[
             {
-                "model": "litellm_proxy/anthropic/claude-sonnet-4-5-20250929",
+                "model": "litellm_proxy/openai/gpt-5.5",
                 "base_url": "https://llm-proxy.eval.all-hands.dev",
                 "api_key": "your_api_key_here",
             }
@@ -373,7 +373,7 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
             {
                 "kind": "LLMSummarizingCondenser",
                 "llm": {
-                    "model": "litellm_proxy/anthropic/claude-sonnet-4-5-20250929",
+                    "model": "litellm_proxy/openai/gpt-5.5",
                     "base_url": "https://llm-proxy.eval.all-hands.dev",
                     "api_key": "your_api_key_here",
                 },
@@ -609,6 +609,24 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
 
         NOTE: state will be mutated in-place.
         """
+
+    async def astep(
+        self,
+        conversation: LocalConversation,
+        on_event: ConversationCallbackType,
+        on_token: ConversationTokenCallbackType | None = None,
+    ) -> None:
+        """Async variant of :meth:`step`.
+
+        Default implementation runs the synchronous ``step()`` in a
+        thread via :func:`asyncio.loop.run_in_executor` so that
+        blocking tool I/O does not starve the event loop.
+        Subclasses that perform async LLM calls should override this.
+        """
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.step, conversation, on_event, on_token)
 
     def verify(
         self,
