@@ -557,17 +557,36 @@ _ADDITIVE_RESPONSE_BODY_ONEOF_IDS = frozenset(
 )
 
 
-# oasdiff rule IDs for additive enum-value additions in response schemas.
-# Adding a value to a response enum is additive evolution for extensible APIs
-# (e.g. a new hook type / discriminator value): clients MUST tolerate unknown
-# values and skip/ignore them, the same contract that makes additive oneOf/anyOf
-# expansion safe above. We downgrade these to informational notices.
-_ADDITIVE_RESPONSE_ENUM_IDS = frozenset(
+# oasdiff rule IDs for enum-value additions in response schemas.
+_RESPONSE_ENUM_VALUE_ADDED_IDS = frozenset(
     {
         "response-property-enum-value-added",
         "response-write-only-property-enum-value-added",
     }
 )
+
+# Response properties that are known extensible discriminated-union discriminators
+# and may therefore grow new enum values additively. Adding a HookType value
+# (e.g. "agent") to a hook definition's `type` is safe because hook configs are an
+# extensible union and clients must tolerate unknown discriminator values. This is
+# intentionally scoped to the hook discriminator so an ordinary new response enum
+# value elsewhere (a new status/mode/etc.) is still treated as a breaking change.
+_EXTENSIBLE_DISCRIMINATOR_PROPERTY_RE = re.compile(
+    r"HookConfig\b.*\bhooks/items/type\b"
+)
+
+
+def _is_additive_discriminator_enum_value(change: dict) -> bool:
+    """Return True for additive enum values on a known extensible discriminator.
+
+    Adding a value to a response enum is normally breaking (generated clients may
+    treat the enum exhaustively), so this is scoped narrowly to the hook config
+    discriminator union rather than allowlisting every response enum addition.
+    """
+    if str(change.get("id", "")) not in _RESPONSE_ENUM_VALUE_ADDED_IDS:
+        return False
+    text = str(change.get("text", ""))
+    return bool(_EXTENSIBLE_DISCRIMINATOR_PROPERTY_RE.search(text))
 
 
 def _is_union_property_removal_artifact(change: dict) -> bool:
@@ -620,7 +639,7 @@ def _split_breaking_changes(
             continue
 
         if change_id in _ADDITIVE_RESPONSE_ONEOF_IDS or (
-            change_id in _ADDITIVE_RESPONSE_ENUM_IDS
+            _is_additive_discriminator_enum_value(change)
         ):
             additive_response_oneof.append(change)
             continue

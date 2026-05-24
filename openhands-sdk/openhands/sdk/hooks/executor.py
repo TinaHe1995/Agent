@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -162,6 +163,7 @@ class HookExecutor:
         working_dir: str | None = None,
         async_process_manager: AsyncProcessManager | None = None,
         llm: "LLM | None" = None,
+        llm_getter: "Callable[[], LLM | None] | None" = None,
         persistence_dir: str | None = None,
         visualizer: type[ConversationVisualizerBase]
         | ConversationVisualizerBase
@@ -170,10 +172,21 @@ class HookExecutor:
     ):
         self.working_dir = working_dir or os.getcwd()
         self.async_process_manager = async_process_manager or AsyncProcessManager()
-        self.llm = llm
+        self._llm = llm
+        # Prefer a getter so agent hooks always use the conversation's *current*
+        # LLM: switch_llm()/switch_profile() replace agent.llm after the executor
+        # is built, and a captured instance would go stale.
+        self._llm_getter = llm_getter
         self.persistence_dir = persistence_dir
         self.visualizer = visualizer
         self.conversation_stats = conversation_stats
+
+    @property
+    def llm(self) -> "LLM | None":
+        """The LLM agent hooks should use, resolved live when a getter is set."""
+        if self._llm_getter is not None:
+            return self._llm_getter()
+        return self._llm
 
     def _fall_open(
         self,
@@ -211,14 +224,16 @@ class HookExecutor:
             else event.event_type.value
         )
 
-        if self.llm is None:
+        # Resolve the active conversation LLM once (a getter may rebuild it).
+        llm = self.llm
+        if llm is None:
             logger.warning(
                 f"Agent hook has no LLM configured for event '{event_type}'"
                 " — defaulting to allow"
             )
             return self._fall_open("No LLM configured for agent hook")
 
-        hook_llm = self.llm.model_copy(
+        hook_llm = llm.model_copy(
             update={
                 "usage_id": f"agent-hook:{hook.name or 'default'}",
                 "timeout": hook.timeout,

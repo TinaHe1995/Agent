@@ -393,6 +393,7 @@ def create_hook_callback(
     original_callback: Any = None,
     emit_hook_events: bool = True,
     llm: "LLM | None" = None,
+    llm_getter: "Callable[[], LLM | None] | None" = None,
     persistence_dir: str | None = None,
     visualizer: type[ConversationVisualizerBase]
     | ConversationVisualizerBase
@@ -409,6 +410,8 @@ def create_hook_callback(
         emit_hook_events: If True, emit HookExecutionEvent for each hook execution.
             Defaults to True for full observability.
         llm: LLM instance inherited from the parent conversation, used by agent hooks.
+        llm_getter: Callable returning the conversation's current LLM. Preferred
+            over ``llm`` so agent hooks follow switch_llm()/switch_profile().
         persistence_dir: Directory used to persist agent hook sub-conversation events.
         visualizer: Visualizer instance passed to agent hook sub-conversations.
         conversation_stats: Parent conversation stats that should include hook spend.
@@ -421,6 +424,7 @@ def create_hook_callback(
         working_dir=working_dir,
         session_id=session_id,
         llm=llm,
+        llm_getter=llm_getter,
         persistence_dir=persistence_dir,
         visualizer=visualizer,
         conversation_stats=conversation_stats,

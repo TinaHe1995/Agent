@@ -667,9 +667,20 @@ def test_split_breaking_changes_separates_three_buckets():
             "text": "added body anyOf member",
         },
         {
+            # Additive value on the hook discriminator union -> downgraded.
             "id": "response-property-enum-value-added",
             "details": {},
-            "text": "added the new `agent` enum value to the `type` response property",
+            "text": (
+                "added the new `agent` enum value to the "
+                "`hook_config/anyOf[subschema #1: HookConfig]/stop/items/"
+                "hooks/items/type` response property for the response status `200`"
+            ),
+        },
+        {
+            # Enum value on an ordinary (non-discriminator) property -> breaking.
+            "id": "response-property-enum-value-added",
+            "details": {},
+            "text": "added the new `archived` enum value to the `status` response property",
         },
         {
             "id": "response-property-removed",
@@ -695,8 +706,20 @@ def test_split_breaking_changes_separates_three_buckets():
         "response-body-any-of-added",
         "response-property-enum-value-added",
     }
-    assert len(other) == 1
-    assert other[0]["id"] == "response-body-changed"
+    # The hook-discriminator enum addition is downgraded; the unrelated `status`
+    # enum addition and the body change remain breaking.
+    assert {
+        change["text"] for change in additive_oneof if "enum value" in change["text"]
+    } == {
+        "added the new `agent` enum value to the "
+        "`hook_config/anyOf[subschema #1: HookConfig]/stop/items/"
+        "hooks/items/type` response property for the response status `200`"
+    }
+    assert {change["id"] for change in other} == {
+        "response-property-enum-value-added",
+        "response-body-changed",
+    }
+    assert any("`status`" in change["text"] for change in other)
 
 
 def test_main_passes_when_only_additive_oneof(monkeypatch, capsys):

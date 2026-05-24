@@ -570,7 +570,9 @@ class LocalConversation(BaseConversation):
                 working_dir=str(self.workspace.working_dir),
                 session_id=str(self._state.id),
                 original_callback=self._base_callback,
-                llm=self.agent.llm,
+                # Resolve lazily: switch_llm()/switch_profile() rebind self.agent,
+                # so agent hooks must read the current LLM at execution time.
+                llm_getter=lambda: self.agent.llm,
                 persistence_dir=hook_persistence_dir,
                 visualizer=self._visualizer,
                 conversation_stats=self._state.stats,

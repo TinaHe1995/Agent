@@ -717,6 +717,41 @@ class TestAgentHookExecution:
         assert hook_llm.usage_id == "agent-hook:default"
         assert hook_llm.metrics is not parent_metrics
 
+    def test_llm_getter_is_resolved_live(self, tmp_path, sample_event):
+        """An llm_getter is read at execution time, so agent hooks follow
+        switch_llm()/switch_profile() instead of using a stale captured LLM."""
+        current = {
+            "llm": LLM(model="gpt-4o", api_key=SecretStr("k1"), usage_id="first")
+        }
+        executor = HookExecutor(
+            working_dir=str(tmp_path),
+            llm_getter=lambda: current["llm"],
+        )
+
+        # Simulate switch_llm(): the conversation rebinds its agent's LLM.
+        current["llm"] = LLM(
+            model="gpt-5.5", api_key=SecretStr("k2"), usage_id="second"
+        )
+
+        captured_llm = {}
+
+        def capture_agent_init(**kwargs):
+            captured_llm["llm"] = kwargs.get("llm")
+            return MagicMock()
+
+        with (
+            patch(self._AGENT_PATH, side_effect=capture_agent_init),
+            patch(self._CONV_PATH, side_effect=RuntimeError("stop early")),
+        ):
+            executor._execute_agent_hook(
+                HookDefinition(type=HookType.AGENT), sample_event
+            )
+
+        hook_llm = captured_llm.get("llm")
+        assert hook_llm is not None
+        # Copied from the *current* LLM (gpt-5.5), not the one present at init.
+        assert hook_llm.model == "gpt-5.5"
+
     def test_hook_metrics_are_merged_into_parent_stats(
         self, tmp_path, mock_llm, sample_event
     ):
