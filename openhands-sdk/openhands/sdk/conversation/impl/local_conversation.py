@@ -1095,9 +1095,12 @@ class LocalConversation(BaseConversation):
                     iteration += 1
                     if acp_step_user_message_id is not None:
                         last_acp_prompt_user_message_id = acp_step_user_message_id
-                        self._state.agent_state["acp_last_prompt_user_message_id"] = (
-                            acp_step_user_message_id
-                        )
+                        self._state.agent_state = {
+                            **self._state.agent_state,
+                            "acp_last_prompt_user_message_id": (
+                                acp_step_user_message_id
+                            ),
+                        }
 
                     if self._state.execution_status in (
                         ConversationExecutionStatus.ERROR,
