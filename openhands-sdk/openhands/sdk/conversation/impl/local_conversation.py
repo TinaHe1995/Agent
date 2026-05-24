@@ -957,6 +957,7 @@ class LocalConversation(BaseConversation):
             while True:
                 logger.debug(f"Conversation arun iteration {iteration}")
                 acp_step_user_message_id: str | None = None
+                acp_step_user_message: MessageEvent | None = None
                 with self._state:
                     if self._state.execution_status in [
                         ConversationExecutionStatus.PAUSED,
@@ -1009,6 +1010,15 @@ class LocalConversation(BaseConversation):
 
                     if isinstance(self.agent, ACPAgent):
                         acp_step_user_message_id = self._state.last_user_message_id
+                        acp_step_user_message = next(
+                            (
+                                event
+                                for event in reversed(self._state.events)
+                                if isinstance(event, MessageEvent)
+                                and event.source == "user"
+                            ),
+                            None,
+                        )
                     else:
                         await self.agent.astep(
                             self,
@@ -1056,6 +1066,7 @@ class LocalConversation(BaseConversation):
                     self,
                     on_event=self._on_event_with_state_lock,
                     on_token=self._on_token,
+                    prompt_message=acp_step_user_message,
                 )
                 with self._state:
                     iteration += 1

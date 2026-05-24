@@ -94,6 +94,13 @@ _USAGE_UPDATE_TIMEOUT: float = float(os.environ.get("ACP_USAGE_UPDATE_TIMEOUT", 
 # These errors can occur when the connection drops mid-conversation but the
 # session state is still valid on the server side.
 _ACP_PROMPT_MAX_RETRIES: int = int(os.environ.get("ACP_PROMPT_MAX_RETRIES", "3"))
+
+# After a timeout/cancellation, wait briefly for the ACP prompt task to react
+# to session/cancel before rewiring callbacks for the next turn.
+_ACP_CANCEL_DRAIN_TIMEOUT: float = float(
+    os.environ.get("ACP_CANCEL_DRAIN_TIMEOUT", "2.0")
+)
+
 _ACP_PROMPT_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)  # seconds
 
 # Exception types that indicate transient connection issues worth retrying
@@ -1283,6 +1290,39 @@ class ACPAgent(AgentBase):
                     exc_info=True,
                 )
 
+    async def _arequest_session_cancel(self) -> None:
+        """Async variant of _request_session_cancel that waits for cancel send."""
+        if self._conn is None or self._executor is None or self._session_id is None:
+            return
+        session_id = self._session_id
+
+        async def _cancel() -> None:
+            result = self._conn.cancel(session_id)
+            if inspect.isawaitable(result):
+                await result
+
+        try:
+            future = self._executor.portal.start_task_soon(_cancel)
+            await asyncio.wrap_future(future)
+        except Exception:
+            logger.warning("Failed to send ACP session cancel", exc_info=True)
+
+    async def _drain_cancelled_prompt(self, future: Any | None) -> None:
+        """Let a cancelled/timed-out portal prompt quiesce before rewiring."""
+        if future is None or future.done():
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)),
+                timeout=_ACP_CANCEL_DRAIN_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            if future.cancelled():
+                return
+            raise
+        except Exception:
+            return
+
     def _request_session_cancel(self) -> None:
         """Ask the ACP server to cancel the active session prompt."""
         if self._conn is None or self._executor is None or self._session_id is None:
@@ -1641,6 +1681,7 @@ class ACPAgent(AgentBase):
         conversation: LocalConversation,
         on_event: ConversationCallbackType,
         on_token: ConversationTokenCallbackType | None = None,
+        prompt_message: MessageEvent | None = None,
     ) -> None:
         """Native-async variant of :meth:`step`.
 
@@ -1672,11 +1713,14 @@ class ACPAgent(AgentBase):
         state = conversation.state
 
         prompt_blocks: list[Any] | None = None
-        for event in reversed(list(state.events)):
-            if isinstance(event, MessageEvent) and event.source == "user":
-                prompt_blocks = self._build_acp_prompt(event)
-                if prompt_blocks:
-                    break
+        if prompt_message is not None:
+            prompt_blocks = self._build_acp_prompt(prompt_message)
+        else:
+            for event in reversed(list(state.events)):
+                if isinstance(event, MessageEvent) and event.source == "user":
+                    prompt_blocks = self._build_acp_prompt(event)
+                    if prompt_blocks:
+                        break
         if prompt_blocks is None:
             logger.warning("No user message found; finishing conversation")
             state.execution_status = ConversationExecutionStatus.FINISHED
@@ -1685,6 +1729,7 @@ class ACPAgent(AgentBase):
         self._reset_client_for_turn(on_token, on_event)
 
         t0 = time.monotonic()
+        prompt_future: Any | None = None
         try:
             logger.info(
                 "Sending ACP prompt (timeout=%.0fs, blocks=%d, async)",
@@ -1699,17 +1744,16 @@ class ACPAgent(AgentBase):
                 try:
                     # Schedule the ACP prompt on the portal loop (where the
                     # connection lives); await the future back on the caller
-                    # loop.  On timeout ``asyncio.wait_for`` cancels the
-                    # caller-side asyncio future; the portal task may run to
-                    # completion in the background (anyio starts it
-                    # immediately on ``start_task_soon`` and
-                    # ``concurrent.futures.Future.cancel()`` returns ``False``
-                    # for an already-running task), but
-                    # ``_clear_turn_callbacks()`` in ``finally`` ensures any
-                    # trailing ``session_update`` from that task is a no-op.
-                    future = portal.start_task_soon(self._do_acp_prompt, prompt_blocks)
+                    # loop.  Shield the portal task from wait_for timeout so
+                    # the timeout/cancellation handlers can send session/cancel
+                    # and briefly drain the task before the next turn rewires
+                    # callbacks.
+                    prompt_future = portal.start_task_soon(
+                        self._do_acp_prompt,
+                        prompt_blocks,
+                    )
                     response = await asyncio.wait_for(
-                        asyncio.wrap_future(future),
+                        asyncio.shield(asyncio.wrap_future(prompt_future)),
                         timeout=self.acp_prompt_timeout,
                     )
                     break
@@ -1773,14 +1817,17 @@ class ACPAgent(AgentBase):
             # before cancellation stays live in the event log forever
             # (``LocalConversation._emit_orphaned_action_errors`` only patches
             # ``ActionEvent``s, not ``ACPToolCallEvent``s).  Cancel-emit on
-            # the caller thread while callbacks are still wired, then re-raise
-            # so ``arun()`` can transition to PAUSED.
-            self._request_session_cancel()
+            # the caller thread while callbacks are still wired, then wait
+            # briefly for the portal prompt to observe the session/cancel
+            # before allowing the next turn to rewire shared accumulators.
+            await self._arequest_session_cancel()
             self._cancel_inflight_tool_calls()
+            await self._drain_cancelled_prompt(prompt_future)
             raise
         except TimeoutError:
-            self._request_session_cancel()
+            await self._arequest_session_cancel()
             self._emit_turn_timeout(time.monotonic() - t0, state, on_event)
+            await self._drain_cancelled_prompt(prompt_future)
         except Exception as e:
             self._emit_turn_error(e, state, on_event)
             raise
