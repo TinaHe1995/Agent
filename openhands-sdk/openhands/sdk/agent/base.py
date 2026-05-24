@@ -306,31 +306,43 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
 
     @model_validator(mode="after")
     def _validate_unique_llm_usage_ids(self) -> AgentBase:
-        """Validate that all LLMs reachable from this agent have unique usage_ids.
+        """Validate that LLMs with the same usage_id have the same configuration.
 
-        This prevents confusing behavior where multiple LLMs with the same usage_id
-        (e.g., agent LLM and condenser LLM both using 'default') would result in
-        only one being registered for metrics tracking.
+        When multiple LLM references share a usage_id, they must have identical
+        settings. This commonly happens when:
+        1. An LLM object is intentionally shared (e.g., agent and condenser use
+           the same LLM) - this is fine, they're the same object
+        2. An agent is deserialized from JSON, creating separate LLM objects from
+           what was originally a shared reference - this is fine if configs match
+        3. Different LLMs are created with the same usage_id but different settings
+           (e.g., different models) - this is an error
+
+        Only case 3 raises an error, as silently using one LLM config while
+        ignoring another would be confusing.
         """
         usage_id_to_llms: dict[str, list[LLM]] = {}
         for llm in self.get_all_llms():
             usage_id_to_llms.setdefault(llm.usage_id, []).append(llm)
 
-        duplicates = {
-            uid: llms for uid, llms in usage_id_to_llms.items() if len(llms) > 1
-        }
-        if duplicates:
-            details = []
-            for usage_id, llms in duplicates.items():
-                models = ", ".join(llm.model for llm in llms)
-                details.append(f"usage_id='{usage_id}' used by: {models}")
-            raise ValueError(
-                f"Multiple LLMs share the same usage_id. Each LLM must have a "
-                f"unique usage_id for proper metrics tracking. Duplicates found: "
-                f"{'; '.join(details)}. Set distinct usage_id values, e.g.: "
-                f"LLM(model='gpt-4o', usage_id='agent'), "
-                f"LLM(model='gpt-4o-mini', usage_id='condenser')"
-            )
+        # Check for conflicting LLM configurations with the same usage_id
+        for usage_id, llms in usage_id_to_llms.items():
+            if len(llms) <= 1:
+                continue
+
+            # Compare LLM configs (excluding usage_id itself)
+            # Use model_dump with redaction to compare functional equivalence
+            first_config = llms[0].model_dump(exclude={"usage_id"})
+            for other_llm in llms[1:]:
+                other_config = other_llm.model_dump(exclude={"usage_id"})
+                if first_config != other_config:
+                    raise ValueError(
+                        f"Multiple LLMs share usage_id='{usage_id}' but have "
+                        f"different configurations. This would cause one LLM's "
+                        f"settings to be silently ignored. Set distinct usage_id "
+                        f"values for LLMs with different configs, e.g.: "
+                        f"LLM(model='gpt-4o', usage_id='agent'), "
+                        f"LLM(model='gpt-4o-mini', usage_id='condenser')"
+                    )
         return self
 
     @model_serializer(mode="wrap")

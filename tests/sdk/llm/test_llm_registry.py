@@ -308,19 +308,15 @@ def test_llm_registry_does_not_reset_metrics_for_independent_llms():
     assert llm2.metrics.accumulated_cost == 0.0
 
 
-def test_agent_rejects_duplicate_usage_id_llms():
-    """Test agent validation rejects duplicate usage_ids at construction time.
+def test_agent_rejects_conflicting_usage_id_llms():
+    """Test agent validation rejects LLMs with same usage_id but different configs.
 
-    When an agent has multiple LLMs with the same usage_id (e.g., both the agent
-    LLM and condenser LLM using 'default'), validation should fail with a clear
+    When an agent has multiple LLMs with the same usage_id but different
+    configurations (e.g., different models), validation should fail with a clear
     error message guiding the user to set distinct usage_id values.
 
-    This is the proper fix for:
-    ValueError: Usage ID 'default' already exists in registry
-
-    Rather than silently skipping duplicates during registration (which could
-    cause confusion if the LLMs have different settings), we now catch this
-    at agent construction time.
+    This catches the dangerous case where silently using one LLM config while
+    ignoring another would lead to unexpected behavior.
     """
     import pytest
     from pydantic import SecretStr
@@ -328,7 +324,7 @@ def test_agent_rejects_duplicate_usage_id_llms():
     from openhands.sdk.agent import Agent
     from openhands.sdk.context.condenser import LLMSummarizingCondenser
 
-    # Create two separate LLM objects with the same default usage_id
+    # Create two separate LLM objects with the same usage_id but different models
     agent_llm = LLM(
         model="gpt-4o",
         api_key=SecretStr("test-key"),
@@ -352,10 +348,76 @@ def test_agent_rejects_duplicate_usage_id_llms():
         Agent(llm=agent_llm, condenser=condenser, tools=[])
 
     error_msg = str(exc_info.value)
-    assert "Multiple LLMs share the same usage_id" in error_msg
     assert "usage_id='default'" in error_msg
-    assert "gpt-4o" in error_msg
-    assert "gpt-4o-mini" in error_msg
+    assert "different configurations" in error_msg
+
+
+def test_agent_accepts_shared_llm_with_same_usage_id():
+    """Test agent accepts when the same LLM is shared (e.g., with condenser).
+
+    When an agent shares the same LLM object between itself and its condenser,
+    this should work fine since they're the same object.
+    """
+    from pydantic import SecretStr
+
+    from openhands.sdk.agent import Agent
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+
+    # Create a single LLM object shared between agent and condenser
+    shared_llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+    )
+
+    # Create condenser sharing the agent's LLM
+    condenser = LLMSummarizingCondenser(llm=shared_llm, max_size=100)
+
+    # Agent construction should succeed
+    agent = Agent(llm=shared_llm, condenser=condenser, tools=[])
+
+    # Verify only one LLM is discoverable (deduped by object identity)
+    llms = list(agent.get_all_llms())
+    assert len(llms) == 1
+    assert llms[0] is shared_llm
+
+
+def test_agent_accepts_duplicate_llms_with_identical_config():
+    """Test agent accepts multiple LLMs with same usage_id if configs match.
+
+    When an agent is deserialized from JSON, Pydantic creates separate LLM
+    objects even if they were originally the same object. As long as their
+    configurations match, this should not raise an error.
+    """
+    from pydantic import SecretStr
+
+    from openhands.sdk.agent import Agent
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+
+    # Simulate what happens during deserialization: two separate objects
+    # with identical configs
+    agent_llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="shared",
+    )
+    condenser_llm = LLM(
+        model="gpt-4o",  # Same model
+        api_key=SecretStr("test-key"),  # Same key
+        usage_id="shared",  # Same usage_id
+    )
+
+    # Verify they are different objects
+    assert id(agent_llm) != id(condenser_llm)
+
+    # Create condenser with its own LLM
+    condenser = LLMSummarizingCondenser(llm=condenser_llm, max_size=100)
+
+    # Agent construction should succeed since configs match
+    agent = Agent(llm=agent_llm, condenser=condenser, tools=[])
+
+    # Verify both LLMs are discoverable (not deduped since different objects)
+    llms = list(agent.get_all_llms())
+    assert len(llms) == 2
 
 
 def test_agent_accepts_distinct_usage_id_llms():
