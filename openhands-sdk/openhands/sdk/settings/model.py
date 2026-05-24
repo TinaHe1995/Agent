@@ -890,6 +890,7 @@ class OpenHandsAgentSettings(AgentSettingsBase):
         from openhands.sdk.context.condenser import LLMSummarizingCondenser
 
         condenser_llm = llm.model_copy(update={"usage_id": "condenser"})
+        condenser_llm.reset_metrics()
         return LLMSummarizingCondenser(
             llm=condenser_llm, max_size=self.condenser.max_size
         )

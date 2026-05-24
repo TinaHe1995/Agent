@@ -474,6 +474,7 @@ def test_llm_create_agent_serializes_typed_mcp_config_compactly() -> None:
 
 def test_llm_create_agent_builds_condenser_when_enabled() -> None:
     llm = LLM(model="test-model", usage_id="agent")
+    agent_metrics = llm.metrics
     settings = OpenHandsAgentSettings(
         llm=llm,
         condenser=CondenserSettings(enabled=True, max_size=100),
@@ -486,6 +487,7 @@ def test_llm_create_agent_builds_condenser_when_enabled() -> None:
     assert agent.condenser.llm is not llm
     assert agent.condenser.llm.model == llm.model
     assert agent.condenser.llm.usage_id == "condenser"
+    assert agent.condenser.llm.metrics is not agent_metrics
 
 
 def test_llm_create_agent_no_condenser_when_disabled() -> None:
