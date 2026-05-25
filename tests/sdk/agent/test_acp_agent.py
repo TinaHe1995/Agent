@@ -1568,7 +1568,8 @@ class TestACPAgentAstep:
                 caller_loop.call_soon_threadsafe(prompt_entered.set)
                 # Block until cancellation releases the prompt, exercising
                 # prompt quiescing without leaving a long-running portal task.
-                await asyncio.to_thread(prompt_released.wait)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
                 return None
 
             async def _fake_cancel(session_id):

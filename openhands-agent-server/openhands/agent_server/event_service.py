@@ -845,8 +845,9 @@ class EventService:
                     # the message and we are FINISHED here, so the guard avoids a
                     # redundant run. A deliberate run=False append, or an IDLE
                     # reached via another path, never sets the flag.
-                    if self._rerun_requested:
-                        self._rerun_requested = False
+                    rerun_requested = self._rerun_requested
+                    self._rerun_requested = False
+                    if rerun_requested:
                         status = await self._get_execution_status()
                         should_restart = status == ConversationExecutionStatus.IDLE or (
                             status == ConversationExecutionStatus.PAUSED
