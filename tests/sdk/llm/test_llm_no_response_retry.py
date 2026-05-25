@@ -369,8 +369,8 @@ def test_responses_stream_path_retry_bumps_temperature(mock_responses) -> None:
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         num_retries=2,
-        retry_min_wait=1,
-        retry_max_wait=2,
+        retry_min_wait=0,
+        retry_max_wait=0,
         temperature=0.0,
         stream=True,
     )
@@ -435,8 +435,8 @@ async def test_async_aresponses_stream_path_retry_bumps_temperature(
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         num_retries=2,
-        retry_min_wait=1,
-        retry_max_wait=2,
+        retry_min_wait=0,
+        retry_max_wait=0,
         temperature=0.0,
         stream=True,
     )
