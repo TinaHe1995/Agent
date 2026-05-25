@@ -7,6 +7,10 @@ from pydantic import SecretStr
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation import Conversation, LocalConversation
+from openhands.sdk.conversation.impl.local_conversation import (
+    ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID,
+    ACP_LAST_PROMPT_USER_MESSAGE_ID,
+)
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -435,7 +439,7 @@ async def test_acp_arun_does_not_reprompt_when_cursor_is_current(tmp_path):
     )
     conversation.send_message("already processed")
     conversation.state.agent_state = {
-        "acp_last_prompt_user_message_id": conversation.state.last_user_message_id
+        ACP_LAST_PROMPT_USER_MESSAGE_ID: conversation.state.last_user_message_id
     }
 
     prompts_seen: list[MessageEvent | None] = []
@@ -457,6 +461,49 @@ async def test_acp_arun_does_not_reprompt_when_cursor_is_current(tmp_path):
 
     assert prompts_seen == []
     assert conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+
+
+@pytest.mark.asyncio
+async def test_acp_arun_does_not_commit_cursor_on_explicit_interrupt(tmp_path):
+    """Explicit interruption should leave the in-flight ACP prompt retryable."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=3,
+        stuck_detection=False,
+    )
+    conversation.send_message("cancel me")
+    first_message_id = conversation.state.last_user_message_id
+
+    prompt_started = asyncio.Event()
+
+    async def blocking_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,  # noqa: ARG001
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,  # noqa: ARG001
+    ) -> None:
+        prompt_started.set()
+        await asyncio.Event().wait()
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=blocking_astep),
+    ):
+        task = asyncio.create_task(conversation.arun())
+        await asyncio.wait_for(prompt_started.wait(), timeout=1.0)
+        conversation.interrupt()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert conversation.state.execution_status == ConversationExecutionStatus.PAUSED
+    assert (
+        conversation.state.agent_state.get(ACP_LAST_PROMPT_USER_MESSAGE_ID)
+        != first_message_id
+    )
+    assert ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID not in conversation.state.agent_state
 
 
 @pytest.mark.asyncio

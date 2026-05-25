@@ -1937,8 +1937,19 @@ class ACPAgent(AgentBase):
             # the terminal synthetic failures.
             await self._arequest_session_cancel()
             drain_result = await self._drain_cancelled_prompt(prompt_future)
-            self._cancel_inflight_tool_calls()
-            if not drain_result.drained or drain_result.completed:
+            with state:
+                elapsed = time.monotonic() - t0
+                if drain_result.completed and drain_result.error is None:
+                    self._finalize_successful_turn(
+                        drain_result.response, elapsed, state, on_event
+                    )
+                    return
+                if drain_result.completed and drain_result.error is not None:
+                    self._emit_turn_error(drain_result.error, state, on_event)
+                    self._restart_session_on_next_turn = True
+                    return
+                self._cancel_inflight_tool_calls()
+            if not drain_result.drained:
                 self._restart_session_on_next_turn = True
             raise
         except TimeoutError:

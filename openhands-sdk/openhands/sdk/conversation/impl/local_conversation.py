@@ -72,6 +72,10 @@ from openhands.sdk.workspace import LocalWorkspace
 
 logger = get_logger(__name__)
 
+ACP_LAST_PROMPT_USER_MESSAGE_ID = "acp_last_prompt_user_message_id"
+ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID = "acp_inflight_prompt_user_message_id"
+ACP_SUPERSEDE_INFLIGHT_PROMPT = "acp_supersede_inflight_prompt"
+
 
 class LocalConversation(BaseConversation):
     agent: AgentBase
@@ -954,7 +958,7 @@ class LocalConversation(BaseConversation):
 
         iteration = 0
         last_acp_prompt_user_message_id = self._state.agent_state.get(
-            "acp_last_prompt_user_message_id"
+            ACP_LAST_PROMPT_USER_MESSAGE_ID
         )
         try:
             while True:
@@ -1094,10 +1098,9 @@ class LocalConversation(BaseConversation):
 
                 with self._state:
                     if acp_step_user_message_id is not None:
-                        last_acp_prompt_user_message_id = acp_step_user_message_id
                         self._state.agent_state = {
                             **self._state.agent_state,
-                            "acp_last_prompt_user_message_id": (
+                            ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID: (
                                 acp_step_user_message_id
                             ),
                         }
@@ -1110,6 +1113,27 @@ class LocalConversation(BaseConversation):
                 )
                 with self._state:
                     iteration += 1
+                    agent_state = dict(self._state.agent_state)
+                    if (
+                        agent_state.get(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID)
+                        == acp_step_user_message_id
+                    ):
+                        agent_state.pop(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID, None)
+                    agent_state.pop(ACP_SUPERSEDE_INFLIGHT_PROMPT, None)
+                    if (
+                        acp_step_user_message_id is not None
+                        and self._state.execution_status
+                        not in (
+                            ConversationExecutionStatus.ERROR,
+                            ConversationExecutionStatus.STUCK,
+                            ConversationExecutionStatus.PAUSED,
+                        )
+                    ):
+                        last_acp_prompt_user_message_id = acp_step_user_message_id
+                        agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
+                            acp_step_user_message_id
+                        )
+                    self._state.agent_state = agent_state
 
                     if self._state.execution_status in (
                         ConversationExecutionStatus.ERROR,
@@ -1177,6 +1201,22 @@ class LocalConversation(BaseConversation):
             # PAUSED so the conversation can be resumed later.
             logger.info("arun() interrupted via task cancellation")
             with self._state:
+                agent_state = dict(self._state.agent_state)
+                inflight_prompt_user_message_id = agent_state.pop(
+                    ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID, None
+                )
+                superseded_by_new_message = bool(
+                    agent_state.pop(ACP_SUPERSEDE_INFLIGHT_PROMPT, False)
+                )
+                if (
+                    superseded_by_new_message
+                    and inflight_prompt_user_message_id is not None
+                ):
+                    agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
+                        inflight_prompt_user_message_id
+                    )
+                self._state.agent_state = agent_state
+
                 # Emit synthetic error observations for any ActionEvents
                 # that were in-flight when the interrupt landed.  Without
                 # these the LLM history would contain tool-call requests
@@ -1188,6 +1228,10 @@ class LocalConversation(BaseConversation):
                 self._on_event(InterruptEvent())
         except Exception as e:
             with self._state:
+                agent_state = dict(self._state.agent_state)
+                agent_state.pop(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID, None)
+                agent_state.pop(ACP_SUPERSEDE_INFLIGHT_PROMPT, None)
+                self._state.agent_state = agent_state
                 self._state.execution_status = ConversationExecutionStatus.ERROR
                 self._on_event(
                     ConversationErrorEvent(

@@ -20,7 +20,11 @@ from openhands.agent_server.pub_sub import PubSub, Subscriber
 from openhands.sdk import LLM, AgentBase, Event, Message, get_logger
 from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+from openhands.sdk.conversation.impl.local_conversation import (
+    ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID,
+    ACP_SUPERSEDE_INFLIGHT_PROMPT,
+    LocalConversation,
+)
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 from openhands.sdk.conversation.secret_registry import SecretValue
 from openhands.sdk.conversation.state import (
@@ -72,6 +76,10 @@ class EventService:
     # Set when a send_message(run=True) is rejected because a run is still
     # wrapping up; consumed by _run_and_publish to re-run the stranded message.
     _rerun_requested: bool = field(default=False, init=False)
+    # Set only for the internal ACP interrupt/restart path triggered by a new
+    # send_message(run=True). Explicit user pause/interrupt clears it so user
+    # stop intent wins over an earlier automatic restart request.
+    _acp_internal_rerun_requested: bool = field(default=False, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
     _lease: ConversationLease | None = field(default=None, init=False)
@@ -423,10 +431,18 @@ class EventService:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
-            if await self._should_interrupt_running_acp_turn():
-                await self.interrupt()
+            should_interrupt_acp, active_acp_prompt_has_latest_message = (
+                await self._running_acp_turn_state()
+            )
+            interrupted_acp = False
+            if should_interrupt_acp:
+                await self._mark_acp_inflight_prompt_superseded()
+                self._acp_internal_rerun_requested = True
+                interrupted_acp = True
+                await self.interrupt(internal_acp_rerun=True)
             try:
                 await self.run()
+                self._acp_internal_rerun_requested = False
             except ValueError as e:
                 # run() refused. If a run is still wrapping up (its
                 # wait_for_pending tail), the message we just appended won't be
@@ -436,17 +452,64 @@ class EventService:
                 # is what keeps a deliberate run=False append, or an IDLE reached
                 # via another path, from triggering an unwanted run.
                 # "inactive_service" is terminal and must not re-arm.
-                if str(e) == "conversation_already_running":
+                if (
+                    str(e) == "conversation_already_running"
+                    and not active_acp_prompt_has_latest_message
+                ):
                     self._rerun_requested = True
+                    if interrupted_acp:
+                        self._acp_internal_rerun_requested = True
 
-    async def _should_interrupt_running_acp_turn(self) -> bool:
+    def _running_acp_turn_state_sync(self) -> tuple[bool, bool]:
+        """Return whether an active ACP run should be interrupted.
+
+        The tuple is ``(should_interrupt, active_prompt_has_latest_message)``.
+        If the running ACP prompt has already advanced to the newly appended
+        user message, interrupting it would cancel the replacement prompt and
+        strand that message behind the persisted cursor.
+        """
         if not self._conversation:
-            return False
+            return (False, False)
         if self._run_task is None or self._run_task.done():
-            return False
+            return (False, False)
         if not isinstance(self._conversation.agent, ACPAgent):
-            return False
-        return await self._get_execution_status() == ConversationExecutionStatus.RUNNING
+            return (False, False)
+        with self._conversation._state as state:
+            if state.execution_status != ConversationExecutionStatus.RUNNING:
+                return (False, False)
+            inflight_prompt_user_message_id = state.agent_state.get(
+                ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID
+            )
+            last_user_message_id = state.last_user_message_id
+            if (
+                inflight_prompt_user_message_id is None
+                or last_user_message_id is None
+            ):
+                return (False, False)
+            active_prompt_has_latest_message = (
+                inflight_prompt_user_message_id == last_user_message_id
+            )
+            return (
+                not active_prompt_has_latest_message,
+                active_prompt_has_latest_message,
+            )
+
+    async def _running_acp_turn_state(self) -> tuple[bool, bool]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._running_acp_turn_state_sync)
+
+    def _mark_acp_inflight_prompt_superseded_sync(self) -> None:
+        if not self._conversation:
+            return
+        with self._conversation._state as state:
+            state.agent_state = {
+                **state.agent_state,
+                ACP_SUPERSEDE_INFLIGHT_PROMPT: True,
+            }
+
+    async def _mark_acp_inflight_prompt_superseded(self) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._mark_acp_inflight_prompt_superseded_sync)
 
     async def subscribe_to_events(self, subscriber: Subscriber[Event]) -> UUID:
         subscriber_id = self._pub_sub.subscribe(subscriber)
@@ -839,19 +902,30 @@ class EventService:
                     # the wait_for_pending() tail above had its run() rejected as
                     # "conversation_already_running" and suppressed, setting
                     # _rerun_requested. Honor it while the conversation is IDLE
-                    # (pending input) or ACP-interrupted PAUSED (the old task
-                    # finished its interrupt before the replacement run could
-                    # start). If the run loop was still alive it already absorbed
-                    # the message and we are FINISHED here, so the guard avoids a
-                    # redundant run. A deliberate run=False append, or an IDLE
-                    # reached via another path, never sets the flag.
+                    # (pending input) or internally ACP-interrupted PAUSED (the
+                    # old task finished its interrupt before the replacement run
+                    # could start). Explicit user pause/interrupt clears the
+                    # internal ACP flag, so user stop intent wins over an older
+                    # automatic restart request. If the run loop was still alive
+                    # it already absorbed the message and we are FINISHED here,
+                    # so the guard avoids a redundant run. A deliberate
+                    # run=False append, or an IDLE reached via another path,
+                    # never sets the flag.
                     rerun_requested = self._rerun_requested
+                    acp_internal_rerun_requested = (
+                        self._acp_internal_rerun_requested
+                    )
                     self._rerun_requested = False
+                    self._acp_internal_rerun_requested = False
                     if rerun_requested:
                         status = await self._get_execution_status()
-                        should_restart = status == ConversationExecutionStatus.IDLE or (
-                            status == ConversationExecutionStatus.PAUSED
-                            and isinstance(conversation.agent, ACPAgent)
+                        should_restart = (
+                            status == ConversationExecutionStatus.IDLE
+                            or (
+                                acp_internal_rerun_requested
+                                and status == ConversationExecutionStatus.PAUSED
+                                and isinstance(conversation.agent, ACPAgent)
+                            )
                         )
                         if should_restart:
                             try:
@@ -859,6 +933,9 @@ class EventService:
                             except ValueError as e:
                                 if str(e) == "conversation_already_running":
                                     self._rerun_requested = True
+                                    self._acp_internal_rerun_requested = (
+                                        acp_internal_rerun_requested
+                                    )
                                 else:
                                     raise
 
@@ -891,12 +968,14 @@ class EventService:
 
     async def pause(self):
         if self._conversation:
+            self._rerun_requested = False
+            self._acp_internal_rerun_requested = False
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._conversation.pause)
             # Publish state update after pause to ensure stats are updated
             await self._publish_state_update()
 
-    async def interrupt(self):
+    async def interrupt(self, *, internal_acp_rerun: bool = False):
         """Immediately cancel an in-flight async LLM call.
 
         Delegates to :meth:`LocalConversation.interrupt` which cancels the
@@ -904,6 +983,9 @@ class EventService:
         back to :meth:`pause`.
         """
         if self._conversation:
+            if not internal_acp_rerun:
+                self._rerun_requested = False
+                self._acp_internal_rerun_requested = False
             self._conversation.interrupt()
             # Wait for the run task to finish so we can publish the final
             # state update (PAUSED + InterruptEvent) cleanly.

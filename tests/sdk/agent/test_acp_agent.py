@@ -1642,8 +1642,9 @@ class TestACPAgentAstep:
                 # Signal caller loop that we're holding inside the prompt
                 # so the cancel races deterministically.
                 caller_loop.call_soon_threadsafe(prompt_entered.set)
-                # Block until cancellation releases the prompt, exercising
-                # prompt quiescing without leaving a long-running portal task.
+                # Block beyond the cancel-drain timeout so this test exercises
+                # the non-quiesced cancellation path that must synthesize
+                # failed ACP tool-call events.
                 released = await asyncio.to_thread(prompt_released.wait, 10.0)
                 assert released
                 return None
@@ -1651,7 +1652,6 @@ class TestACPAgentAstep:
             async def _fake_cancel(session_id):
                 assert session_id == "test-session"
                 caller_loop.call_soon_threadsafe(cancel_called.set)
-                prompt_released.set()
 
             agent._conn.prompt = _fake_prompt
             agent._conn.cancel = _fake_cancel
@@ -1664,7 +1664,11 @@ class TestACPAgentAstep:
             task.cancel()
             try:
                 with pytest.raises(asyncio.CancelledError):
-                    await task
+                    with patch(
+                        "openhands.sdk.agent.acp_agent._ACP_CANCEL_DRAIN_TIMEOUT",
+                        0.01,
+                    ):
+                        await task
                 await asyncio.wait_for(cancel_called.wait(), timeout=5.0)
             finally:
                 prompt_released.set()
@@ -1687,6 +1691,81 @@ class TestACPAgentAstep:
             f"got: {[(type(e).__name__, getattr(e, 'status', None)) for e in emitted]}"
         )
         assert failed_tool_events[0].is_error is True
+
+    def test_astep_finalizes_prompt_that_completes_during_cancellation(self, tmp_path):
+        """If a cancelled ACP prompt drains successfully, keep the completed turn.
+
+        The ACP server may finish the prompt while ``session/cancel`` is being
+        delivered. In that case the remote session has accepted the assistant
+        turn, so OpenHands must finalize the same turn locally instead of
+        discarding the response and later resuming from diverged session history.
+        """
+        from acp.schema import AgentMessageChunk, TextContentBlock
+
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            cancel_called = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                await mock_client.session_update(
+                    session_id,
+                    AgentMessageChunk(
+                        session_update="agent_message_chunk",
+                        content=TextContentBlock(type="text", text="done"),
+                    ),
+                )
+                return None
+
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+                caller_loop.call_soon_threadsafe(cancel_called.set)
+                prompt_released.set()
+
+            agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
+            agent._session_id = "test-session"
+
+            task = asyncio.create_task(
+                agent.astep(conversation, on_event=emitted.append)
+            )
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+            task.cancel()
+            await task
+            await asyncio.wait_for(cancel_called.wait(), timeout=5.0)
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancel())
+        finally:
+            executor.close()
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+        assert any(
+            isinstance(e, ActionEvent)
+            and isinstance(e.action, FinishAction)
+            and e.action.message == "done"
+            for e in emitted
+        )
 
     def test_astep_cancellation_does_not_mark_suffix_installed(self, tmp_path):
         """Cancellation before a turn completes must leave
@@ -1724,11 +1803,12 @@ class TestACPAgentAstep:
 
             async def _fake_prompt(prompt_blocks, session_id):
                 caller_loop.call_soon_threadsafe(prompt_entered.set)
-                await asyncio.to_thread(prompt_released.wait)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
                 return None
 
             async def _fake_cancel(session_id):
-                prompt_released.set()
+                assert session_id == "test-session"
 
             agent._conn.prompt = _fake_prompt
             agent._conn.cancel = _fake_cancel
@@ -1741,7 +1821,11 @@ class TestACPAgentAstep:
             task.cancel()
             try:
                 with pytest.raises(asyncio.CancelledError):
-                    await task
+                    with patch(
+                        "openhands.sdk.agent.acp_agent._ACP_CANCEL_DRAIN_TIMEOUT",
+                        0.01,
+                    ):
+                        await task
             finally:
                 prompt_released.set()
 

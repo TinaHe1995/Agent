@@ -25,7 +25,10 @@ from openhands.agent_server.pub_sub import Subscriber
 from openhands.sdk import LLM, Agent, Conversation, Message
 from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.fifo_lock import FIFOLock
-from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+from openhands.sdk.conversation.impl.local_conversation import (
+    ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID,
+    LocalConversation,
+)
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -898,6 +901,70 @@ class TestEventServiceSendMessage:
                         await asyncio.wait_for(event_service._run_task, timeout=1.0)
 
         assert prompts_seen == ["initial request", "intervening"]
+
+    @pytest.mark.asyncio
+    async def test_send_message_with_run_true_does_not_interrupt_current_acp_prompt(
+        self, event_service, tmp_path
+    ):
+        """Do not cancel the ACP prompt if it already advanced to the new message."""
+        agent = ACPAgent(acp_command=["echo", "test"])
+        conversation = LocalConversation(
+            agent=agent,
+            workspace=str(tmp_path),
+            max_iteration_per_run=4,
+            stuck_detection=False,
+        )
+        conversation.send_message("initial request")
+        conversation.state.execution_status = ConversationExecutionStatus.RUNNING
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+
+        release_run = asyncio.Event()
+        event_service._run_task = asyncio.create_task(release_run.wait())
+        original_send_message = conversation.send_message
+
+        def send_and_mark_active_prompt(message):
+            original_send_message(message)
+            conversation.state.execution_status = ConversationExecutionStatus.RUNNING
+            conversation.state.agent_state = {
+                **conversation.state.agent_state,
+                ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID: (
+                    conversation.state.last_user_message_id
+                ),
+            }
+
+        conversation.send_message = send_and_mark_active_prompt  # type: ignore[method-assign]
+        conversation.interrupt = MagicMock()  # type: ignore[method-assign]
+
+        try:
+            await event_service.send_message(
+                Message(role="user", content=[TextContent(text="intervening")]),
+                run=True,
+            )
+        finally:
+            release_run.set()
+            await event_service._run_task
+            event_service._run_task = None
+
+        conversation.interrupt.assert_not_called()
+        assert event_service._rerun_requested is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_interrupt_clears_internal_acp_rerun_request(
+        self, event_service
+    ):
+        """A later explicit stop should win over an earlier internal ACP rerun."""
+        conversation = MagicMock()
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+        event_service._rerun_requested = True
+        event_service._acp_internal_rerun_requested = True
+
+        await event_service.interrupt()
+
+        conversation.interrupt.assert_called_once()
+        assert event_service._rerun_requested is False
+        assert event_service._acp_internal_rerun_requested is False
 
     @pytest.mark.asyncio
     async def test_send_message_with_run_true_logs_exception(self, event_service):
