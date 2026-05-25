@@ -1092,14 +1092,7 @@ class LocalConversation(BaseConversation):
                         )
                     break
 
-                await self.agent.astep(
-                    self,
-                    on_event=self._on_event_with_state_lock,
-                    on_token=self._on_token,
-                    prompt_message=acp_step_user_message,
-                )
                 with self._state:
-                    iteration += 1
                     if acp_step_user_message_id is not None:
                         last_acp_prompt_user_message_id = acp_step_user_message_id
                         self._state.agent_state = {
@@ -1108,6 +1101,15 @@ class LocalConversation(BaseConversation):
                                 acp_step_user_message_id
                             ),
                         }
+
+                await self.agent.astep(
+                    self,
+                    on_event=self._on_event_with_state_lock,
+                    on_token=self._on_token,
+                    prompt_message=acp_step_user_message,
+                )
+                with self._state:
+                    iteration += 1
 
                     if self._state.execution_status in (
                         ConversationExecutionStatus.ERROR,

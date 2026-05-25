@@ -1647,6 +1647,8 @@ class ACPAgent(AgentBase):
         FIFOLock held by anyone — without unwiring, a stale ``on_event``
         there would race with other threads mutating ``state.events``).
         """
+        if self._client is None:
+            return
         self._client.on_event = None
         self._client.on_token = None
         self._client.on_activity = None
