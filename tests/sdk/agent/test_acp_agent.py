@@ -3766,6 +3766,34 @@ class TestACPSessionIdPersistence:
         conn.new_session.assert_not_awaited()
         assert agent._session_id == "stored-sess"
 
+    def test_cancel_drain_restart_preserves_session_id_for_resume(self, tmp_path):
+        """A cancelled-prompt drain timeout restarts the subprocess, but should
+        still load the persisted ACP session so the server keeps conversation
+        memory.
+        """
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules.")
+        )
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "stored-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_suffix_installed": True,
+        }
+        conn = self._make_conn()
+
+        with self._transport_patches(conn):
+            agent._restart_session_after_drain_timeout(state, on_event=lambda _: None)
+
+        conn.load_session.assert_awaited_once()
+        conn.new_session.assert_not_awaited()
+        assert agent._session_id == "stored-sess"
+        assert state.agent_state["acp_session_id"] == "stored-sess"
+        assert state.agent_state["acp_session_cwd"] == str(tmp_path)
+        assert state.agent_state["acp_suffix_installed"] is True
+        assert agent._suffix_install_state == "installed"
+
     def test_load_session_failure_falls_back_to_new_session(self, tmp_path):
         """ACPRequestError on load_session → new_session is called."""
         agent = _make_agent()
@@ -3877,6 +3905,35 @@ class TestACPSessionIdPersistence:
         conn.new_session.assert_awaited_once()
         assert state.agent_state["acp_session_id"] == "replacement-sess"
         assert state.agent_state["acp_session_cwd"] == str(tmp_path)
+
+    def test_fallback_replacement_clears_suffix_marker(self, tmp_path):
+        """If load_session fails, the replacement session has not seen any
+        suffix yet, even if the stale session had persisted the marker.
+        """
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules.")
+        )
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "stale-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_suffix_installed": True,
+        }
+        conn = self._make_conn(
+            new_session_id="replacement-sess",
+            load_exc=ACPRequestError(-32602, "unknown session"),
+        )
+
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        conn.load_session.assert_awaited_once()
+        conn.new_session.assert_awaited_once()
+        assert state.agent_state["acp_session_id"] == "replacement-sess"
+        assert state.agent_state["acp_session_cwd"] == str(tmp_path)
+        assert state.agent_state.get("acp_suffix_installed") is not True
+        assert agent._suffix_install_state == "pending_first_prompt"
 
     def test_resume_path_still_applies_session_mode_and_model(self, tmp_path):
         """load_session must be followed by the same set_session_model and

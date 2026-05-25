@@ -769,6 +769,7 @@ class ACPAgent(AgentBase):
     _suffix_install_state: str = PrivateAttr(default="unused")
     _installed_suffix: str | None = PrivateAttr(default=None)
     _restart_session_on_next_turn: bool = PrivateAttr(default=False)
+    _resumed_existing_session: bool = PrivateAttr(default=False)
 
     # -- Helpers -----------------------------------------------------------
 
@@ -932,6 +933,10 @@ class ACPAgent(AgentBase):
         # will re-inject the suffix on the first turn after upgrade, which
         # is benign — the suffix is additive LLM-context guidance.
         suffix_already_installed = bool(state.agent_state.get("acp_suffix_installed"))
+        # Tests that patch out _start_acp_server rely on this best-effort
+        # initial value. The real start path overwrites it with whether
+        # load_session actually succeeded.
+        self._resumed_existing_session = bool(state.agent_state.get("acp_session_id"))
 
         try:
             self._start_acp_server(state)
@@ -952,17 +957,22 @@ class ACPAgent(AgentBase):
         # in a different working directory would at best silently miss the
         # prior session and at worst load a different session that happens to
         # exist at the new cwd.
-        state.agent_state = {
+        updated_agent_state = {
             **state.agent_state,
             "acp_agent_name": self._agent_name,
             "acp_agent_version": self._agent_version,
             "acp_session_id": self._session_id,
             "acp_session_cwd": self._working_dir,
         }
+        if not self._resumed_existing_session:
+            updated_agent_state.pop("acp_suffix_installed", None)
+        state.agent_state = updated_agent_state
 
         if self._installed_suffix:
             self._suffix_install_state = (
-                "installed" if suffix_already_installed else "pending_first_prompt"
+                "installed"
+                if suffix_already_installed and self._resumed_existing_session
+                else "pending_first_prompt"
             )
 
         # Emit a placeholder system prompt so the visualizer shows a section
@@ -1086,7 +1096,9 @@ class ACPAgent(AgentBase):
             )
             prior_session_id = None
 
-        async def _init() -> tuple[Any, Any, Any, str, str, str]:
+        self._resumed_existing_session = False
+
+        async def _init() -> tuple[Any, Any, Any, str, str, str, bool]:
             # Spawn the subprocess directly so we can install a
             # filtering reader that skips non-JSON-RPC lines some
             # ACP servers (e.g. claude-code-acp v0.1.x) write to
@@ -1169,6 +1181,7 @@ class ACPAgent(AgentBase):
             # subprocess crash) propagate — there is no working connection to
             # fall back on, and the outer init_state handler cleans up.
             session_id: str | None = None
+            resumed_existing_session = False
             if prior_session_id is not None:
                 try:
                     await conn.load_session(
@@ -1177,6 +1190,7 @@ class ACPAgent(AgentBase):
                         mcp_servers=[],
                     )
                     session_id = prior_session_id
+                    resumed_existing_session = True
                     logger.info(
                         "Resumed ACP session: %s (cwd=%s)",
                         session_id,
@@ -1215,7 +1229,15 @@ class ACPAgent(AgentBase):
                 logger.info("Setting ACP session mode: %s", mode_id)
                 await conn.set_session_mode(mode_id=mode_id, session_id=session_id)
 
-            return conn, process, filtered_reader, session_id, agent_name, agent_version
+            return (
+                conn,
+                process,
+                filtered_reader,
+                session_id,
+                agent_name,
+                agent_version,
+                resumed_existing_session,
+            )
 
         result = self._executor.run_async(_init)
         (
@@ -1225,6 +1247,7 @@ class ACPAgent(AgentBase):
             self._session_id,
             self._agent_name,
             self._agent_version,
+            self._resumed_existing_session,
         ) = result
         self._working_dir = working_dir
 
@@ -1349,11 +1372,10 @@ class ACPAgent(AgentBase):
         logger.warning("Restarting ACP session after cancelled prompt drain timeout")
         self._cleanup()
         self._initialized = False
-        state.agent_state = {
-            key: value
-            for key, value in state.agent_state.items()
-            if key not in {"acp_session_id", "acp_session_cwd", "acp_suffix_installed"}
-        }
+        # A local drain timeout means the cancelled prompt did not quiesce
+        # within our short grace window; it does not prove the ACP server lost
+        # its persisted session. Preserve the session id so the restarted
+        # subprocess can load_session() and retain conversation memory.
         self._restart_session_on_next_turn = False
         self.init_state(state, on_event=on_event)
 
