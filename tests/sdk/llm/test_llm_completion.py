@@ -829,3 +829,56 @@ def test_llm_streaming_preserves_cache_read_tokens(mock_completion):
 
 # This file focuses on LLM completion functionality, configuration options,
 # and metrics tracking for the synchronous LLM implementation
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_completion_retries_without_caching_on_prompt_cache_too_small(
+    mock_completion,
+):
+    """When Vertex AI rejects caching due to small content, retry without cache."""
+    from litellm.exceptions import BadRequestError
+
+    # First call raises the "cache too small" error, second succeeds
+    cache_error = BadRequestError(
+        (
+            "Vertex_aiException BadRequestError - "
+            '{"error":{"code":400,'
+            '"message":"The cached content is of 1171 tokens. '
+            'The minimum token count to start caching is 4096.",'
+            '"status":"INVALID_ARGUMENT"}}'
+        ),
+        model="gemini-3.5-flash",
+        llm_provider="vertex_ai",
+    )
+    mock_response = create_mock_response("Retry succeeded")
+    mock_completion.side_effect = [cache_error, mock_response]
+
+    llm = LLM(
+        model="claude-sonnet-4-20250514",
+        api_key=SecretStr("test_key"),
+        usage_id="test-llm",
+        caching_prompt=True,
+        num_retries=2,
+        retry_min_wait=1,
+        retry_max_wait=2,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+    response = llm.completion(messages=messages)
+
+    # Should succeed after retry without caching
+    assert response.raw_response == mock_response
+    # Two calls: first with cache (fails), second without cache (succeeds)
+    assert mock_completion.call_count == 2
+
+    # The second call should NOT have cache_control markers
+    second_call_args = mock_completion.call_args_list[1]
+    second_messages = second_call_args[0][0] if second_call_args[0] else []
+    has_cache_control = any(
+        "cache_control" in str(block)
+        for msg in second_messages
+        for block in (
+            msg.get("content", []) if isinstance(msg.get("content"), list) else []
+        )
+    )
+    assert not has_cache_control, "Retry should not include cache_control markers"

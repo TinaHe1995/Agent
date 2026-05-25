@@ -80,6 +80,7 @@ from litellm.utils import (
 from openhands.sdk.llm.exceptions import (
     LLMContextWindowTooSmallError,
     LLMNoResponseError,
+    is_prompt_cache_too_small,
     map_provider_exception,
 )
 
@@ -874,6 +875,22 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 message=message, metrics=metrics_snapshot, raw_response=resp
             )
         except Exception as e:
+            # If the prompt cache content is too small for the provider's
+            # minimum token threshold (e.g., Vertex AI requires ≥4096 tokens),
+            # retry without prompt caching markers.
+            if is_prompt_cache_too_small(e) and self.is_caching_prompt_active():
+                logger.warning(
+                    "Prompt cache content too small for provider minimum, "
+                    "retrying without prompt caching"
+                )
+                no_cache_llm = self.model_copy(update={"caching_prompt": False})
+                return no_cache_llm.completion(
+                    messages,
+                    tools,
+                    _return_metrics,
+                    add_security_risk_prediction,
+                    on_token,
+                )
             return self._handle_error(
                 e,
                 lambda fb: fb.completion(
@@ -1096,6 +1113,24 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 message=message, metrics=metrics_snapshot, raw_response=resp
             )
         except Exception as e:
+            # If the prompt cache content is too small for the provider's
+            # minimum token threshold (e.g., Vertex AI requires ≥4096 tokens),
+            # retry without prompt caching markers.
+            if is_prompt_cache_too_small(e) and self.is_caching_prompt_active():
+                logger.warning(
+                    "Prompt cache content too small for provider minimum, "
+                    "retrying without prompt caching"
+                )
+                no_cache_llm = self.model_copy(update={"caching_prompt": False})
+                return no_cache_llm.responses(
+                    messages,
+                    tools,
+                    include,
+                    store,
+                    _return_metrics,
+                    add_security_risk_prediction,
+                    on_token,
+                )
             return self._handle_error(
                 e,
                 lambda fb: fb.responses(
