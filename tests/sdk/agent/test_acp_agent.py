@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
+from acp.schema import (
+    AgentMessageChunk,
+    TextContentBlock,
+    ToolCallProgress,
+    ToolCallStart,
+)
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
@@ -1513,6 +1519,81 @@ class TestACPAgentAstep:
             f"expected one ConversationErrorEvent, got {emitted}"
         )
         assert conversation.state.execution_status == ConversationExecutionStatus.ERROR
+
+    def test_astep_extends_timeout_while_tool_call_is_inflight(self, tmp_path):
+        """A long-running ACP tool call should not trip prompt timeout.
+
+        Commands like `git` can legitimately run longer than
+        ``acp_prompt_timeout`` while the ACP subprocess still has an active
+        tool call. The timeout should guard idle/wedged prompts, not active
+        tools.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent(acp_prompt_timeout=0.05)
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+        agent._session_id = "test-session"
+
+        async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+            await mock_client.session_update(
+                session_id,
+                ToolCallStart(
+                    session_update="tool_call",
+                    tool_call_id="git-1",
+                    title="git status",
+                    kind="execute",
+                    status="in_progress",
+                ),
+            )
+            await asyncio.sleep(0.08)
+            await mock_client.session_update(
+                session_id,
+                ToolCallProgress(
+                    session_update="tool_call_update",
+                    tool_call_id="git-1",
+                    status="completed",
+                    raw_output="ok",
+                ),
+            )
+            await mock_client.session_update(
+                session_id,
+                AgentMessageChunk(
+                    session_update="agent_message_chunk",
+                    content=TextContentBlock(type="text", text="done"),
+                ),
+            )
+            return None
+
+        agent._conn.prompt = _fake_prompt
+
+        executor = AsyncExecutor()
+        try:
+            agent._executor = executor
+            asyncio.run(agent.astep(conversation, on_event=emitted.append))
+        finally:
+            executor.close()
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+        assert any(
+            isinstance(e, ACPToolCallEvent)
+            and e.tool_call_id == "git-1"
+            and e.status == "completed"
+            for e in emitted
+        )
+        assert any(
+            isinstance(e, ActionEvent)
+            and isinstance(e.action, FinishAction)
+            and e.action.message == "done"
+            for e in emitted
+        )
 
     def test_astep_emits_failed_tool_calls_on_cancellation(self, tmp_path):
         """``asyncio.CancelledError`` during astep must close in-flight
