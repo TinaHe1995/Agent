@@ -669,4 +669,3 @@ def test_amber_vector_3542_config():
     assert model["display_name"] == "Amber Vector 3542"
     assert model["llm_config"]["model"] == "litellm_proxy/amber-vector-3542"
     assert model["llm_config"]["temperature"] == 0.0
-    assert model["llm_config"]["reasoning_effort"] == "high"

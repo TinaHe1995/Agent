@@ -343,7 +343,6 @@ MODELS = {
         "llm_config": {
             "model": "litellm_proxy/amber-vector-3542",
             "temperature": 0.0,
-            "reasoning_effort": "high",
         },
     },
 }
