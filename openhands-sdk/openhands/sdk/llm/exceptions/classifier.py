@@ -33,6 +33,8 @@ LONG_PROMPT_PATTERNS: list[str] = [
 # into condensation-based recovery.
 MALFORMED_HISTORY_PATTERNS: list[str] = [
     "tool_use ids were found without `tool_result` blocks immediately after",
+    # Anthropic backtick variant
+    "`tool_use` ids were found without `tool_result` blocks immediately after",
     (
         "each `tool_use` block must have a corresponding `tool_result` block "
         "in the next message"
