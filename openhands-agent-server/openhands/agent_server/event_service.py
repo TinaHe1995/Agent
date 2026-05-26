@@ -914,7 +914,7 @@ class EventService:
             None, self._conversation.set_security_analyzer, security_analyzer
         )
 
-    async def switch_acp_model(self, model: str):
+    async def switch_acp_model(self, model: str) -> None:
         """Switch the model on a running ACP conversation.
 
         Runs the (blocking) protocol-level ``session/set_model`` round-trip in
@@ -968,8 +968,10 @@ class EventService:
             except asyncio.CancelledError:
                 # Let the in-flight switch settle (the worker thread can't be
                 # cancelled) so meta.json is mirrored, but don't let a failure
-                # of the switch itself mask the cancellation — suppress any
-                # task exception and always propagate CancelledError.
+                # of the switch itself mask the cancellation. suppress(Exception)
+                # swallows only the task's own error — CancelledError is a
+                # BaseException, not an Exception, so it is never suppressed —
+                # then we always re-raise it.
                 with suppress(Exception):
                     await task
                 raise

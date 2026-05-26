@@ -235,6 +235,7 @@ async def _reapply_session_model_on_resume(
     agent_name: str,
     session_id: str,
     acp_model: str | None,
+    timeout: float,
 ) -> None:
     """Reapply the persisted model to a *resumed* session.
 
@@ -253,10 +254,19 @@ async def _reapply_session_model_on_resume(
     resume it needs this call to honour the persisted model rather than the
     server default.
 
-    A server that doesn't actually support the call rejects it; that rejection
-    is swallowed (logged) here — like the ``load_session`` fallback — so a
-    stale-capability server can't break resume. The session simply keeps the
-    server default until the next explicit switch.
+    Error handling mirrors :meth:`ACPAgent.set_acp_model`:
+
+    - The call is bounded by ``timeout`` (the agent's ``acp_prompt_timeout``) so
+      a server that hangs after reconnect cannot block session startup forever;
+      a ``TimeoutError`` propagates.
+    - A server-internal failure (JSON-RPC ``-32603``) propagates — silently
+      continuing on the wrong model while serialized state claims otherwise
+      would be worse than a loud startup failure.
+    - A client/protocol rejection (e.g. ``method-not-found`` on a server that
+      doesn't actually support the call, or an invalid persisted model id) is
+      swallowed and logged — like the ``load_session`` fallback — so a
+      stale-capability/stale-model server can't break resume. The session keeps
+      the server default until the next explicit switch.
     """
     if not acp_model:
         return
@@ -264,8 +274,13 @@ async def _reapply_session_model_on_resume(
     if provider is not None and not provider.supports_runtime_model_switch:
         return
     try:
-        await conn.set_session_model(model_id=acp_model, session_id=session_id)
+        await asyncio.wait_for(
+            conn.set_session_model(model_id=acp_model, session_id=session_id),
+            timeout=timeout,
+        )
     except ACPRequestError as e:
+        if e.code in _RETRIABLE_SERVER_ERROR_CODES:
+            raise
         logger.warning(
             "Could not reapply model %r on resumed session %s (%s); the live "
             "session may run on the server default until the next switch",
@@ -1260,6 +1275,7 @@ class ACPAgent(AgentBase):
                     agent_name,
                     session_id,
                     self.acp_model,
+                    self.acp_prompt_timeout,
                 )
 
             # Resolve the permission mode.  Known providers each have their
