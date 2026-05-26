@@ -3322,7 +3322,7 @@ class TestReapplySessionModelOnResume:
 
         conn = AsyncMock()
         conn.set_session_model = AsyncMock(side_effect=_hang)
-        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+        with pytest.raises(TimeoutError):
             await _reapply_session_model_on_resume(
                 conn, "codex-acp", "sess-1", "gpt-5.4/low", 0.01
             )
@@ -3365,6 +3365,12 @@ class TestSetACPModel:
         agent = self._wire(_make_agent(), "some-custom-acp")
         agent.set_acp_model("whatever")
         agent._conn.set_session_model.assert_called_once()
+
+    def test_rejects_empty_model(self):
+        agent = self._wire(_make_agent(), "codex-acp")
+        with pytest.raises(ValueError, match="non-empty"):
+            agent.set_acp_model("   ")
+        agent._conn.set_session_model.assert_not_called()
 
     def test_raises_before_session_initialized(self):
         agent = _make_agent()  # no _conn / _session_id / _executor

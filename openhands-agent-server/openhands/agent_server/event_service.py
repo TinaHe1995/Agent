@@ -44,6 +44,12 @@ from openhands.sdk.workspace import LocalWorkspace
 
 
 LEASE_RENEW_INTERVAL_SECONDS = 15.0
+# How long close() waits for an in-flight model switch to release its lock
+# before tearing the conversation down anyway. A switch is normally sub-second;
+# this only bounds the pathological wedged-server case so close() can't block
+# for the worker's full acp_prompt_timeout (default 30 min) while lease renewal
+# is already stopped.
+ACP_SWITCH_LOCK_CLOSE_TIMEOUT_SECONDS = 10.0
 # Bounds initial-state push so subscribe_to_events does not stall on a
 # subscriber whose __call__ blocks (e.g. WS with a full TCP send buffer).
 INITIAL_STATE_PUSH_TIMEOUT_SECONDS = 0.5
@@ -967,13 +973,22 @@ class EventService:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
                 # Let the in-flight switch settle (the worker thread can't be
-                # cancelled) so meta.json is mirrored, but don't let a failure
-                # of the switch itself mask the cancellation. suppress(Exception)
-                # swallows only the task's own error — CancelledError is a
-                # BaseException, not an Exception, so it is never suppressed —
-                # then we always re-raise it.
-                with suppress(Exception):
+                # cancelled) so meta.json is mirrored, but always re-raise the
+                # cancellation. CancelledError is a BaseException, so the
+                # except below only catches the task's own failure — which we
+                # log rather than swallow silently, so e.g. a meta.json write
+                # that fails after the live switch is visible (meta could be
+                # left at the old model while base_state.json has the new one)
+                # instead of disappearing — then we re-raise the cancel.
+                try:
                     await task
+                except Exception:
+                    logger.warning(
+                        "ACP model switch task failed while handling "
+                        "cancellation for conversation %s",
+                        self.stored.id,
+                        exc_info=True,
+                    )
                 raise
 
     async def close(self):
@@ -1010,15 +1025,34 @@ class EventService:
         await self._pub_sub.close()
         # Coordinate with in-flight model switches: switch_acp_model holds this
         # lock while its (shielded) worker applies the live switch and mirrors
-        # meta.json. Acquiring it here ensures we don't tear the conversation
-        # down from under an in-flight switch — which would leave the worker
-        # running against a closed ACP runtime and mirror meta.json for a
-        # session that has already been torn down.
-        async with self._acp_model_switch_lock:
+        # meta.json. Waiting for it here avoids tearing the conversation down
+        # from under an in-flight switch (which would leave the worker running
+        # against a closed ACP runtime and mirror meta.json for a torn-down
+        # session). The wait is bounded: a switch is normally sub-second, but a
+        # wedged server could otherwise hold the lock for the full
+        # acp_prompt_timeout while lease renewal is already stopped, so after
+        # the bound we proceed with teardown anyway.
+        switch_lock_held = False
+        try:
+            await asyncio.wait_for(
+                self._acp_model_switch_lock.acquire(),
+                timeout=ACP_SWITCH_LOCK_CLOSE_TIMEOUT_SECONDS,
+            )
+            switch_lock_held = True
+        except TimeoutError:
+            logger.warning(
+                "Tearing down conversation %s without the model-switch lock; "
+                "a switch may still be in flight",
+                self.stored.id,
+            )
+        try:
             if self._conversation:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._conversation.close)
                 self._conversation = None
+        finally:
+            if switch_lock_held:
+                self._acp_model_switch_lock.release()
 
         if self._lease is not None and self._lease_generation is not None:
             self._lease.release(self._lease_generation)

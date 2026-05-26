@@ -1929,21 +1929,27 @@ class ACPAgent(AgentBase):
         *same* session — no subprocess restart, no loss of conversation
         context. Verified against claude-agent-acp and codex-acp.
 
-        Thread-safety is the caller's responsibility: drive this through
-        :meth:`LocalConversation.switch_acp_model`, which holds the state lock
-        so the switch cannot race a running ``step()``.
+        This is the low-level agent primitive; prefer
+        :meth:`LocalConversation.switch_acp_model` as the entry point. That
+        wrapper (a) holds the state lock so the switch cannot race a running
+        ``step()``, and (b) persists the new value by swapping in an agent
+        ``model_copy`` — ``acp_model`` is frozen, so this method updates only
+        the live session and the sentinel ``llm.model``/metrics, **not**
+        ``self.acp_model``. A direct caller therefore leaves ``acp_model``
+        (which ``_record_usage`` reads for cost attribution) stale and the
+        switch unpersisted; go through ``switch_acp_model`` instead.
 
         Args:
             model: Provider-specific model id to switch to (e.g.
                 ``"claude-haiku-4-5-20251001"`` or ``"gpt-5.4/low"``).
 
         Raises:
+            ValueError: If ``model`` is empty or whitespace-only, if the
+                detected provider does not support runtime model switching, or
+                if the ACP server rejects the ``session/set_model`` call (e.g.
+                method-not-found on a custom server, or an invalid model id).
             RuntimeError: If the ACP session has not been initialized yet
                 (i.e. before the first ``run()``).
-            ValueError: If the detected provider does not support runtime model
-                switching, or the ACP server rejects the ``session/set_model``
-                call (e.g. method-not-found on a custom server, or an invalid
-                model id).
             TimeoutError: If the server does not answer within
                 ``acp_prompt_timeout`` seconds.
 
@@ -1958,6 +1964,8 @@ class ACPAgent(AgentBase):
             self-heals on the next successful switch; the agent itself always
             runs whatever model the live ACP session holds.
         """
+        if not model or not model.strip():
+            raise ValueError("model must be a non-empty string")
         if self._conn is None or self._session_id is None or self._executor is None:
             raise RuntimeError(
                 "ACP session is not initialized; the model can only be switched "
