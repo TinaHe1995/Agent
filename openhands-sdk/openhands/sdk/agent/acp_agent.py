@@ -1290,12 +1290,13 @@ class ACPAgent(AgentBase):
         spinning forever.  This method closes those cards before we wipe
         the in-memory accumulator on retry / turn abort.
 
-        Uses the bridge's ``on_event`` directly (the same callback driving
-        live emissions); call this *before* ``_reset_client_for_turn`` so
-        the callback is still wired up.  No-op if ``on_event`` was never
-        set (e.g. during tests exercising the bridge in isolation).
+        Captures the bridge's ``on_event`` callback, then unwires the bridge
+        before emitting synthetic terminal events so trailing updates from the
+        abandoned portal prompt cannot land after these failures.  No-op if
+        ``on_event`` was never set (e.g. tests exercising the bridge alone).
         """
         on_event = self._client.on_event
+        self._clear_turn_callbacks()
         if on_event is None:
             return
         for tc in self._client.accumulated_tool_calls:
@@ -1530,6 +1531,10 @@ class ACPAgent(AgentBase):
                 f"ACP prompt timed out after {self.acp_prompt_timeout:.0f}s"
             ) from exc
 
+    @staticmethod
+    def _prompt_response_was_cancelled(response: PromptResponse | None) -> bool:
+        return response is not None and response.stop_reason == "cancelled"
+
     def _finalize_successful_turn(
         self,
         response: PromptResponse | None,
@@ -1678,7 +1683,11 @@ class ACPAgent(AgentBase):
                 self._cancel_inflight_tool_calls()
                 self._restart_session_on_next_turn = True
             else:
-                self._finalize_successful_turn(response, elapsed, state, on_event)
+                if self._prompt_response_was_cancelled(response):
+                    self._cancel_inflight_tool_calls()
+                    self._restart_session_on_next_turn = True
+                else:
+                    self._finalize_successful_turn(response, elapsed, state, on_event)
             return
 
         self._cancel_inflight_tool_calls()
@@ -1974,9 +1983,13 @@ class ACPAgent(AgentBase):
             with state:
                 elapsed = time.monotonic() - t0
                 if drain_result.completed and drain_result.error is None:
-                    self._finalize_successful_turn(
-                        drain_result.response, elapsed, state, on_event
-                    )
+                    if self._prompt_response_was_cancelled(drain_result.response):
+                        self._cancel_inflight_tool_calls()
+                        self._restart_session_on_next_turn = True
+                    else:
+                        self._finalize_successful_turn(
+                            drain_result.response, elapsed, state, on_event
+                        )
                     raise
                 if drain_result.completed and drain_result.error is not None:
                     self._cancel_inflight_tool_calls()
@@ -2000,9 +2013,13 @@ class ACPAgent(AgentBase):
             with state:
                 elapsed = time.monotonic() - t0
                 if drain_result.completed and drain_result.error is None:
-                    self._finalize_successful_turn(
-                        drain_result.response, elapsed, state, on_event
-                    )
+                    if self._prompt_response_was_cancelled(drain_result.response):
+                        self._emit_turn_timeout(elapsed, state, on_event)
+                        self._restart_session_on_next_turn = True
+                    else:
+                        self._finalize_successful_turn(
+                            drain_result.response, elapsed, state, on_event
+                        )
                 elif drain_result.completed and drain_result.error is not None:
                     self._emit_turn_error(drain_result.error, state, on_event)
                     self._restart_session_on_next_turn = True

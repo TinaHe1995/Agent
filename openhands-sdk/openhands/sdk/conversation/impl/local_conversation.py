@@ -965,6 +965,21 @@ class LocalConversation(BaseConversation):
         self._cancel_token = CancellationToken()
 
         with self._state:
+            if isinstance(self.agent, ACPAgent) and self._state.execution_status in (
+                ConversationExecutionStatus.FINISHED,
+                ConversationExecutionStatus.IDLE,
+            ):
+                updated_agent_state = dict(self._state.agent_state)
+                inflight_prompt_user_message_id = updated_agent_state.get(
+                    ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID
+                )
+                if inflight_prompt_user_message_id is not None:
+                    updated_agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
+                        inflight_prompt_user_message_id
+                    )
+                    updated_agent_state.pop(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID, None)
+                    self._state.agent_state = updated_agent_state
+
             if self._state.execution_status in [
                 ConversationExecutionStatus.IDLE,
                 ConversationExecutionStatus.PAUSED,
@@ -972,11 +987,11 @@ class LocalConversation(BaseConversation):
                 ConversationExecutionStatus.STUCK,
             ]:
                 self._state.execution_status = ConversationExecutionStatus.RUNNING
+            last_acp_prompt_user_message_id = self._state.agent_state.get(
+                ACP_LAST_PROMPT_USER_MESSAGE_ID
+            )
 
         iteration = 0
-        last_acp_prompt_user_message_id = self._state.agent_state.get(
-            ACP_LAST_PROMPT_USER_MESSAGE_ID
-        )
         try:
             while True:
                 logger.debug(f"Conversation arun iteration {iteration}")
@@ -1156,6 +1171,11 @@ class LocalConversation(BaseConversation):
                     break
 
                 with self._state:
+                    if self._state.execution_status in (
+                        ConversationExecutionStatus.PAUSED,
+                        ConversationExecutionStatus.STUCK,
+                    ):
+                        break
                     if acp_step_user_message_id is not None:
                         self._state.agent_state = {
                             **self._state.agent_state,

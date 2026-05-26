@@ -84,6 +84,7 @@ class EventService:
     # supersede restarts compare this generation after their interrupt drains
     # so a later Stop/Pause cannot be overwritten by an automatic restart.
     _explicit_interrupt_generation: int = field(default=0, init=False)
+    _closing: bool = field(default=False, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
     _lease: ConversationLease | None = field(default=None, init=False)
@@ -432,10 +433,10 @@ class EventService:
     async def send_message(self, message: Message, run: bool = False):
         if not self._conversation:
             raise ValueError("inactive_service")
+        explicit_interrupt_generation = self._explicit_interrupt_generation
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
-            explicit_interrupt_generation = self._explicit_interrupt_generation
             (
                 did_mark_acp_prompt_superseded,
                 active_acp_prompt_has_latest_message,
@@ -481,10 +482,7 @@ class EventService:
         """
         if not self._conversation:
             return (False, False)
-        # asyncio.Task.done() reads a simple internal flag; reading it from a
-        # thread-pool executor is safe under CPython's GIL even though it
-        # technically crosses asyncio's single-threaded boundary.
-        if self._run_task is None or self._run_task.done():
+        if self._run_task is None:
             return (False, False)
         if not isinstance(self._conversation.agent, ACPAgent):
             return (False, False)
@@ -836,7 +834,7 @@ class EventService:
         Raises:
             ValueError: If the service is inactive or conversation is already running.
         """
-        if not self._conversation:
+        if not self._conversation or self._closing:
             raise ValueError("inactive_service")
 
         # Use lock to make check-and-set atomic, preventing race conditions
@@ -846,6 +844,8 @@ class EventService:
                 == ConversationExecutionStatus.RUNNING
             ):
                 raise ValueError("conversation_already_running")
+            if self._closing:
+                raise ValueError("inactive_service")
             if (
                 acp_internal_rerun_generation is not None
                 and self._explicit_interrupt_generation != acp_internal_rerun_generation
@@ -1040,6 +1040,10 @@ class EventService:
         )
 
     async def close(self):
+        self._closing = True
+        self._explicit_interrupt_generation += 1
+        self._rerun_requested = False
+        self._acp_internal_rerun_requested = False
         if self._lease_task is not None:
             self._lease_task.cancel()
             with suppress(asyncio.CancelledError):
