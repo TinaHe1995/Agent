@@ -44,6 +44,8 @@ MALFORMED_HISTORY_PATTERNS: list[str] = [
         "each `tool_result` block must have a corresponding `tool_use` block "
         "in the previous message"
     ),
+    # Moonshot / Kimi variant
+    "must be followed by tool messages responding to each 'tool_call_id'",
 ]
 
 
