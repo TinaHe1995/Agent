@@ -23,6 +23,7 @@ from openhands.sdk.skills import (
     Skill,
     SkillKnowledge,
     load_available_skills,
+    merge_skills_by_name,
     to_prompt,
 )
 from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
@@ -172,15 +173,8 @@ class AgentContext(BaseModel):
             marketplace_path=self.marketplace_path,
         )
 
-        existing_names = {skill.name for skill in self.skills}
-        for name, skill in auto_skills.items():
-            if name not in existing_names:
-                self.skills.append(skill)
-            else:
-                logger.debug(
-                    f"Skipping auto-loaded skill '{name}' (already in explicit skills)"
-                )
-
+        # Explicit skills are authoritative; auto-loaded skills only fill gaps.
+        self.skills = merge_skills_by_name(self.skills, auto_skills.values())
         return self
 
     def get_secret_infos(self) -> list[dict[str, str | None]]:

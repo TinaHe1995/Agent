@@ -58,7 +58,7 @@ from openhands.sdk.security.analyzer import SecurityAnalyzerBase
 from openhands.sdk.security.confirmation_policy import (
     ConfirmationPolicyBase,
 )
-from openhands.sdk.skills import load_available_skills
+from openhands.sdk.skills import load_available_skills, merge_skills_by_name
 from openhands.sdk.skills.utils import expand_mcp_variables
 from openhands.sdk.subagent import (
     AgentDefinition,
@@ -528,10 +528,12 @@ class LocalConversation(BaseConversation):
                 )
                 project_skills = {}
             if project_skills:
-                merged_skills = {s.name: s for s in merged_context.skills}
-                merged_skills.update(project_skills)
+                # Project skills are authoritative over same-named context skills.
+                merged_skills = merge_skills_by_name(
+                    project_skills.values(), merged_context.skills
+                )
                 merged_context = merged_context.model_copy(
-                    update={"skills": list(merged_skills.values())}
+                    update={"skills": merged_skills}
                 )
                 project_skills_loaded = True
 
