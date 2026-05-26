@@ -3188,7 +3188,10 @@ class TestMaybeSetSessionModel:
         )
 
     @pytest.mark.asyncio
-    async def test_non_codex_agent_skips_protocol_override(self):
+    async def test_meta_key_provider_skips_protocol_override_at_init(self):
+        # claude-agent-acp selects its *initial* model via session _meta, so the
+        # one-shot init set_session_model call is skipped (even though the
+        # provider now supports the protocol call for runtime switches).
         conn = AsyncMock()
         await _maybe_set_session_model(
             conn,
@@ -3203,6 +3206,73 @@ class TestMaybeSetSessionModel:
         conn = AsyncMock()
         await _maybe_set_session_model(conn, "codex-acp", "session-1", None)
         conn.set_session_model.assert_not_called()
+
+
+class TestSetACPModel:
+    """Runtime (mid-conversation) model switching via set_session_model."""
+
+    @staticmethod
+    def _wire(agent: ACPAgent, agent_name: str) -> ACPAgent:
+        agent._conn = MagicMock()
+        agent._session_id = "sess-1"
+        agent._agent_name = agent_name
+        executor = MagicMock()
+        executor.run_async = MagicMock()
+        agent._executor = executor
+        return agent
+
+    def test_switches_model_on_live_codex_session(self):
+        agent = self._wire(_make_agent(), "codex-acp")
+        agent.set_acp_model("gpt-5.4/low")
+        agent._conn.set_session_model.assert_called_once_with(
+            model_id="gpt-5.4/low", session_id="sess-1"
+        )
+        agent._executor.run_async.assert_called_once()
+        # Sentinel LLM + metrics reflect the live model for cost/token tracking.
+        assert agent.llm.model == "gpt-5.4/low"
+        assert agent.llm.metrics.model_name == "gpt-5.4/low"
+
+    def test_claude_provider_supports_runtime_switch(self):
+        agent = self._wire(_make_agent(), "claude-agent-acp")
+        agent.set_acp_model("claude-haiku-4-5-20251001")
+        agent._conn.set_session_model.assert_called_once_with(
+            model_id="claude-haiku-4-5-20251001", session_id="sess-1"
+        )
+
+    def test_unknown_provider_still_attempts_switch(self):
+        # A custom/unrecognised server (provider=None) is allowed to attempt
+        # the call; the ACP layer errors if it isn't actually supported.
+        agent = self._wire(_make_agent(), "some-custom-acp")
+        agent.set_acp_model("whatever")
+        agent._conn.set_session_model.assert_called_once()
+
+    def test_raises_before_session_initialized(self):
+        agent = _make_agent()  # no _conn / _session_id / _executor
+        with pytest.raises(RuntimeError, match="not initialized"):
+            agent.set_acp_model("gpt-5.4")
+
+    def test_raises_for_provider_without_protocol_support(self):
+        from openhands.sdk.settings.acp_providers import ACPProviderInfo
+
+        unsupported = ACPProviderInfo(
+            key="legacy",
+            display_name="Legacy",
+            default_command=("legacy",),
+            api_key_env_var=None,
+            base_url_env_var=None,
+            default_session_mode="default",
+            agent_name_patterns=("legacy",),
+            supports_set_session_model=False,
+            session_meta_key=None,
+        )
+        agent = self._wire(_make_agent(), "legacy-acp")
+        with patch(
+            "openhands.sdk.agent.acp_agent.detect_acp_provider_by_agent_name",
+            return_value=unsupported,
+        ):
+            with pytest.raises(ValueError, match="does not support runtime"):
+                agent.set_acp_model("x")
+        agent._conn.set_session_model.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

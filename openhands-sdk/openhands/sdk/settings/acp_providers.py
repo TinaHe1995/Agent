@@ -11,8 +11,9 @@ Each record captures the static properties that are known at configuration time
 - ``default_session_mode``  ACP mode ID that disables permission prompts
 - ``agent_name_patterns``   lowercase substrings in the runtime agent name;
                             used by ``ACPAgent`` to auto-detect mode / protocol
-- ``supports_set_session_model``  whether to use the ``set_session_model``
-                                  protocol call (vs ``_meta``) for model selection
+- ``supports_set_session_model``  whether the server supports the
+                                  ``session/set_model`` protocol call (enables
+                                  runtime, mid-conversation model switching)
 
 Callers outside the SDK (e.g. ``openhands-agent-server``, the ``OpenHands``
 frontend) can import :data:`ACP_PROVIDERS` and :func:`get_acp_provider` instead
@@ -73,19 +74,31 @@ class ACPProviderInfo:
     """
 
     supports_set_session_model: bool
-    """``True`` if this provider uses the ``set_session_model`` protocol call.
+    """``True`` if the server supports the ``session/set_model`` protocol call.
 
-    - ``False`` for claude-agent-acp, which uses session ``_meta`` instead.
-    - ``True`` for codex-acp and gemini-cli.
+    This is what enables **runtime, mid-conversation model switching**: the
+    call applies to the live session, so subsequent turns use the new model
+    without restarting the subprocess or losing context. All three built-in
+    providers support it (verified against claude-agent-acp, codex-acp, and
+    gemini-cli).
+
+    Note this is independent of how the model is selected *at session
+    creation*: see :attr:`session_meta_key`. A provider may select its initial
+    model via ``_meta`` (claude-agent-acp) yet still support ``set_session_model``
+    for later switches.
     """
 
     session_meta_key: str | None
-    """Top-level ``_meta`` key for model selection, or ``None``.
+    """Top-level ``_meta`` key for model selection *at session creation*.
 
-    When non-``None``, the provider selects its model via ACP session ``_meta``
-    using the structure ``{session_meta_key: {"options": {"model": <model>}}}``.
-    ``None`` means the provider uses the ``set_session_model`` protocol call
-    instead (see :attr:`supports_set_session_model`).
+    When non-``None``, the provider selects its **initial** model via ACP
+    session ``_meta`` using the structure
+    ``{session_meta_key: {"options": {"model": <model>}}}`` passed to
+    ``new_session()``. When ``None``, the initial model is applied with a
+    one-shot ``set_session_model`` call right after the session is created.
+
+    This only governs the *initial* selection; runtime switches always use
+    ``set_session_model`` (gated on :attr:`supports_set_session_model`).
 
     - ``"claudeCode"`` — claude-agent-acp
     - ``None``         — codex-acp, gemini-cli
@@ -102,7 +115,10 @@ ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType(
             base_url_env_var="ANTHROPIC_BASE_URL",
             default_session_mode="bypassPermissions",
             agent_name_patterns=("claude-agent",),
-            supports_set_session_model=False,
+            # claude-agent-acp selects its *initial* model via session _meta
+            # (session_meta_key below), but it DOES support the
+            # session/set_model protocol call for mid-conversation switches.
+            supports_set_session_model=True,
             session_meta_key="claudeCode",
         ),
         "codex": ACPProviderInfo(

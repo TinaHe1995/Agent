@@ -911,6 +911,17 @@ class EventService:
             None, self._conversation.set_security_analyzer, security_analyzer
         )
 
+    async def switch_acp_model(self, model: str):
+        """Switch the model on a running ACP conversation.
+
+        Runs the (blocking) protocol-level ``session/set_model`` round-trip in
+        a worker thread so the event loop is not blocked.
+        """
+        if not self._conversation:
+            raise ValueError("inactive_service")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
+
     async def close(self):
         if self._lease_task is not None:
             self._lease_task.cancel()

@@ -1092,6 +1092,91 @@ def test_run_conversation_not_found(
         client.app.dependency_overrides.clear()
 
 
+def test_switch_acp_model_success(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """switch_acp_model endpoint forwards the model to the event service."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.switch_acp_model.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        mock_event_service.switch_acp_model.assert_awaited_once_with("haiku")
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_switch_acp_model_not_found(
+    client, mock_conversation_service, sample_conversation_id
+):
+    """switch_acp_model returns 404 when the conversation is unknown."""
+    mock_conversation_service.get_event_service.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 404
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_switch_acp_model_non_acp_returns_400(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """A ValueError (e.g. non-ACP agent / unsupported provider) maps to 400."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.switch_acp_model.side_effect = ValueError(
+        "switch_acp_model is only supported for ACP conversations."
+    )
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 400
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_switch_acp_model_uninitialized_returns_409(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """A RuntimeError (session not initialized yet) maps to 409."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.switch_acp_model.side_effect = RuntimeError(
+        "ACP session is not initialized"
+    )
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 409
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_run_conversation_already_running(
     client, mock_conversation_service, mock_event_service, sample_conversation_id
 ):

@@ -699,6 +699,33 @@ class LocalConversation(BaseConversation):
             cached = loaded.model_copy(update={"usage_id": usage_id})
         self.switch_llm(cached)
 
+    def switch_acp_model(self, model: str) -> None:
+        """Switch the model on a running ACP conversation (mid-conversation).
+
+        Unlike :meth:`switch_llm`, which swaps OpenHands' own LLM object, this
+        issues a protocol-level ``session/set_model`` call to the ACP
+        subprocess so the new model applies to subsequent turns of the *same*
+        session, preserving conversation context. ``switch_llm`` would not
+        affect an ACP conversation, since the subprocess owns its own model.
+
+        Args:
+            model: Provider-specific model id to switch to.
+
+        Raises:
+            ValueError: If the conversation's agent is not an :class:`ACPAgent`,
+                or the provider does not support runtime model switching.
+            RuntimeError: If the ACP session is not yet initialized.
+        """
+        if not isinstance(self.agent, ACPAgent):
+            raise ValueError(
+                "switch_acp_model is only supported for ACP conversations."
+            )
+        with self._state:
+            self.agent.set_acp_model(model)
+            # Re-assign so the (mutated) agent is persisted with the updated
+            # sentinel-LLM model, matching switch_llm's contract.
+            self._state.agent = self.agent
+
     @observe(name="conversation.send_message")
     def send_message(self, message: str | Message, sender: str | None = None) -> None:
         """Send a message to the agent.

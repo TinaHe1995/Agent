@@ -208,17 +208,26 @@ async def _maybe_set_session_model(
     session_id: str,
     acp_model: str | None,
 ) -> None:
-    """Apply a protocol-level session model override when the server supports it.
+    """Apply the *initial* session model right after session creation.
 
-    Uses :func:`~openhands.sdk.settings.acp_providers.detect_acp_provider_by_agent_name`
-    to check whether the server supports ``set_session_model``.
-    claude-agent-acp uses session ``_meta`` via
-    :func:`~openhands.sdk.settings.acp_providers.build_session_model_meta` instead.
+    This is the session-creation path only. Providers that select their
+    initial model via session ``_meta`` (i.e. ``session_meta_key`` is set —
+    claude-agent-acp) already received the model in ``new_session()``, so this
+    is a no-op for them. Providers without a meta key (codex-acp, gemini-cli)
+    get a one-shot ``set_session_model`` call here.
+
+    Runtime, mid-conversation switches go through
+    :meth:`ACPAgent.set_acp_model` instead, which always uses
+    ``set_session_model`` and is gated only on ``supports_set_session_model``.
     """
     if not acp_model:
         return
     provider = detect_acp_provider_by_agent_name(agent_name)
-    if provider is not None and provider.supports_set_session_model:
+    if (
+        provider is not None
+        and provider.session_meta_key is None
+        and provider.supports_set_session_model
+    ):
         await conn.set_session_model(model_id=acp_model, session_id=session_id)
 
 
@@ -1827,6 +1836,58 @@ class ACPAgent(AgentBase):
 
         with client._fork_lock:
             return self._executor.run_async(_fork_and_prompt)
+
+    def set_acp_model(self, model: str) -> None:
+        """Switch the model on the running ACP session (mid-conversation).
+
+        Issues a protocol-level ``session/set_model`` call on the live
+        connection so the new model takes effect for subsequent turns in the
+        *same* session — no subprocess restart, no loss of conversation
+        context. Verified against claude-agent-acp and codex-acp.
+
+        Thread-safety is the caller's responsibility: drive this through
+        :meth:`LocalConversation.switch_acp_model`, which holds the state lock
+        so the switch cannot race a running ``step()``.
+
+        Args:
+            model: Provider-specific model id to switch to (e.g.
+                ``"claude-haiku-4-5-20251001"`` or ``"gpt-5.4/low"``).
+
+        Raises:
+            RuntimeError: If the ACP session has not been initialized yet
+                (i.e. before the first ``run()``).
+            ValueError: If the detected provider does not support the
+                ``session/set_model`` protocol call.
+        """
+        if self._conn is None or self._session_id is None or self._executor is None:
+            raise RuntimeError(
+                "ACP session is not initialized; the model can only be switched "
+                "after the conversation has started (first run())."
+            )
+        provider = detect_acp_provider_by_agent_name(self._agent_name)
+        if provider is not None and not provider.supports_set_session_model:
+            raise ValueError(
+                f"ACP provider '{provider.key}' does not support runtime model "
+                "switching via set_session_model."
+            )
+        self._executor.run_async(
+            self._conn.set_session_model(model_id=model, session_id=self._session_id)
+        )
+        # Reflect the live model on the sentinel LLM + metrics so cost/token
+        # accounting and serialized state show the model actually in use
+        # (mirrors model_post_init). The ``acp_model`` field itself is frozen
+        # and stays at its construction-time value; the session now owns the
+        # authoritative current model.
+        self.llm.model = model
+        self.llm.metrics.model_name = model
+        if self.llm.metrics.accumulated_token_usage is not None:
+            self.llm.metrics.accumulated_token_usage.model = model
+        logger.info(
+            "Switched ACP session model to %s (provider=%s, session=%s)",
+            model,
+            provider.key if provider else "unknown",
+            self._session_id,
+        )
 
     def close(self) -> None:
         """Terminate the ACP subprocess and clean up resources."""

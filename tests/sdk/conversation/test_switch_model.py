@@ -42,6 +42,13 @@ def _make_conversation() -> LocalConversation:
     )
 
 
+def test_switch_acp_model_rejects_non_acp_agent():
+    """switch_acp_model is only valid for ACP conversations."""
+    conv = _make_conversation()  # plain Agent, not ACPAgent
+    with pytest.raises(ValueError, match="only supported for ACP"):
+        conv.switch_acp_model("haiku")
+
+
 def test_switch_profile(profile_store):
     """switch_profile switches the agent's LLM."""
     conv = _make_conversation()

@@ -33,7 +33,9 @@ class TestACPProviderInfo:
         assert info.base_url_env_var == "ANTHROPIC_BASE_URL"
         assert info.default_session_mode == "bypassPermissions"
         assert "claude-agent" in info.agent_name_patterns
-        assert info.supports_set_session_model is False
+        # claude-agent-acp selects its initial model via _meta (session_meta_key)
+        # but DOES support session/set_model for mid-conversation switches.
+        assert info.supports_set_session_model is True
         assert info.session_meta_key == "claudeCode"
 
     def test_codex_metadata(self):
