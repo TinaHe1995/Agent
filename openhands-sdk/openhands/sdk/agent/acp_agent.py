@@ -1922,6 +1922,17 @@ class ACPAgent(AgentBase):
                 model id).
             TimeoutError: If the server does not answer within
                 ``acp_prompt_timeout`` seconds.
+
+        Note:
+            A timeout means the client stopped waiting, not that the switch was
+            rejected: the ``session/set_model`` request may already have been
+            written and could still be applied server-side. The connection and
+            session stay alive and the local sentinel model is intentionally
+            left unchanged, so a timed-out switch leaves the server-side model
+            indeterminate. The conservative choice (treat it as failed locally)
+            keeps cost/token accounting on the previously-known model and
+            self-heals on the next successful switch; the agent itself always
+            runs whatever model the live ACP session holds.
         """
         if self._conn is None or self._session_id is None or self._executor is None:
             raise RuntimeError(

@@ -1411,6 +1411,52 @@ class TestEventServiceSaveMeta:
         assert isinstance(loaded.agent, ACPAgent)
         assert loaded.agent.acp_model == "new-model"
 
+    @pytest.mark.asyncio
+    async def test_switch_acp_model_cancel_takes_precedence_over_failure(
+        self, tmp_path
+    ):
+        """A switch failure during the cancellation window must not mask the
+        cancel: ``CancelledError`` still propagates, not the switch's error.
+        """
+        from openhands.sdk.agent import ACPAgent
+
+        stored = StoredConversation(
+            id=uuid4(),
+            agent=ACPAgent(acp_command=["echo", "test"], acp_model="old-model"),
+            workspace=LocalWorkspace(working_dir=str(tmp_path)),
+            confirmation_policy=NeverConfirm(),
+            initial_message=None,
+            metrics=None,
+        )
+        service = EventService(stored=stored, conversations_dir=tmp_path)
+        conv_dir = tmp_path / stored.id.hex
+        conv_dir.mkdir(parents=True, exist_ok=True)
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _failing_switch(model):
+            started.set()
+            release.wait(timeout=5)
+            raise RuntimeError("switch boom")
+
+        conversation = MagicMock()
+        conversation.switch_acp_model.side_effect = _failing_switch
+        service._conversation = conversation
+
+        task = asyncio.create_task(service.switch_acp_model("new-model"))
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, started.wait, 5)
+        task.cancel()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        release.set()
+
+        # The switch raises RuntimeError after release, but the cancellation
+        # takes precedence — the caller sees CancelledError, not "switch boom".
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
 
 class TestEventServiceStartWithRunningStatus:
     """Test cases for EventService.start handling of RUNNING execution status."""

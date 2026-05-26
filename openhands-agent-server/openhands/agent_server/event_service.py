@@ -966,7 +966,12 @@ class EventService:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
-                await task
+                # Let the in-flight switch settle (the worker thread can't be
+                # cancelled) so meta.json is mirrored, but don't let a failure
+                # of the switch itself mask the cancellation — suppress any
+                # task exception and always propagate CancelledError.
+                with suppress(Exception):
+                    await task
                 raise
 
     async def close(self):
