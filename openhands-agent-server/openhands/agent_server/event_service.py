@@ -448,7 +448,11 @@ class EventService:
                 if self._explicit_interrupt_generation != explicit_interrupt_generation:
                     return
             try:
-                await self.run()
+                await self.run(
+                    acp_internal_rerun_generation=explicit_interrupt_generation
+                    if interrupted_acp
+                    else None
+                )
                 self._acp_internal_rerun_requested = False
             except ValueError as e:
                 # run() refused. If a run is still wrapping up (its
@@ -698,8 +702,6 @@ class EventService:
             self._pub_sub, loop=asyncio.get_running_loop()
         )
 
-        from openhands.sdk.agent import ACPAgent
-
         # Only wire token streaming for agents that can actually emit token
         # callbacks. SDK LLM agents need stream=True, while ACP agents emit
         # AgentMessageChunk text through their bridge without exposing an LLM.
@@ -821,7 +823,7 @@ class EventService:
         # Publish initial state update
         await self._publish_state_update()
 
-    async def run(self):
+    async def run(self, acp_internal_rerun_generation: int | None = None):
         """Run the conversation asynchronously in the background.
 
         This method starts the conversation run in a background task and returns
@@ -844,6 +846,11 @@ class EventService:
                 == ConversationExecutionStatus.RUNNING
             ):
                 raise ValueError("conversation_already_running")
+            if (
+                acp_internal_rerun_generation is not None
+                and self._explicit_interrupt_generation != acp_internal_rerun_generation
+            ):
+                return
 
             # Check if there's already a running task
             if self._run_task is not None and not self._run_task.done():
@@ -928,7 +935,11 @@ class EventService:
                         )
                         if should_restart:
                             try:
-                                await self.run()
+                                await self.run(
+                                    acp_internal_rerun_generation=rerun_generation
+                                    if acp_internal_rerun_still_valid
+                                    else None
+                                )
                             except ValueError as e:
                                 if str(e) == "conversation_already_running":
                                     self._rerun_requested = True

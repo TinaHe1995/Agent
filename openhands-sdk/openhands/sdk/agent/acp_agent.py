@@ -1663,6 +1663,28 @@ class ACPAgent(AgentBase):
         )
         state.execution_status = ConversationExecutionStatus.ERROR
 
+    def _handle_cancelled_cleanup_interruption(
+        self,
+        prompt_future: Future[PromptResponse | None] | None,
+        elapsed: float,
+        state: ConversationState,
+        on_event: ConversationCallbackType,
+    ) -> None:
+        """Repair state when cancellation interrupts cancel/drain cleanup."""
+        if prompt_future is not None and prompt_future.done():
+            try:
+                response = prompt_future.result()
+            except BaseException:
+                self._cancel_inflight_tool_calls()
+                self._restart_session_on_next_turn = True
+            else:
+                self._finalize_successful_turn(response, elapsed, state, on_event)
+            return
+
+        self._cancel_inflight_tool_calls()
+        if prompt_future is not None:
+            self._restart_session_on_next_turn = True
+
     def _clear_turn_callbacks(self) -> None:
         """Unwire per-turn bridge callbacks so trailing ``session_update``
         between turns is a no-op (fires on the portal thread with no
@@ -1944,9 +1966,10 @@ class ACPAgent(AgentBase):
                 drain_result = await self._drain_cancelled_prompt(prompt_future)
             except asyncio.CancelledError:
                 with state:
-                    self._cancel_inflight_tool_calls()
-                    if prompt_future is not None and not prompt_future.done():
-                        self._restart_session_on_next_turn = True
+                    elapsed = time.monotonic() - t0
+                    self._handle_cancelled_cleanup_interruption(
+                        prompt_future, elapsed, state, on_event
+                    )
                 raise
             with state:
                 elapsed = time.monotonic() - t0
@@ -1964,8 +1987,16 @@ class ACPAgent(AgentBase):
                 self._restart_session_on_next_turn = True
             raise
         except TimeoutError:
-            await self._arequest_session_cancel()
-            drain_result = await self._drain_cancelled_prompt(prompt_future)
+            try:
+                await self._arequest_session_cancel()
+                drain_result = await self._drain_cancelled_prompt(prompt_future)
+            except asyncio.CancelledError:
+                with state:
+                    elapsed = time.monotonic() - t0
+                    self._handle_cancelled_cleanup_interruption(
+                        prompt_future, elapsed, state, on_event
+                    )
+                raise
             with state:
                 elapsed = time.monotonic() - t0
                 if drain_result.completed and drain_result.error is None:

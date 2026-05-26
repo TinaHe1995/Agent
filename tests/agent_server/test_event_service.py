@@ -1034,6 +1034,43 @@ class TestEventServiceSendMessage:
         assert event_service._acp_internal_rerun_requested is False
 
     @pytest.mark.asyncio
+    async def test_internal_acp_send_message_restart_rechecks_generation_in_run(
+        self, event_service, tmp_path
+    ):
+        """A late explicit Stop/Pause should prevent direct ACP restart."""
+        agent = ACPAgent(acp_command=["echo", "test"])
+        conversation = LocalConversation(
+            agent=agent,
+            workspace=str(tmp_path),
+            max_iteration_per_run=3,
+            stuck_detection=False,
+        )
+        mock_arun = AsyncMock()
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+        event_service._mark_running_acp_prompt_superseded = AsyncMock(
+            return_value=(True, False)
+        )
+        event_service.interrupt = AsyncMock()
+
+        async def status_with_late_explicit_interrupt():
+            event_service._explicit_interrupt_generation += 1
+            event_service._rerun_requested = False
+            event_service._acp_internal_rerun_requested = False
+            return ConversationExecutionStatus.PAUSED
+
+        event_service._get_execution_status = status_with_late_explicit_interrupt
+
+        with patch.object(conversation, "arun", mock_arun):
+            await event_service.send_message(Message(role="user", content=[]), run=True)
+
+        event_service.interrupt.assert_awaited_once_with(internal_acp_rerun=True)
+        mock_arun.assert_not_awaited()
+        assert event_service._run_task is None
+        assert event_service._rerun_requested is False
+        assert event_service._acp_internal_rerun_requested is False
+
+    @pytest.mark.asyncio
     async def test_internal_acp_rerun_rechecks_explicit_interrupt_before_restart(
         self, event_service, tmp_path
     ):

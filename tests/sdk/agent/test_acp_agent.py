@@ -6,11 +6,13 @@ import asyncio
 import json
 import threading
 import uuid
+from concurrent.futures import Future
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
+from acp.schema import PromptResponse
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
@@ -1949,6 +1951,33 @@ class TestACPAgentAstep:
             executor.close()
 
         assert agent._restart_session_on_next_turn is True
+
+    def test_cleanup_interruption_finalizes_completed_prompt(self, tmp_path):
+        """A completed prompt should be finalized if cleanup is cancelled."""
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._session_id = "test-session"
+
+        prompt_future: Future[PromptResponse | None] = Future()
+        prompt_future.set_result(None)
+        emitted = []
+
+        with conversation.state as state:
+            agent._handle_cancelled_cleanup_interruption(
+                prompt_future,
+                0.1,
+                state,
+                emitted.append,
+            )
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+        assert agent._restart_session_on_next_turn is False
+        assert any(isinstance(event, ActionEvent) for event in emitted)
 
     def test_astep_cancellation_does_not_mark_suffix_installed(self, tmp_path):
         """Cancellation before a turn completes must leave
