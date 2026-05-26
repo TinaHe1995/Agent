@@ -721,6 +721,8 @@ class LocalConversation(BaseConversation):
                 or the provider does not support runtime model switching, or
                 the ACP server rejects the switch.
             RuntimeError: If the ACP session is not yet initialized.
+            TimeoutError: If the ACP server does not respond within
+                ``acp_prompt_timeout`` seconds.
         """
         if not isinstance(self.agent, ACPAgent):
             raise ValueError(
