@@ -932,9 +932,7 @@ class EventService:
             if self._conversation is None:
                 raise RuntimeError("Conversation is not active.")
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self._conversation.switch_acp_model, model
-            )
+            await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
             # Persist the switch into meta.json. ``start()`` rebuilds the runtime
             # agent from ``self.stored.agent``, and ``ConversationState.create()``
             # copies that agent over the persisted base_state.json on resume — so
@@ -943,9 +941,7 @@ class EventService:
             # ``model_post_init`` re-derives the sentinel ``llm.model`` on reload.
             self.stored = self.stored.model_copy(
                 update={
-                    "agent": self.stored.agent.model_copy(
-                        update={"acp_model": model}
-                    )
+                    "agent": self.stored.agent.model_copy(update={"acp_model": model})
                 }
             )
             await self.save_meta()

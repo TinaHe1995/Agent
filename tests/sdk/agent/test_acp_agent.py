@@ -3240,9 +3240,7 @@ class TestReapplySessionModelOnResume:
     @pytest.mark.asyncio
     async def test_missing_model_skips_reapply(self):
         conn = AsyncMock()
-        await _reapply_session_model_on_resume(
-            conn, "claude-agent-acp", "sess-1", None
-        )
+        await _reapply_session_model_on_resume(conn, "claude-agent-acp", "sess-1", None)
         conn.set_session_model.assert_not_called()
 
     @pytest.mark.asyncio
