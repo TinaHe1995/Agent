@@ -729,7 +729,7 @@ class EventService:
                 content=content,
                 reasoning_content=reasoning_content,
             )
-            with suppress(RuntimeError):
+            with suppress(RuntimeError):  # main loop already closed during teardown
                 asyncio.run_coroutine_threadsafe(self._pub_sub(event), self._main_loop)
 
         def _token_streaming_callback(chunk: LLMStreamChunk | str) -> None:

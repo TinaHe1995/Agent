@@ -1381,7 +1381,7 @@ class ACPAgent(AgentBase):
         except asyncio.CancelledError:
             if future.cancelled():
                 return _PromptDrainResult(
-                    drained=True, completed=False, response=None, error=None
+                    drained=False, completed=False, response=None, error=None
                 )
             raise
         except TimeoutError:

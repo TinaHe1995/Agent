@@ -1050,6 +1050,10 @@ class LocalConversation(BaseConversation):
                         )
 
                     if isinstance(self.agent, ACPAgent):
+                        # Re-scan prompt messages under the lock each time we need
+                        # the latest tail; the list is usually tiny, and correctness
+                        # is more important than caching stale prompt snapshots.
+
                         acp_prompt_messages = [
                             event
                             for event in self._state.events
