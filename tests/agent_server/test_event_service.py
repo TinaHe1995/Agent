@@ -1034,6 +1034,48 @@ class TestEventServiceSendMessage:
         assert event_service._acp_internal_rerun_requested is False
 
     @pytest.mark.asyncio
+    async def test_internal_acp_rerun_rechecks_explicit_interrupt_before_restart(
+        self, event_service, tmp_path
+    ):
+        """Explicit Stop/Pause should win during final restart status checks."""
+        agent = ACPAgent(acp_command=["echo", "test"])
+        conversation = LocalConversation(
+            agent=agent,
+            workspace=str(tmp_path),
+            max_iteration_per_run=3,
+            stuck_detection=False,
+        )
+        mock_arun = AsyncMock()
+        event_service._conversation = conversation
+        event_service._publish_state_update = AsyncMock()
+        event_service._rerun_requested = True
+        event_service._acp_internal_rerun_requested = True
+
+        status_calls = 0
+
+        async def status_with_late_explicit_interrupt():
+            nonlocal status_calls
+            status_calls += 1
+            if status_calls == 1:
+                return ConversationExecutionStatus.IDLE
+            event_service._explicit_interrupt_generation += 1
+            event_service._rerun_requested = False
+            event_service._acp_internal_rerun_requested = False
+            return ConversationExecutionStatus.PAUSED
+
+        event_service._get_execution_status = status_with_late_explicit_interrupt
+
+        with patch.object(conversation, "arun", mock_arun):
+            await event_service.run()
+            assert event_service._run_task is not None
+            await asyncio.wait_for(event_service._run_task, timeout=1.0)
+
+        mock_arun.assert_awaited_once()
+        assert status_calls == 2
+        assert event_service._rerun_requested is False
+        assert event_service._acp_internal_rerun_requested is False
+
+    @pytest.mark.asyncio
     async def test_send_message_with_run_true_logs_exception(self, event_service):
         """Test that exceptions from conversation.run() are caught and logged."""
         # Mock conversation and its methods

@@ -1895,6 +1895,61 @@ class TestACPAgentAstep:
 
         assert agent._restart_session_on_next_turn is True
 
+    def test_astep_double_cancel_during_cancel_send_restarts_next_turn(self, tmp_path):
+        """A second cancellation during session/cancel should quarantine prompt."""
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancelled_cancel_send() -> None:
+            prompt_entered = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                return None
+
+            async def _raise_during_cancel_send(self):  # noqa: ARG001
+                raise asyncio.CancelledError
+
+            agent._conn.prompt = _fake_prompt
+            agent._session_id = "test-session"
+
+            with patch.object(
+                ACPAgent,
+                "_arequest_session_cancel",
+                new=_raise_during_cancel_send,
+            ):
+                task = asyncio.create_task(
+                    agent.astep(conversation, on_event=lambda _: None)
+                )
+                await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+                task.cancel()
+                try:
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                finally:
+                    prompt_released.set()
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancelled_cancel_send())
+        finally:
+            executor.close()
+
+        assert agent._restart_session_on_next_turn is True
+
     def test_astep_cancellation_does_not_mark_suffix_installed(self, tmp_path):
         """Cancellation before a turn completes must leave
         ``_suffix_install_state`` as ``pending_first_prompt``.

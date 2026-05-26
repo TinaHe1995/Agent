@@ -1939,8 +1939,8 @@ class ACPAgent(AgentBase):
             # the caller thread after the portal prompt has observed
             # session/cancel, so late cancelled-turn updates cannot overwrite
             # the terminal synthetic failures.
-            await self._arequest_session_cancel()
             try:
+                await self._arequest_session_cancel()
                 drain_result = await self._drain_cancelled_prompt(prompt_future)
             except asyncio.CancelledError:
                 with state:

@@ -668,6 +668,52 @@ async def test_acp_arun_does_not_commit_cursor_on_explicit_interrupt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_arun_commits_cursor_when_cancelled_prompt_completed(tmp_path):
+    """Completed ACP prompts should not be replayed after cancellation."""
+
+    agent = ACPAgent(acp_command=["echo", "test"])
+    conversation = LocalConversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        max_iteration_per_run=3,
+        stuck_detection=False,
+    )
+    conversation.send_message("complete during cancel")
+    first_message_id = conversation.state.last_user_message_id
+    prompts_seen: list[str] = []
+
+    async def finishing_cancelled_astep(
+        self,  # noqa: ARG001
+        conv: LocalConversation,
+        on_event: ConversationCallbackType,  # noqa: ARG001
+        on_token: ConversationTokenCallbackType | None = None,  # noqa: ARG001
+        prompt_message: MessageEvent | None = None,
+    ) -> None:
+        assert prompt_message is not None
+        content = prompt_message.llm_message.content[0]
+        assert isinstance(content, TextContent)
+        prompts_seen.append(content.text)
+        conv.state.execution_status = ConversationExecutionStatus.FINISHED
+        raise asyncio.CancelledError
+
+    with (
+        patch.object(ACPAgent, "init_state", autospec=True),
+        patch.object(ACPAgent, "astep", new=finishing_cancelled_astep),
+    ):
+        await asyncio.wait_for(conversation.arun(), timeout=1.0)
+        assert conversation.state.execution_status == ConversationExecutionStatus.PAUSED
+        await asyncio.wait_for(conversation.arun(), timeout=1.0)
+
+    assert conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+    assert (
+        conversation.state.agent_state.get(ACP_LAST_PROMPT_USER_MESSAGE_ID)
+        == first_message_id
+    )
+    assert ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID not in conversation.state.agent_state
+    assert prompts_seen == ["complete during cancel"]
+
+
+@pytest.mark.asyncio
 async def test_acp_arun_resumes_queued_messages_fifo_after_iteration_cap(tmp_path):
     """Queued ACP messages should remain FIFO across follow-up runs."""
 

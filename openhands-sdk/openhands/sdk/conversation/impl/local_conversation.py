@@ -1277,10 +1277,12 @@ class LocalConversation(BaseConversation):
                 superseded_by_new_message = bool(
                     updated_agent_state.pop(ACP_SUPERSEDE_INFLIGHT_PROMPT, False)
                 )
+                completed_cancelled_prompt = (
+                    self._state.execution_status == ConversationExecutionStatus.FINISHED
+                )
                 if (
-                    superseded_by_new_message
-                    and inflight_prompt_user_message_id is not None
-                ):
+                    superseded_by_new_message or completed_cancelled_prompt
+                ) and inflight_prompt_user_message_id is not None:
                     updated_agent_state[ACP_LAST_PROMPT_USER_MESSAGE_ID] = (
                         inflight_prompt_user_message_id
                     )

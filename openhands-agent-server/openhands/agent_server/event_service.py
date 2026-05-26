@@ -477,6 +477,9 @@ class EventService:
         """
         if not self._conversation:
             return (False, False)
+        # asyncio.Task.done() reads a simple internal flag; reading it from a
+        # thread-pool executor is safe under CPython's GIL even though it
+        # technically crosses asyncio's single-threaded boundary.
         if self._run_task is None or self._run_task.done():
             return (False, False)
         if not isinstance(self._conversation.agent, ACPAgent):
@@ -909,12 +912,17 @@ class EventService:
                     # never sets the flag.
                     rerun_requested = self._rerun_requested
                     acp_internal_rerun_requested = self._acp_internal_rerun_requested
+                    rerun_generation = self._explicit_interrupt_generation
                     self._rerun_requested = False
                     self._acp_internal_rerun_requested = False
                     if rerun_requested:
                         status = await self._get_execution_status()
-                        should_restart = status == ConversationExecutionStatus.IDLE or (
+                        acp_internal_rerun_still_valid = (
                             acp_internal_rerun_requested
+                            and self._explicit_interrupt_generation == rerun_generation
+                        )
+                        should_restart = status == ConversationExecutionStatus.IDLE or (
+                            acp_internal_rerun_still_valid
                             and status == ConversationExecutionStatus.PAUSED
                             and isinstance(conversation.agent, ACPAgent)
                         )
