@@ -743,10 +743,10 @@ class LocalConversation(BaseConversation):
             #      it must hold the switched value, not the construction-time one.
             #
             # model_copy is shallow, so the copy shares the live ACP runtime
-            # (_conn/_executor/_process) with the old agent. Release it from the
-            # old agent before dropping it: otherwise ACPAgent.__del__ -> close()
-            # on the discarded agent would tear down the session the copy now
-            # owns, leaving the next turn pointing at a dead connection.
+            # (_conn/_executor/_process) with the old agent. Disarm the old
+            # agent's finalizer before dropping it: otherwise ACPAgent.__del__
+            # -> close() on the discarded agent would tear down the session the
+            # copy now owns, leaving the next turn pointing at a dead connection.
             old_agent = self.agent
             new_agent = old_agent.model_copy(update={"acp_model": model})
             old_agent.release_runtime()

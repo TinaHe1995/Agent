@@ -72,6 +72,9 @@ class EventService:
     # wrapping up; consumed by _run_and_publish to re-run the stranded message.
     _rerun_requested: bool = field(default=False, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _acp_model_switch_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False
+    )
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
     _lease: ConversationLease | None = field(default=None, init=False)
     _lease_generation: int | None = field(default=None, init=False)
@@ -918,20 +921,34 @@ class EventService:
         a worker thread so the event loop is not blocked, then mirrors the new
         model into ``meta.json`` so the switch survives an agent-server restart.
         """
-        if self._conversation is None:
-            raise RuntimeError("Conversation is not active.")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
-        # Persist the switch into meta.json. ``start()`` rebuilds the runtime
-        # agent from ``self.stored.agent``, and ``ConversationState.create()``
-        # copies that agent over the persisted base_state.json on resume — so
-        # without mirroring the new model here, a restart would silently revert
-        # to the old one. Only ``acp_model`` needs updating: ``model_post_init``
-        # re-derives the sentinel ``llm.model`` from it on reload.
-        self.stored = self.stored.model_copy(
-            update={"agent": self.stored.agent.model_copy(update={"acp_model": model})}
-        )
-        await self.save_meta()
+        # Serialize concurrent switches for this conversation. The live switch
+        # and the meta.json mirror must commit as one unit; otherwise two
+        # interleaved requests could leave meta.json pointing at a different
+        # model than the last live switch (A switches live->A, B switches
+        # live->B and saves meta=B, then A saves meta=A while the session runs
+        # on B). The lock keeps persisted metadata consistent with the live
+        # session.
+        async with self._acp_model_switch_lock:
+            if self._conversation is None:
+                raise RuntimeError("Conversation is not active.")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._conversation.switch_acp_model, model
+            )
+            # Persist the switch into meta.json. ``start()`` rebuilds the runtime
+            # agent from ``self.stored.agent``, and ``ConversationState.create()``
+            # copies that agent over the persisted base_state.json on resume — so
+            # without mirroring the new model here, a restart would silently
+            # revert to the old one. Only ``acp_model`` needs updating:
+            # ``model_post_init`` re-derives the sentinel ``llm.model`` on reload.
+            self.stored = self.stored.model_copy(
+                update={
+                    "agent": self.stored.agent.model_copy(
+                        update={"acp_model": model}
+                    )
+                }
+            )
+            await self.save_meta()
 
     async def close(self):
         if self._lease_task is not None:

@@ -115,9 +115,9 @@ def test_switch_acp_model_disarms_discarded_agent_finalizer(tmp_path):
 
     Regression: ``switch_acp_model`` swaps in a shallow ``model_copy`` that
     shares ``_conn`` / ``_executor`` / ``_process`` with the old agent. Without
-    releasing the runtime first, ``ACPAgent.__del__`` -> ``close()`` on the
-    discarded agent closes the connection, kills the subprocess and shuts down
-    the executor — out from under the copy, breaking the next turn.
+    disarming it first, ``ACPAgent.__del__`` -> ``close()`` on the discarded
+    agent closes the connection, kills the subprocess and shuts down the
+    executor — out from under the copy, breaking the next turn.
     """
     conv, old_agent = _make_acp_conversation(tmp_path)
     live_conn = old_agent._conn
@@ -131,15 +131,15 @@ def test_switch_acp_model_disarms_discarded_agent_finalizer(tmp_path):
     assert switched._conn is live_conn
     assert switched._executor is live_executor
 
-    # ...and the discarded agent was disarmed: marked closed with its runtime
-    # references cleared, so its finalizer is a no-op.
+    # ...and the discarded agent's finalizer was disarmed (marked closed)
+    # WITHOUT clearing its runtime references — an in-flight ask_agent()/fork
+    # still holding the old agent keeps a valid connection.
     assert old_agent._closed is True
-    assert old_agent._conn is None
-    assert old_agent._executor is None
-    assert old_agent._process is None
+    assert old_agent._conn is live_conn
+    assert old_agent._executor is live_executor
 
-    # Simulating GC (__del__ -> close()) on the old agent leaves the copy's
-    # shared connection/executor untouched.
+    # Simulating GC (__del__ -> close()) on the disarmed old agent is a no-op:
+    # the copy's shared connection/executor are left intact.
     live_executor.run_async.reset_mock()
     old_agent.close()
     live_executor.run_async.assert_not_called()

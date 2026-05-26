@@ -19,6 +19,7 @@ from openhands.sdk.agent.acp_agent import (
     _image_url_to_acp_block,
     _maybe_set_session_model,
     _OpenHandsACPBridge,
+    _reapply_session_model_on_resume,
     _select_auth_method,
     _serialize_tool_content,
 )
@@ -3208,6 +3209,53 @@ class TestMaybeSetSessionModel:
         conn.set_session_model.assert_not_called()
 
 
+class TestReapplySessionModelOnResume:
+    """Resume reapplies the persisted model via the runtime-switch gate."""
+
+    @pytest.mark.asyncio
+    async def test_claude_reapplies_persisted_model_on_resume(self):
+        # claude selects its initial model via _meta (supports_set_session_model
+        # =False) but DOES support set_session_model for runtime switches.
+        # load_session() carries no _meta, so on resume the persisted model must
+        # be reapplied via the runtime-switch gate — _maybe_set_session_model
+        # would skip it.
+        conn = AsyncMock()
+        await _reapply_session_model_on_resume(
+            conn, "claude-agent-acp", "sess-1", "claude-haiku-4-5-20251001"
+        )
+        conn.set_session_model.assert_awaited_once_with(
+            model_id="claude-haiku-4-5-20251001", session_id="sess-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_codex_reapplies_persisted_model_on_resume(self):
+        conn = AsyncMock()
+        await _reapply_session_model_on_resume(
+            conn, "codex-acp", "sess-1", "gpt-5.4/low"
+        )
+        conn.set_session_model.assert_awaited_once_with(
+            model_id="gpt-5.4/low", session_id="sess-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_model_skips_reapply(self):
+        conn = AsyncMock()
+        await _reapply_session_model_on_resume(
+            conn, "claude-agent-acp", "sess-1", None
+        )
+        conn.set_session_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_skips_reapply(self):
+        # provider=None (custom server) is out of scope here; resume
+        # reapplication is gated on a known provider that supports the switch.
+        conn = AsyncMock()
+        await _reapply_session_model_on_resume(
+            conn, "some-custom-acp", "sess-1", "whatever"
+        )
+        conn.set_session_model.assert_not_called()
+
+
 class TestSetACPModel:
     """Runtime (mid-conversation) model switching via set_session_model."""
 
@@ -3287,6 +3335,20 @@ class TestSetACPModel:
             agent.set_acp_model("bogus-model")
         # The sentinel LLM must not be mutated when the switch fails.
         assert agent.llm.model != "bogus-model"
+
+    def test_propagates_server_internal_error(self):
+        # JSON-RPC -32603 is a server-internal failure, not a bad client
+        # request. It must propagate (as the raw ACPRequestError -> 5xx) rather
+        # than be mislabeled as a 400-class ValueError, mirroring the retriable
+        # handling on the prompt path.
+        agent = self._wire(_make_agent(), "codex-acp")
+        agent._executor.run_async.side_effect = ACPRequestError(
+            code=-32603, message="internal error"
+        )
+        with pytest.raises(ACPRequestError):
+            agent.set_acp_model("some-model")
+        # The sentinel LLM must not be mutated when the switch fails.
+        assert agent.llm.model != "some-model"
 
     def test_passes_timeout_to_run_async(self):
         # The protocol round-trip runs under the conversation state lock, so it

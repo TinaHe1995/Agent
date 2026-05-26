@@ -230,6 +230,34 @@ async def _maybe_set_session_model(
         await conn.set_session_model(model_id=acp_model, session_id=session_id)
 
 
+async def _reapply_session_model_on_resume(
+    conn: ClientSideConnection,
+    agent_name: str,
+    session_id: str,
+    acp_model: str | None,
+) -> None:
+    """Reapply the persisted model to a *resumed* session.
+
+    ``load_session()`` carries no model ``_meta``, so a session resumed after a
+    runtime switch (or with any persisted ``acp_model``) would otherwise run on
+    the ACP server's default. This issues ``set_session_model`` gated on
+    :attr:`~openhands.sdk.settings.acp_providers.ACPProviderInfo.supports_runtime_model_switch`
+    — the capability for switching an *already-running* session — so the resumed
+    live session matches the serialized ``acp_model``.
+
+    This deliberately uses the runtime-switch gate, not the initial-selection
+    one: claude-agent-acp selects its initial model via ``_meta``
+    (``supports_set_session_model=False``) yet supports ``set_session_model``
+    for later switches, so on resume it needs this call to honour the persisted
+    model rather than the server default.
+    """
+    if not acp_model:
+        return
+    provider = detect_acp_provider_by_agent_name(agent_name)
+    if provider is not None and provider.supports_runtime_model_switch:
+        await conn.set_session_model(model_id=acp_model, session_id=session_id)
+
+
 def _extract_token_usage(
     response: Any,
 ) -> tuple[int, int, int, int, int]:
@@ -1188,18 +1216,34 @@ class ACPAgent(AgentBase):
                     )
 
             if session_id is None:
-                # Build _meta content for session options (e.g. model selection).
-                # Extra kwargs to new_session() become the _meta dict in the
-                # JSON-RPC request — do NOT wrap in _meta= (that double-nests).
+                # Fresh session. Build _meta content for session options (e.g.
+                # model selection). Extra kwargs to new_session() become the
+                # _meta dict in the JSON-RPC request — do NOT wrap in _meta=
+                # (that double-nests).
                 session_meta = build_session_model_meta(agent_name, self.acp_model)
                 response = await conn.new_session(cwd=working_dir, **session_meta)
                 session_id = response.session_id
-            await _maybe_set_session_model(
-                conn,
-                agent_name,
-                session_id,
-                self.acp_model,
-            )
+                # Initial-selection protocol call for providers that use it
+                # (codex-acp, gemini-cli); no-op for claude, which selected its
+                # model via the _meta above.
+                await _maybe_set_session_model(
+                    conn,
+                    agent_name,
+                    session_id,
+                    self.acp_model,
+                )
+            else:
+                # Resumed session. load_session() does not carry model _meta, so
+                # reapply the persisted (possibly runtime-switched) acp_model via
+                # the runtime-switch capability — otherwise the resumed live
+                # session would run on the server default while serialized state
+                # claims the switched model.
+                await _reapply_session_model_on_resume(
+                    conn,
+                    agent_name,
+                    session_id,
+                    self.acp_model,
+                )
 
             # Resolve the permission mode.  Known providers each have their
             # own mode ID (bypassPermissions, full-access, yolo …).
@@ -1886,10 +1930,17 @@ class ACPAgent(AgentBase):
                 timeout=self.acp_prompt_timeout,
             )
         except ACPRequestError as e:
+            # Server-internal failures (JSON-RPC -32603) are not the caller's
+            # fault, and the prompt path already treats them as retriable. Let
+            # them propagate (-> 5xx) instead of mislabeling them as a 400
+            # client error.
+            if e.code in _RETRIABLE_SERVER_ERROR_CODES:
+                raise
             # acp.exceptions.RequestError derives from Exception (not
-            # RuntimeError); surface it as a ValueError so callers — and the
-            # agent-server route — treat a rejected switch as a 400-class
-            # client error rather than an opaque 500.
+            # RuntimeError); surface a true client/protocol rejection (e.g.
+            # method-not-found, invalid model id) as a ValueError so callers —
+            # and the agent-server route — treat it as a 400-class client error
+            # rather than an opaque 500.
             raise ValueError(
                 f"ACP server rejected set_session_model(model={model!r}): {e}"
             ) from e
@@ -1946,23 +1997,23 @@ class ACPAgent(AgentBase):
             self._executor = None
 
     def release_runtime(self) -> None:
-        """Relinquish ownership of the live ACP runtime without tearing it down.
+        """Disarm this agent's finalizer after handing its live ACP runtime to a
+        shallow :meth:`~pydantic.BaseModel.model_copy`.
 
-        Call this on an agent whose live session has been handed to a shallow
-        :meth:`~pydantic.BaseModel.model_copy` — which shares the same
-        ``_conn`` / ``_executor`` / ``_process`` references. It marks the agent
-        closed and clears those references, disarming the
-        ``__del__`` -> :meth:`close` finalizer so dropping this now-stale
-        instance cannot close resources the copy still owns.
+        The copy shares this agent's ``_conn`` / ``_executor`` / ``_process``
+        references (``model_copy`` is shallow). Marking this now-stale instance
+        closed makes its ``__del__`` -> :meth:`close` a no-op, so dropping it
+        cannot tear down the runtime the copy now owns.
+
+        The runtime references are intentionally left intact: an in-flight
+        :meth:`ask_agent` fork — which is thread-safe and may still hold this
+        pre-switch agent — keeps a valid connection until it finishes. Sole
+        ownership for teardown passes to the copy (the live ``self.agent``
+        going forward), which is closed on conversation shutdown.
 
         See :meth:`LocalConversation.switch_acp_model`.
         """
         self._closed = True
-        self._conn = None
-        self._executor = None
-        self._process = None
-        self._client = None
-        self._filtered_reader = None
 
     def __del__(self) -> None:
         try:
