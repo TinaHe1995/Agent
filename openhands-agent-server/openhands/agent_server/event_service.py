@@ -915,12 +915,23 @@ class EventService:
         """Switch the model on a running ACP conversation.
 
         Runs the (blocking) protocol-level ``session/set_model`` round-trip in
-        a worker thread so the event loop is not blocked.
+        a worker thread so the event loop is not blocked, then mirrors the new
+        model into ``meta.json`` so the switch survives an agent-server restart.
         """
         if self._conversation is None:
             raise RuntimeError("Conversation is not active.")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
+        # Persist the switch into meta.json. ``start()`` rebuilds the runtime
+        # agent from ``self.stored.agent``, and ``ConversationState.create()``
+        # copies that agent over the persisted base_state.json on resume — so
+        # without mirroring the new model here, a restart would silently revert
+        # to the old one. Only ``acp_model`` needs updating: ``model_post_init``
+        # re-derives the sentinel ``llm.model`` from it on reload.
+        self.stored = self.stored.model_copy(
+            update={"agent": self.stored.agent.model_copy(update={"acp_model": model})}
+        )
+        await self.save_meta()
 
     async def close(self):
         if self._lease_task is not None:

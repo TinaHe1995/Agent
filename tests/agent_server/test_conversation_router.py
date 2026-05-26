@@ -1205,6 +1205,33 @@ def test_switch_acp_model_protocol_error_returns_400(
         client.app.dependency_overrides.clear()
 
 
+def test_switch_acp_model_timeout_returns_504(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """A TimeoutError (wedged/slow ACP server) maps to 504, not 500.
+
+    ``ACPAgent.set_acp_model`` bounds the ``session/set_model`` round-trip with
+    ``acp_prompt_timeout``; an expired call raises ``TimeoutError``, which the
+    route surfaces as a Gateway Timeout rather than an opaque 500.
+    """
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.switch_acp_model.side_effect = TimeoutError(
+        "ACP server did not answer set_session_model within 600s"
+    )
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 504
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_run_conversation_already_running(
     client, mock_conversation_service, mock_event_service, sample_conversation_id
 ):

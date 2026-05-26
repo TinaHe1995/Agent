@@ -400,6 +400,7 @@ async def switch_conversation_llm(
         400: {"description": "Agent is not ACP, or provider can't switch models"},
         404: {"description": "Conversation not found"},
         409: {"description": "ACP session not initialized yet"},
+        504: {"description": "ACP server did not answer the model switch in time"},
     },
 )
 async def switch_conversation_acp_model(
@@ -421,6 +422,14 @@ async def switch_conversation_acp_model(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except TimeoutError as e:
+        # The bounded session/set_model round-trip expired. The ACP server is
+        # wedged/slow rather than rejecting the request, so surface a 504
+        # instead of an opaque 500.
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=str(e),
         )
     except RuntimeError as e:
