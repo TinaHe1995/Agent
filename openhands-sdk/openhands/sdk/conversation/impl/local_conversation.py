@@ -1174,12 +1174,14 @@ class LocalConversation(BaseConversation):
                         )
                     break
 
+                acp_step_start_event_count = 0
                 with self._state:
                     if self._state.execution_status in (
                         ConversationExecutionStatus.PAUSED,
                         ConversationExecutionStatus.STUCK,
                     ):
                         break
+                    acp_step_start_event_count = len(self._state.events)
                     if acp_step_user_message_id is not None:
                         self._state.agent_state = {
                             **self._state.agent_state,
@@ -1196,6 +1198,10 @@ class LocalConversation(BaseConversation):
                 )
                 with self._state:
                     iteration += 1
+                    pause_requested_during_acp_step = any(
+                        isinstance(event, PauseEvent)
+                        for event in self._state.events[acp_step_start_event_count:]
+                    )
                     updated_agent_state = dict(self._state.agent_state)
                     if (
                         updated_agent_state.get(ACP_INFLIGHT_PROMPT_USER_MESSAGE_ID)
@@ -1224,6 +1230,11 @@ class LocalConversation(BaseConversation):
                         ConversationExecutionStatus.ERROR,
                         ConversationExecutionStatus.STUCK,
                     ):
+                        break
+                    if pause_requested_during_acp_step:
+                        self._state.execution_status = (
+                            ConversationExecutionStatus.PAUSED
+                        )
                         break
 
                     acp_prompt_messages = [

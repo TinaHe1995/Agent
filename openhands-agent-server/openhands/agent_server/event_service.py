@@ -437,6 +437,8 @@ class EventService:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._conversation.send_message, message)
         if run:
+            if self._explicit_interrupt_generation != explicit_interrupt_generation:
+                return
             (
                 did_mark_acp_prompt_superseded,
                 active_acp_prompt_has_latest_message,
@@ -451,8 +453,6 @@ class EventService:
             try:
                 await self.run(
                     acp_internal_rerun_generation=explicit_interrupt_generation
-                    if interrupted_acp
-                    else None
                 )
                 self._acp_internal_rerun_requested = False
             except ValueError as e:
