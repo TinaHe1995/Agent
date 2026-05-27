@@ -235,7 +235,12 @@ def _extract_session_models(response: Any) -> tuple[str | None, list[ACPModelInf
     current = getattr(models, "current_model_id", None)
     current = current if isinstance(current, str) and current else None
     raw = getattr(models, "available_models", None) or []
-    available = [ACPModelInfo.from_protocol(m) for m in raw]
+    # Drop entries without a usable id: an empty/missing ``model_id`` is an
+    # invalid picker option and an unusable ``set_session_model`` target, so we
+    # filter it out rather than surfacing ``model_id=""``.
+    available = [
+        info for info in (ACPModelInfo.from_protocol(m) for m in raw) if info.model_id
+    ]
     return current, available
 
 
@@ -1011,17 +1016,22 @@ class ACPAgent(AgentBase):
 
     @property
     def supports_runtime_model_switch(self) -> bool:
-        """Whether this provider supports live, mid-conversation model switching.
+        """Whether a live, mid-conversation model switch will be attempted.
 
-        A static provider capability (resolved from the detected ACP server),
-        not session state: tells a client whether to enable the inline model
-        picker's live-switch control vs. requiring a fresh session. ``False``
-        for unknown/custom servers and until the server identity is known
-        (i.e. before ``init_state``). See
+        Tells a client whether to offer the inline picker's live-switch control.
+        Kept in lockstep with :meth:`set_acp_model`, which refuses the switch
+        only for a *known* provider that declares no support and otherwise
+        attempts it optimistically — so a custom/unknown ACP server that does
+        support ``session/set_model`` isn't needlessly blocked from the picker.
+        ``False`` before a session exists (nothing to switch yet).
+
+        See
         :meth:`~openhands.sdk.conversation.impl.local_conversation.LocalConversation.switch_acp_model`.
         """
+        if self._session_id is None:
+            return False
         provider = detect_acp_provider_by_agent_name(self._agent_name)
-        return provider is not None and provider.supports_runtime_model_switch
+        return provider is None or provider.supports_runtime_model_switch
 
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
@@ -1141,13 +1151,24 @@ class ACPAgent(AgentBase):
             # switching without re-detecting the provider server-side.
             "acp_supports_runtime_model_switch": self.supports_runtime_model_switch,
         }
+        # ``current_model_id`` is known whenever the caller forced ``acp_model``
+        # (e.g. a prior runtime switch) or the server reported one, even on a
+        # resume whose ``load_session`` omitted the UNSTABLE ``models`` block.
         if self._current_model_id is not None:
             new_agent_state["acp_current_model_id"] = self._current_model_id
+        elif not truly_resumed:
+            new_agent_state.pop("acp_current_model_id", None)
+        # The list is gated *independently*: only replace it when this launch
+        # actually learned one (the session response supplied models). On a true
+        # resume where the block was omitted, ``_available_models`` is empty even
+        # though ``current_model_id`` may be set from ``acp_model`` — preserve
+        # the previously persisted list so the picker survives the restore;
+        # clear it only on a fresh (non-resumed) replacement that reported none.
+        if self._available_models:
             new_agent_state["acp_available_models"] = [
                 m.model_dump() for m in self._available_models
             ]
         elif not truly_resumed:
-            new_agent_state.pop("acp_current_model_id", None)
             new_agent_state.pop("acp_available_models", None)
         state.agent_state = new_agent_state
 

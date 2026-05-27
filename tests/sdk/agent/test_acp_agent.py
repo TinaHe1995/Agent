@@ -4154,6 +4154,50 @@ class TestACPSessionIdPersistence:
             {"model_id": "claude-opus-4-1", "name": "Opus 4.1", "description": None}
         ]
 
+    def test_resume_with_forced_model_preserves_persisted_available_models(
+        self, tmp_path
+    ):
+        """Resume with a switched ``acp_model`` must not blank the persisted
+        ``acp_available_models``.
+
+        Regression: ``current_model_id = self.acp_model or reported`` becomes
+        non-null from the forced ``acp_model`` even when ``load_session`` omits
+        the UNSTABLE ``models`` block (so ``_available_models`` is empty). The
+        list persistence must be gated on actually receiving a list, not on
+        ``current_model_id`` being set — otherwise the picker payload is wiped
+        on every resume of a switched conversation.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        # A prior runtime switch made ``model-b`` the authoritative model.
+        agent = _make_agent(acp_model="model-b")
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "resumable-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_current_model_id": "model-a",
+            "acp_available_models": [
+                {"model_id": "model-a", "name": "Model A", "description": None},
+                {"model_id": "model-b", "name": "Model B", "description": None},
+            ],
+        }
+        conn = self._make_conn()
+        load_response = MagicMock(spec=[])  # no .models block
+        conn.load_session = AsyncMock(return_value=load_response)
+
+        agent._executor = AsyncExecutor()
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        # current_model_id reflects the forced (switched) model...
+        assert state.agent_state["acp_current_model_id"] == "model-b"
+        # ...but the previously persisted list is preserved, not clobbered.
+        assert state.agent_state["acp_available_models"] == [
+            {"model_id": "model-a", "name": "Model A", "description": None},
+            {"model_id": "model-b", "name": "Model B", "description": None},
+        ]
+
     def test_fresh_replacement_clears_stale_model_when_new_session_omits_models(
         self, tmp_path
     ):
@@ -5009,15 +5053,20 @@ class TestExtractSessionModelsNormalization:
             )
         ]
 
-    def test_non_string_fields_degrade_without_raising(self):
-        # A malformed entry (missing/non-string fields) must not blow up the
-        # whole session bring-up — id falls back to "" and name/desc to None.
+    def test_drops_entries_without_usable_id(self):
+        # A malformed entry (missing/non-string id) must not blow up session
+        # bring-up, and must not surface as an empty-id picker option — it's
+        # dropped, while valid entries alongside it survive.
         response = MagicMock()
         response.models = MagicMock()
-        response.models.current_model_id = "x"
-        response.models.available_models = [self._raw(model_id=42)]
+        response.models.current_model_id = "good"
+        response.models.available_models = [
+            self._raw(model_id=42),  # non-string -> "" -> dropped
+            self._raw(model_id="good", name="Good"),
+            self._raw(model_id="", name="Empty"),  # empty -> dropped
+        ]
         _cur, avail = _extract_session_models(response)
-        assert avail == [ACPModelInfo(model_id="", name=None, description=None)]
+        assert avail == [ACPModelInfo(model_id="good", name="Good", description=None)]
 
 
 class TestACPAgentAvailableModelsProperty:
@@ -5054,18 +5103,45 @@ class TestACPAgentAvailableModelsProperty:
 
 
 class TestACPAgentSupportsRuntimeModelSwitch:
-    """``supports_runtime_model_switch`` resolves from the detected provider."""
+    """``supports_runtime_model_switch`` mirrors ``set_acp_model``'s gate.
 
-    def test_false_before_init(self):
-        # Server identity (``_agent_name``) is unknown until init_state runs.
-        assert _make_agent().supports_runtime_model_switch is False
+    It refuses only for a *known* provider that declares no support, attempts
+    optimistically for unknown/custom servers, and is ``False`` before a
+    session exists.
+    """
+
+    def test_false_before_session(self):
+        # No live session (``_session_id is None``) -> nothing to switch.
+        agent = _make_agent()
+        agent._agent_name = "codex-acp"
+        assert agent.supports_runtime_model_switch is False
 
     def test_true_for_known_switch_capable_provider(self):
         agent = _make_agent()
+        agent._session_id = "sess-1"
         agent._agent_name = "codex-acp"
         assert agent.supports_runtime_model_switch is True
 
-    def test_false_for_unknown_provider(self):
+    def test_optimistic_true_for_unknown_provider(self):
+        # Mirrors set_acp_model, which attempts the call for unknown/custom
+        # servers rather than refusing — so the picker isn't needlessly hidden.
         agent = _make_agent()
+        agent._session_id = "sess-1"
         agent._agent_name = "some-third-party-acp-server"
+        assert agent.supports_runtime_model_switch is True
+
+    def test_false_for_known_unsupported_provider(self, monkeypatch):
+        # A known provider that declares no support is the one case we refuse.
+        import openhands.sdk.agent.acp_agent as acp_agent_module
+
+        unsupported = MagicMock()
+        unsupported.supports_runtime_model_switch = False
+        monkeypatch.setattr(
+            acp_agent_module,
+            "detect_acp_provider_by_agent_name",
+            lambda _name: unsupported,
+        )
+        agent = _make_agent()
+        agent._session_id = "sess-1"
+        agent._agent_name = "locked-down-provider"
         assert agent.supports_runtime_model_switch is False

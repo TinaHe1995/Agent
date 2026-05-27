@@ -121,11 +121,10 @@ def test_switch_acp_model_refreshes_surfaced_current_model_id(tmp_path):
     """
     conv, agent = _make_acp_conversation(tmp_path)
     agent._current_model_id = "model-a"  # what _init captured at session start
-    # The hint init_state persists for cold list reads.
-    conv.state.agent_state = {
-        **conv.state.agent_state,
-        "acp_current_model_id": "model-a",
-    }
+    # Deliberately do NOT pre-seed ``acp_current_model_id`` in agent_state:
+    # an older/custom server may not have reported a model at init, yet a
+    # successful switch is authoritative and must still persist the hint.
+    assert "acp_current_model_id" not in conv.state.agent_state
 
     conv.switch_acp_model("model-b")
 
@@ -133,7 +132,7 @@ def test_switch_acp_model_refreshes_surfaced_current_model_id(tmp_path):
     assert isinstance(switched, ACPAgent)
     # Live PrivateAttr (carried onto the persisted agent by the model_copy).
     assert switched.current_model_id == "model-b"
-    # Persisted hint kept in sync for cold reads before the next re-init.
+    # Persisted hint written unconditionally for cold reads before re-init.
     assert conv.state.agent_state["acp_current_model_id"] == "model-b"
 
 
