@@ -79,6 +79,30 @@ def test_validate_fixture_cases_requires_every_schema_version() -> None:
         validate_fixture_cases(cases)
 
 
+def test_collect_fixture_cases_ignores_non_directory_entries(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "persisted_settings_baselines"
+    root.mkdir()
+    (root / "README.md").write_text("fixture notes")
+    version_dir = root / "v1"
+    version_dir.mkdir()
+    (version_dir / "conversation_settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "max_iterations": 123,
+                "confirmation_mode": False,
+                "security_analyzer": "llm",
+            }
+        )
+    )
+
+    cases = collect_fixture_cases(root)
+
+    assert [case.path.name for case in cases] == ["conversation_settings.json"]
+
+
 def test_collect_fixture_cases_rejects_mismatched_directory_version(
     tmp_path: Path,
 ) -> None:

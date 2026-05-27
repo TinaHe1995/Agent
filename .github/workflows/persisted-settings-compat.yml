@@ -28,6 +28,7 @@ jobs:
               run: uv sync --frozen --group dev
 
             - name: Run persisted settings compatibility check
+              shell: bash
               run: |
                   uv run python .github/scripts/check_persisted_settings_compat.py \
                     2>&1 | tee persisted-settings-compat.log

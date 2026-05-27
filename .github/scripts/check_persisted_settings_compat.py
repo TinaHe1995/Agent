@@ -4,7 +4,7 @@
 This script guards the versioned persisted-settings surfaces that are already
 loaded through explicit migration entry points today:
 
-- ``AgentSettings.from_persisted(...)``
+- ``validate_agent_settings(...)``
 - ``ConversationSettings.from_persisted(...)``
 - ``PersistedSettings.from_persisted(...)``
 
@@ -44,8 +44,8 @@ from openhands.agent_server.persistence import (
 from openhands.sdk.settings import (
     AGENT_SETTINGS_SCHEMA_VERSION,
     CONVERSATION_SETTINGS_SCHEMA_VERSION,
-    AgentSettings,
     ConversationSettings,
+    validate_agent_settings,
 )
 
 
@@ -233,7 +233,7 @@ SURFACES: dict[str, SurfaceConfig] = {
         key="agent_settings",
         display_name="AgentSettings",
         current_version=AGENT_SETTINGS_SCHEMA_VERSION,
-        loader=AgentSettings.from_persisted,
+        loader=validate_agent_settings,
         migration_guidance=(
             "If this persisted shape changed intentionally, bump "
             "AGENT_SETTINGS_SCHEMA_VERSION and add a migration in "
@@ -399,10 +399,7 @@ def collect_fixture_cases(root: Path = FIXTURE_ROOT) -> list[FixtureCase]:
     cases: list[FixtureCase] = []
     for version_dir in sorted(root.iterdir()):
         if not version_dir.is_dir():
-            raise PersistedSettingsCompatError(
-                "Unexpected non-directory in persisted settings fixtures: "
-                f"{version_dir}"
-            )
+            continue
         match = _FIXTURE_DIR_RE.fullmatch(version_dir.name)
         if match is None:
             raise PersistedSettingsCompatError(
@@ -732,9 +729,12 @@ def main() -> int:
         exclude_newer=baseline_cutoff,
     )
     validate_baseline_payload_cases(baseline_cases)
+    baseline_summary = f"openhands-sdk=={sdk_baseline}"
+    if agent_server_baseline is not None:
+        baseline_summary += f", openhands-agent-server=={agent_server_baseline}"
     print(
         f"Validated {len(baseline_cases)} baseline payload(s) from PyPI release "
-        f"openhands-sdk=={sdk_baseline}"
+        f"{baseline_summary}"
     )
     return 0
 
