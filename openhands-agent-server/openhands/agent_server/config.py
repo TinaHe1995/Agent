@@ -249,10 +249,23 @@ class Config(BaseModel):
         ),
     )
     conversation_container_forward_env: list[str] = Field(
-        default_factory=lambda: ["DEBUG"],
+        default_factory=lambda: [
+            "DEBUG",
+            "OH_SECRET_KEY",
+            "OH_SESSION_API_KEYS_0",
+        ],
         description=(
             "Environment variable names to forward from this server's "
-            "environment into every per-conversation container."
+            "environment into every per-conversation container.\n\n"
+            "Defaults explained:\n"
+            "* ``OH_SECRET_KEY`` — outer server and sub-containers share "
+            "the same persisted settings/secrets directory and must derive "
+            "the same cipher key, otherwise encrypted values won't "
+            "round-trip.\n"
+            "* ``OH_SESSION_API_KEYS_0`` — the outer's reverse-proxy "
+            "forwards the client's ``X-Session-API-Key`` header verbatim, "
+            "so the inner must accept the same key. (When the outer has "
+            "no session-key requirement at all, omitting this is fine.)"
         ),
     )
     conversation_container_platform: str = Field(

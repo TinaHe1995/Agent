@@ -1,26 +1,39 @@
 """Docker-runtime mode for the agent-server.
 
 When ``Config.conversation_runtime == "docker"`` the outer agent-server stops
-running conversations in-process and instead spawns a Docker container per
-conversation. Each container hosts its own agent-server (configured in
-``local`` mode), and this outer server acts as a thin reverse proxy in front
-of those containers.
+running conversations in-process and instead spawns one Docker container
+per conversation. Each container hosts its own (``local`` mode) agent-server
+that actually runs the agent loop, and this outer server:
+
+* reverse-proxies every conversation-scoped HTTP / WebSocket request to the
+  matching sub-container, and
+* answers list / count / search / get queries directly from the shared
+  on-disk persistence directory (no fan-out across containers needed).
+
+The outer and the sub-containers share the same ``conversations_path`` and
+``.openhands`` (settings/secrets/workspaces) directories via bind-mounts.
+The outer NEVER acquires a conversation lease — sub-containers own the
+work, the outer only reads metadata and proxies mutations.
 
 Submodules:
 
-* :mod:`.container_manager` — spawns / tracks / stops per-conversation
-  containers. Wraps ``docker run`` via subprocess.
-* :mod:`.proxy` — low-level HTTP and WebSocket forwarding helpers that
-  stream bytes between the outer server and the appropriate container.
-* :mod:`.routers` — FastAPI routers that replace the in-process
-  ``conversation_router``/``event_router``/``workspace_router``/``sockets_router``
-  when docker mode is active.
+* :mod:`.registry` — per-conversation :class:`DockerWorkspace` registry.
+* :mod:`.proxy` — low-level HTTP and WebSocket forwarding helpers.
+* :mod:`.routers` — FastAPI routes that intercept conversation-mutation
+  paths in docker mode (POST create, per-cid catch-all proxy, WS bridge).
 """
 
-from openhands.agent_server.docker_runtime.container_manager import (
-    ContainerManager,
-    RunningContainer,
+from openhands.agent_server.docker_runtime.registry import (
+    DockerConversationRegistry,
+    container_conv_dir,
+    container_persist_dir,
+    host_conv_subdir,
 )
 
 
-__all__ = ["ContainerManager", "RunningContainer"]
+__all__ = [
+    "DockerConversationRegistry",
+    "container_conv_dir",
+    "container_persist_dir",
+    "host_conv_subdir",
+]

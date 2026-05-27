@@ -1,16 +1,18 @@
 """End-to-end tests for the docker-runtime FastAPI routers.
 
-The "inner" container is replaced by a real FastAPI app running on an
-ephemeral localhost port, plumbed in via a stub :class:`ContainerManager`.
-We exercise the public HTTP and WebSocket surface of the outer agent-server
-the same way a real client would (via :class:`TestClient`), so any
-shape-of-the-wire bug in the proxy layer would show up here.
+The per-conversation "inner" container is replaced by a real FastAPI app
+bound to an ephemeral localhost port, plumbed in via a stub registry that
+mimics :class:`DockerConversationRegistry`. The outer agent-server runs
+under :class:`TestClient`, so any shape-of-the-wire bug in the proxy
+layer would show up here.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,7 +22,6 @@ from fastapi.testclient import TestClient
 
 from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
-from openhands.agent_server.docker_runtime.container_manager import RunningContainer
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +45,9 @@ def _build_inner_app(session_key: str) -> FastAPI:
     ):
         if not _check(x_session_api_key):
             return {"detail": "unauthorized"}, 401
-        # Magic flag used by ``test_post_retry_does_not_stop_existing_container``
-        # to drive the inner-server-rejects-the-create branch deterministically.
+        # Magic flag used by the retry-doesn't-stop-existing-container
+        # test to drive the inner-server-rejects-the-create branch
+        # deterministically.
         if payload.get("_force_400"):
             from fastapi import HTTPException
 
@@ -76,36 +78,22 @@ def _build_inner_app(session_key: str) -> FastAPI:
             return {"detail": "unauthorized"}, 401
         return {"file": file_path, "cid": cid}
 
-    # NB: more specific paths must be registered before ``/{cid}`` so
-    # FastAPI's first-match wins doesn't treat "search" / "count" as a cid.
-    @api.get("/conversations/search")
-    async def search_conversations(x_session_api_key: str = Header(default="")):
-        return {
-            "items": [{"id": "inner-1", "workspace": {"working_dir": "/workspace"}}],
-            "next_page_id": None,
-        }
-
-    # Inner agent-server's /count returns a BARE JSON integer (not an object).
-    @api.get("/conversations/count")
-    async def inner_count(x_session_api_key: str = Header(default="")):
-        return 1
-
-    @api.get("/conversations/{cid}")
-    async def get_conversation(cid: str, x_session_api_key: str = Header(default="")):
+    # The bash router is one of the global routers that's reverse-proxied
+    # via ``?cid=``; mimic it so the proxy test has a real upstream to hit.
+    @api.get("/bash/sessions")
+    async def list_bash_sessions(x_session_api_key: str = Header(default="")):
         if not _check(x_session_api_key):
             return {"detail": "unauthorized"}, 401
-        return {"id": cid, "workspace": {"working_dir": "/workspace"}}
+        return {"sessions": []}
 
     app.include_router(api)
 
     @app.websocket("/sockets/events/{cid}")
     async def events_ws(websocket: WebSocket, cid: str):
-        # Auth check via header on the upgrade request.
         if websocket.headers.get("x-session-api-key") != session_key:
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        # Echo back whatever the client sends, plus a server-initiated frame.
         await websocket.send_text(f"hello {cid}")
         try:
             while True:
@@ -125,14 +113,10 @@ def _run_inner_app(session_key: str):
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    # uvicorn assigns the real port lazily; wait until it's bound.
-    import time
-
     deadline = time.time() + 10
     port: int | None = None
     while time.time() < deadline:
         if server.started and server.servers:
-            # ``servers[0].sockets[0].getsockname()`` gives us the bound port.
             sockets = list(server.servers)[0].sockets
             if sockets:
                 port = sockets[0].getsockname()[1]
@@ -148,68 +132,74 @@ def _run_inner_app(session_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Stub ContainerManager wired into the outer app
+# Stub registry wired into the outer app
 # ---------------------------------------------------------------------------
 
 
-class _StubContainerManager:
-    """A stand-in ContainerManager that points every conversation at a
-    pre-existing real HTTP server (the fake inner app)."""
+@dataclass
+class _FakeWorkspace:
+    """Stub ``DockerWorkspace``-shaped object that only carries the two
+    attributes the proxy routers touch."""
 
-    def __init__(self, port: int, session_key: str) -> None:
-        self._port = port
-        self._session_key = session_key
-        self._containers: dict[UUID, RunningContainer] = {}
+    host: str
+    api_key: str | None
 
-    def _make(self, cid: UUID) -> RunningContainer:
-        return RunningContainer(
-            conversation_id=cid,
-            container_id=f"fake-{cid.hex[:8]}",
-            host_port=self._port,
-            session_api_key=self._session_key,
-            image="fake",
+
+@dataclass
+class _StubRegistry:
+    """A stand-in :class:`DockerConversationRegistry` that points every
+    conversation at a pre-existing real HTTP server (the fake inner app)."""
+
+    port: int
+    session_key: str
+    _workspaces: dict[UUID, _FakeWorkspace] = field(default_factory=dict)
+
+    def _make(self) -> _FakeWorkspace:
+        return _FakeWorkspace(
+            host=f"http://127.0.0.1:{self.port}",
+            api_key=self.session_key,
         )
 
-    def preregister(self, cid: UUID) -> RunningContainer:
+    def preregister(self, cid: UUID) -> _FakeWorkspace:
         """Test helper: seed the registry with a pre-existing container so
-        the next ``manager.start(cid)`` call hits the ``is_new=False`` path.
-        """
-        self._containers[cid] = self._make(cid)
-        return self._containers[cid]
+        the next ``get_or_create(cid)`` hits the ``is_new=False`` path."""
+        self._workspaces[cid] = self._make()
+        return self._workspaces[cid]
 
-    def get(self, cid: UUID) -> RunningContainer | None:
-        return self._containers.get(cid)
+    def get(self, cid: UUID) -> _FakeWorkspace | None:
+        return self._workspaces.get(cid)
 
-    def list(self):
-        return list(self._containers.values())
-
-    async def start(self, cid: UUID) -> tuple[RunningContainer, bool]:
-        if cid not in self._containers:
-            self._containers[cid] = self._make(cid)
-            return self._containers[cid], True
-        return self._containers[cid], False
+    async def get_or_create(self, cid: UUID) -> tuple[_FakeWorkspace, bool]:
+        if cid not in self._workspaces:
+            self._workspaces[cid] = self._make()
+            return self._workspaces[cid], True
+        return self._workspaces[cid], False
 
     async def stop(self, cid: UUID) -> bool:
-        return self._containers.pop(cid, None) is not None
+        return self._workspaces.pop(cid, None) is not None
 
     async def shutdown(self) -> None:
-        self._containers.clear()
+        self._workspaces.clear()
 
 
 @pytest.fixture
-def docker_app():
+def docker_app(tmp_path):
     """Spin up the docker-mode outer FastAPI app + a fake inner server.
 
-    We deliberately do NOT enter the lifespan context (no ``with TestClient(...)
-    as client``): the lifespan starts a tmux/vscode/desktop service that we
-    don't want to drag into these tests. Instead we set ``container_manager``
-    and ``proxy_client`` directly on ``app.state``, which is what the lifespan
-    would do in docker mode.
+    We deliberately do NOT enter the lifespan context: the lifespan starts
+    a tmux/vscode/desktop service we don't want to drag into these tests.
+    Instead we set ``docker_registry`` directly on ``app.state``, which is
+    what the lifespan would do in docker mode.
     """
     session_key = "inner-secret"
     with _run_inner_app(session_key) as port:
-        app = create_app(Config(conversation_runtime="docker"))
-        app.state.container_manager = _StubContainerManager(port, session_key)
+        app = create_app(
+            Config(
+                conversation_runtime="docker",
+                conversations_path=tmp_path / "conversations",
+            )
+        )
+        app.state.docker_registry = _StubRegistry(port=port, session_key=session_key)
         client = TestClient(app)
         try:
             yield client, app
@@ -218,7 +208,7 @@ def docker_app():
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# /api/conversations — POST and per-cid catch-all
 # ---------------------------------------------------------------------------
 
 
@@ -232,24 +222,19 @@ def test_post_conversations_spawns_and_forwards(docker_app):
     assert resp.status_code == 200
     payload = resp.json()
 
-    # Inner app sees a freshly-minted conversation_id and the rewritten
-    # workspace path. We don't care what the id is, only that it's
-    # consistent.
     inner_payload = payload["echoed"]
-    assert inner_payload["workspace"]["working_dir"] == "/workspace"
     cid = UUID(inner_payload["conversation_id"])
-    assert app.state.container_manager.get(cid) is not None
+    assert app.state.docker_registry.get(cid) is not None
 
 
 def test_subpath_proxied_to_inner_server(docker_app):
-    client, app = docker_app
+    client, _ = docker_app
     create = client.post(
         "/api/conversations",
         json={"workspace": {"working_dir": "/x"}, "agent": {}},
     )
     cid = UUID(create.json()["echoed"]["conversation_id"])
 
-    # Generic catch-all routes
     run = client.get(f"/api/conversations/{cid}/run")
     assert run.status_code == 200
     assert run.json() == {"cid": str(cid), "status": "running"}
@@ -273,85 +258,111 @@ def test_delete_proxies_then_stops_container(docker_app):
         json={"workspace": {"working_dir": "/x"}, "agent": {}},
     )
     cid = UUID(create.json()["echoed"]["conversation_id"])
-    assert app.state.container_manager.get(cid) is not None
+    assert app.state.docker_registry.get(cid) is not None
 
     delete = client.delete(f"/api/conversations/{cid}")
     assert delete.status_code == 200
     assert delete.json() == {"deleted": str(cid)}
-    # Container has been deregistered.
-    assert app.state.container_manager.get(cid) is None
+    assert app.state.docker_registry.get(cid) is None
 
 
-def test_search_aggregates_across_containers(docker_app):
-    """``GET /api/conversations/search`` fans out and concatenates items.
+# ---------------------------------------------------------------------------
+# Global routers (bash/git/file/...) require ?cid=…
+# ---------------------------------------------------------------------------
 
-    The wire shape must match the local ``ConversationPage``
-    (``{"items": [...], "next_page_id": null}``).
-    """
+
+def test_global_router_requires_cid_in_docker_mode(docker_app):
+    """A request to ``/api/bash/...`` without ``?cid=`` must surface a
+    clear 400 rather than silently falling through to a local handler."""
     client, _ = docker_app
-    # Spawn two conversations
-    client.post("/api/conversations", json={"workspace": {}, "agent": {}})
-    client.post("/api/conversations", json={"workspace": {}, "agent": {}})
+    resp = client.get("/api/bash/sessions")
+    assert resp.status_code == 400
+    assert "cid" in resp.json()["detail"]
 
-    resp = client.get("/api/conversations/search")
+
+def test_global_router_forwarded_with_cid(docker_app):
+    """With ``?cid=…`` the global router proxies to the matching
+    sub-container."""
+    client, app = docker_app
+    cid = uuid4()
+    app.state.docker_registry.preregister(cid)
+
+    resp = client.get(f"/api/bash/sessions?cid={cid}")
     assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["next_page_id"] is None
-    # Each inner server returns one item -> we should see two.
-    assert len(payload["items"]) == 2
+    assert resp.json() == {"sessions": []}
 
 
-def test_batch_get_preserves_local_contract(docker_app):
-    """``GET /api/conversations?ids=...`` must keep the local contract:
-
-    * ``ids`` is required (no ``ids`` -> 422),
-    * the response is a JSON list (NOT a page object),
-    * missing ids slot in as ``null``.
-    """
+def test_global_router_404_for_unknown_cid(docker_app):
     client, _ = docker_app
-
-    # No ids -> 422 (FastAPI validation), matching local behaviour.
-    no_ids = client.get("/api/conversations")
-    assert no_ids.status_code == 422
-
-    # Spawn one conversation; look up alongside a fake id.
-    created = client.post("/api/conversations", json={"workspace": {}, "agent": {}})
-    cid = UUID(created.json()["echoed"]["conversation_id"])
-    missing = uuid4()
-
-    resp = client.get(f"/api/conversations?ids={cid}&ids={missing}")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert isinstance(body, list)
-    assert len(body) == 2
-    assert body[0] is not None and body[0]["id"] == str(cid)
-    assert body[1] is None
+    resp = client.get(f"/api/bash/sessions?cid={uuid4()}")
+    assert resp.status_code == 404
 
 
-def test_count_returns_bare_integer(docker_app):
-    """``GET /api/conversations/count`` must return a bare integer
-    (matching the local-mode wire contract), not ``{"count": N}``.
+# ---------------------------------------------------------------------------
+# Read-only metadata: list / count / search / get are served by the LOCAL
+# ``conversation_router`` reading the shared persistence dir, NOT by a
+# proxy. We don't exhaustively test the metadata semantics (they're
+# covered by ``test_conversation_service.py``), only that the routes are
+# wired and behave at the wire level.
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_routes_are_mounted_locally_in_docker_mode(tmp_path):
+    """``GET /api/conversations``, ``/api/conversations/count``, and
+    ``/api/conversations/search`` must come from the LOCAL conversation
+    router in docker mode — they read the shared persistence dir on
+    disk, the docker proxy does not intercept them.
+
+    We assert by inspecting the registered routes (not by hitting the
+    endpoints) because the lifespan that initializes the conversation
+    service isn't entered in these unit tests.
     """
-    client, _ = docker_app
+    app = create_app(
+        Config(
+            conversation_runtime="docker",
+            conversations_path=tmp_path / "conversations",
+        )
+    )
+    paths = {getattr(r, "path", None): getattr(r, "endpoint", None) for r in app.routes}
+    # Existence: the local conversation_router exposes these.
+    assert "/api/conversations" in paths
+    assert "/api/conversations/count" in paths
+    assert "/api/conversations/search" in paths
+    # Their endpoints must come from ``conversation_router``, not from any
+    # ``docker_runtime`` module.
+    for p in (
+        "/api/conversations",
+        "/api/conversations/count",
+        "/api/conversations/search",
+    ):
+        ep = paths[p]
+        if ep is not None:
+            assert "docker_runtime" not in ep.__module__
 
-    # Empty registry: sum across zero containers is 0.
-    zero = client.get("/api/conversations/count")
-    assert zero.status_code == 200
-    assert zero.json() == 0  # bare int, not {"count": 0}
 
-    client.post("/api/conversations", json={"workspace": {}, "agent": {}})
-    one = client.get("/api/conversations/count")
-    assert one.json() == 1
-    assert one.headers["content-type"].startswith("application/json")
+def test_local_mode_routes_are_unchanged(tmp_path):
+    """Sanity check: enabling docker mode must not have leaked into local."""
+    app = create_app(
+        Config(
+            conversation_runtime="local",
+            conversations_path=tmp_path / "conversations",
+        )
+    )
+    paths = {r.path for r in app.routes if hasattr(r, "path")}
+    assert "/api/conversations" in paths
+    # The docker-mode catch-all path must NOT appear in local mode.
+    assert "/api/conversations/{conversation_id}/{tail:path}" not in paths
+
+
+# ---------------------------------------------------------------------------
+# WebSockets
+# ---------------------------------------------------------------------------
 
 
 def test_websocket_bridges_to_inner_server(docker_app):
-    client, _ = docker_app
-    create = client.post(
-        "/api/conversations",
-        json={"workspace": {"working_dir": "/x"}, "agent": {}},
-    )
-    cid = UUID(create.json()["echoed"]["conversation_id"])
+    client, app = docker_app
+    cid = uuid4()
+    app.state.docker_registry.preregister(cid)
 
     with client.websocket_connect(f"/sockets/events/{cid}") as ws:
         greeting = ws.receive_text()
@@ -362,48 +373,25 @@ def test_websocket_bridges_to_inner_server(docker_app):
 
 def test_websocket_closes_when_conversation_unknown(docker_app):
     """When no container exists for the requested conversation, the bridge
-    must close the (already-accepted) socket. Auth-on-accept happens FIRST,
-    so the close fires after the handshake, not instead of it.
-    """
+    must close the (already-accepted) socket with 1008."""
     from starlette.websockets import WebSocketDisconnect
 
     client, _ = docker_app
     cid = uuid4()
     with client.websocket_connect(f"/sockets/events/{cid}") as ws:
-        # Server accepts then immediately closes with 1008. Reading any
-        # frame raises ``WebSocketDisconnect``.
         with pytest.raises(WebSocketDisconnect) as exc_info:
             ws.receive_text()
         assert exc_info.value.code == 1008
 
 
-def test_local_mode_routes_are_unchanged():
-    """Sanity check: enabling docker mode must not have leaked into local mode."""
-    app = create_app(Config(conversation_runtime="local"))
-    paths = {r.path for r in app.routes if hasattr(r, "path")}
-    # Local conversation router exposes the canonical POST /api/conversations
-    # plus the lifecycle endpoints. Docker mode catch-all lives at
-    # /api/conversations/{conversation_id}/{tail:path}; that path must NOT
-    # appear in local mode.
-    assert "/api/conversations" in paths
-    assert "/api/conversations/{conversation_id}/{tail:path}" not in paths
-
-
 # ---------------------------------------------------------------------------
-# Authentication: WebSocket bridge MUST enforce the outer server's session
-# keys before opening a connection to the inner container. This was a
-# critical review finding.
+# WebSocket auth — regression guards for the original review findings
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def docker_app_with_auth():
-    """Docker-mode app with ``session_api_keys`` configured, for auth tests.
-
-    Like ``docker_app`` we deliberately skip entering the lifespan (no
-    ``with TestClient(app) as ...``): the agent-server lifespan starts a
-    tmux/vscode/desktop bundle we don't want to drag into these tests.
-    """
+def docker_app_with_auth(tmp_path):
+    """Docker-mode app with ``session_api_keys`` configured."""
     session_key = "inner-secret"
     outer_key = "outer-secret"
     with _run_inner_app(session_key) as port:
@@ -411,9 +399,10 @@ def docker_app_with_auth():
             Config(
                 conversation_runtime="docker",
                 session_api_keys=[outer_key],
+                conversations_path=tmp_path / "conversations",
             )
         )
-        app.state.container_manager = _StubContainerManager(port, session_key)
+        app.state.docker_registry = _StubRegistry(port=port, session_key=session_key)
         client = TestClient(app)
         try:
             yield client, app, outer_key
@@ -422,17 +411,11 @@ def docker_app_with_auth():
 
 
 def test_websocket_rejects_wrong_session_key(docker_app_with_auth):
-    """With ``session_api_keys`` set, a WS upgrade carrying a wrong key in
-    the query string must be rejected BEFORE the connection is accepted.
-
-    The auth helper's "key provided but invalid" branch rejects pre-accept,
-    so TestClient surfaces this as an exception on ``websocket_connect``.
-
-    Regression guard for review finding R3311480598.
-    """
+    """A WS upgrade carrying a wrong key in the query string must be
+    rejected BEFORE the connection is accepted."""
     client, app, _outer_key = docker_app_with_auth
     cid = uuid4()
-    app.state.container_manager.preregister(cid)
+    app.state.docker_registry.preregister(cid)
 
     with pytest.raises(Exception):
         with client.websocket_connect(
@@ -442,22 +425,14 @@ def test_websocket_rejects_wrong_session_key(docker_app_with_auth):
 
 
 def test_websocket_rejects_missing_first_message_auth(docker_app_with_auth):
-    """With ``session_api_keys`` set and no key supplied at upgrade time,
-    the auth helper falls through to first-message-auth: it accepts the
-    socket, then waits for ``{"type": "auth", ...}``. A client that
-    instead disconnects or sends a non-auth frame must be cut off with
-    a 4001 close BEFORE the bridge to the inner server is created.
-
-    Regression guard for review finding R3311480598.
-    """
+    """No key supplied at upgrade -> the helper accepts the socket for
+    first-message-auth and closes 4001 on a non-auth frame."""
     from starlette.websockets import WebSocketDisconnect
 
     client, app, _outer_key = docker_app_with_auth
     cid = uuid4()
-    app.state.container_manager.preregister(cid)
+    app.state.docker_registry.preregister(cid)
 
-    # Connect with no key; the server accepts (so first-message-auth can
-    # read a frame) but will close 4001 once we send a non-auth frame.
     with client.websocket_connect(f"/sockets/events/{cid}") as ws:
         ws.send_text("not an auth frame")
         with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -466,42 +441,34 @@ def test_websocket_rejects_missing_first_message_auth(docker_app_with_auth):
 
 
 def test_websocket_accepts_with_valid_outer_key(docker_app_with_auth):
-    """A WS with the correct outer session key must bridge to the inner server."""
+    """The correct outer session key must bridge to the inner server."""
     client, app, outer_key = docker_app_with_auth
     cid = uuid4()
-    app.state.container_manager.preregister(cid)
+    app.state.docker_registry.preregister(cid)
 
     with client.websocket_connect(
         f"/sockets/events/{cid}?session_api_key={outer_key}",
     ) as ws:
-        # Inner app's echo loop is reached, so we end up with a standard
-        # hello + echo round-trip.
         assert ws.receive_text() == f"hello {cid}"
         ws.send_text("ping")
         assert ws.receive_text() == "echo:ping"
 
 
 # ---------------------------------------------------------------------------
-# Idempotent POST: a retried-create against an existing conversation must
-# NOT tear down the live container if the inner server returns 4xx.
+# Idempotent POST retry semantics
 # ---------------------------------------------------------------------------
 
 
 def test_post_retry_does_not_stop_existing_container_on_inner_4xx(docker_app):
-    """If ``manager.start()`` returns an existing container (``is_new=False``)
+    """If ``get_or_create()`` returns an existing workspace (``is_new=False``)
     and the inner server then returns a 4xx, we MUST leave the container
-    running. Regression guard for review finding R3311480570.
-    """
+    running."""
     client, app = docker_app
 
-    # Seed a container so the next POST hits the "already running" branch.
     cid = uuid4()
-    app.state.container_manager.preregister(cid)
-    assert app.state.container_manager.get(cid) is not None
+    app.state.docker_registry.preregister(cid)
+    assert app.state.docker_registry.get(cid) is not None
 
-    # Force the inner server to reject the create with 400. Because the
-    # container already existed (``is_new=False``), the outer route must
-    # NOT tear it down.
     resp = client.post(
         "/api/conversations",
         json={
@@ -513,18 +480,17 @@ def test_post_retry_does_not_stop_existing_container_on_inner_4xx(docker_app):
     )
     assert resp.status_code == 400
     # The live container survived the failed retry.
-    assert app.state.container_manager.get(cid) is not None
+    assert app.state.docker_registry.get(cid) is not None
 
 
 def test_post_first_create_tears_down_on_inner_4xx(docker_app):
-    """When ``manager.start()`` actually spawned a fresh container
-    (``is_new=True``) and the inner server then rejects the create, we
-    DO tear it down — otherwise an orphan container would leak.
-    """
+    """When ``get_or_create()`` spawned a fresh workspace (``is_new=True``)
+    and the inner server rejects the create, the workspace IS torn down
+    so we don't leak."""
     client, app = docker_app
 
     cid = uuid4()
-    assert app.state.container_manager.get(cid) is None
+    assert app.state.docker_registry.get(cid) is None
 
     resp = client.post(
         "/api/conversations",
@@ -536,23 +502,23 @@ def test_post_first_create_tears_down_on_inner_4xx(docker_app):
         },
     )
     assert resp.status_code == 400
-    # Fresh container that the inner server rejected got cleaned up.
-    assert app.state.container_manager.get(cid) is None
+    assert app.state.docker_registry.get(cid) is None
 
 
 # ---------------------------------------------------------------------------
 # Workspace static-file proxy is registered under the cookie-auth group
-# so iframe/<img> embeds can authenticate via the workspace cookie.
 # ---------------------------------------------------------------------------
 
 
-def test_workspace_router_registered_under_cookie_auth_in_docker_mode():
-    """In docker mode the workspace path must be routed via the
-    workspace-cookie auth group, not via the header-only catch-all.
-
-    Regression guard for review finding R3311480555.
-    """
-    app = create_app(Config(conversation_runtime="docker"))
+def test_workspace_router_registered_under_cookie_auth_in_docker_mode(tmp_path):
+    """In docker mode the workspace path must be registered before the
+    catch-all so it isn't shadowed by header-only auth."""
+    app = create_app(
+        Config(
+            conversation_runtime="docker",
+            conversations_path=tmp_path / "conversations",
+        )
+    )
 
     workspace_path = "/api/conversations/{conversation_id}/workspace/{file_path:path}"
     catchall_path = "/api/conversations/{conversation_id}/{tail:path}"
@@ -567,6 +533,4 @@ def test_workspace_router_registered_under_cookie_auth_in_docker_mode():
         for i, route in enumerate(app.routes)
         if getattr(route, "path", None) == catchall_path
     )
-    # The more specific workspace route MUST be registered before the
-    # catch-all so starlette's first-match wins picks it.
     assert workspace_route_index < catchall_route_index

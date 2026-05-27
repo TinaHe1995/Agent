@@ -1,25 +1,35 @@
-"""FastAPI routers used when ``Config.conversation_runtime == "docker"``.
+"""FastAPI routes that intercept conversation-mutation traffic in
+``Config.conversation_runtime == "docker"`` mode.
 
-These replace ``conversation_router``, ``event_router``, ``workspace_router``
-and the conversation half of ``sockets_router`` from the local-mode app.
-Settings, profiles, workspaces, auth, the cloud proxy, the static frontend
-and ``/server_info`` all continue to be served by the outer server unchanged
-— they're not conversation-scoped.
+What this module provides (the *new* surface):
 
-The flow on each request is:
+* ``docker_conversation_proxy_router`` — spawns a per-conversation
+  container on ``POST /api/conversations`` and forwards every per-cid
+  HTTP route to that container. Mounted BEFORE
+  :data:`openhands.agent_server.conversation_router.conversation_router`
+  so the proxy claims the mutation methods first; the unchanged
+  ``conversation_router`` keeps serving ``GET`` metadata routes from the
+  shared on-disk persistence dir (the outer's
+  :class:`ConversationService` runs in :attr:`read_only_metadata` mode).
+* ``docker_sockets_router`` — authenticates WebSocket clients against
+  the outer's session keys, then bridges to the inner container.
+* ``docker_global_proxy_router`` — reverse-proxies the *global*
+  (non-conversation-scoped) routers (bash, file, git, vscode, desktop,
+  hooks, mcp, skills, tool, llm) to a chosen sub-container. Each request
+  must include a ``?cid=…`` query param identifying which conversation's
+  container to talk to.
 
-1. Extract the ``conversation_id`` from the path (or, for ``POST
-   /api/conversations``, generate one and remember it).
-2. Look up — or, on creation, spawn — the matching Docker container in the
-   :class:`ContainerManager`.
-3. Forward the request body and headers via
-   :func:`openhands.agent_server.docker_runtime.proxy.proxy_http` (or, for
-   WebSockets, :func:`bridge_websocket`).
+What's intentionally NOT here:
+
+* No batch-get / count / search routes — those are served by the
+  unchanged ``conversation_router`` against the shared filesystem.
+* No workspace static router — the catch-all
+  ``/{cid}/{tail:path}`` proxy covers ``/{cid}/workspace/...`` already,
+  and the outer mounts a thin cookie-auth wrapper that delegates here.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -35,81 +45,78 @@ from fastapi import (
 )
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from openhands.agent_server.docker_runtime.container_manager import (
-    ContainerManager,
-    ContainerStartupError,
-    DockerUnavailableError,
-    RunningContainer,
-)
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
     proxy_http,
 )
+from openhands.agent_server.docker_runtime.registry import (
+    DockerConversationRegistry,
+)
 from openhands.sdk.logger import get_logger
+from openhands.workspace.docker.workspace import DockerWorkspace
 
 
 logger = get_logger(__name__)
 
 
-def get_container_manager(request: Request) -> ContainerManager:
-    manager = getattr(request.app.state, "container_manager", None)
-    if manager is None:
+def get_registry(request: Request) -> DockerConversationRegistry:
+    registry = getattr(request.app.state, "docker_registry", None)
+    if registry is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Container manager is not available",
+            detail="Docker conversation registry is not available",
         )
-    return manager
+    return registry
+
+
+def _ws_get_registry(websocket: WebSocket) -> DockerConversationRegistry | None:
+    return getattr(websocket.app.state, "docker_registry", None)
+
+
+def _workspace_or_404(
+    registry: DockerConversationRegistry, conversation_id: UUID
+) -> DockerWorkspace:
+    ws = registry.get(conversation_id)
+    if ws is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation not found: {conversation_id}",
+        )
+    return ws
 
 
 def _build_upstream_path(request: Request, path: str) -> str:
     """Reconstruct the inner-container path from the outer request.
 
     The inner agent-server exposes the same API surface, so we forward the
-    same path verbatim. Only difference: the outer path is rooted at
-    ``/api/conversations/...`` and so is the inner one, so we just pass it
-    through.
+    same path verbatim and append the original query string.
     """
     query = request.url.query
     return f"{path}?{query}" if query else path
 
 
-def _container_or_404(
-    manager: ContainerManager, conversation_id: UUID
-) -> RunningContainer:
-    running = manager.get(conversation_id)
-    if running is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation not found: {conversation_id}",
-        )
-    return running
-
-
 # ---------------------------------------------------------------------------
-# HTTP: /api/conversations
+# HTTP: /api/conversations (mutation half)
 # ---------------------------------------------------------------------------
 
-docker_conversation_router = APIRouter(
+docker_conversation_proxy_router = APIRouter(
     prefix="/conversations", tags=["Docker Conversations"]
 )
 
 
-@docker_conversation_router.post("")
+@docker_conversation_proxy_router.post("")
 async def docker_start_conversation(
     request: Request,
     include_skills: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
-    """Spawn a fresh per-conversation container, then forward the request.
+    """Spawn a fresh per-conversation container, then forward the create.
 
-    The container is registered against the *resolved* conversation id (either
-    the one the client supplied or a fresh UUID4 minted here). The body is
-    rewritten to:
-
-    * pin ``conversation_id`` so the inner agent-server agrees on the id,
-    * rewrite ``workspace.working_dir`` to ``/workspace`` — the inner
-      container's filesystem is the canonical one, not the outer host's.
+    The container is registered against the *resolved* conversation id
+    (either the one the client supplied or a fresh UUID4 minted here).
+    The body is rewritten to pin ``conversation_id`` so the inner
+    agent-server agrees on the id.
     """
-    manager = get_container_manager(request)
+    registry = get_registry(request)
 
     try:
         body_bytes = await request.body()
@@ -128,25 +135,14 @@ async def docker_start_conversation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid conversation_id: {raw_cid!r}",
         ) from exc
-
     body["conversation_id"] = str(conversation_id)
 
-    # Inside the container, the working dir is always /workspace. Whatever
-    # the caller passed in points to a host path we can't reach from the
-    # outer server's vantage point.
-    workspace = body.get("workspace") or {}
-    workspace["working_dir"] = "/workspace"
-    body["workspace"] = workspace
-
     try:
-        running, is_new = await manager.start(conversation_id)
-    except DockerUnavailableError as exc:
+        workspace, is_new = await registry.get_or_create(conversation_id)
+    except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-        ) from exc
-    except ContainerStartupError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to start conversation container: {exc}",
         ) from exc
 
     upstream_path = (
@@ -154,14 +150,21 @@ async def docker_start_conversation(
     )
     headers = {
         "content-type": request.headers.get("content-type", "application/json"),
-        "X-Session-API-Key": running.session_api_key,
         "accept": request.headers.get("accept", "application/json"),
     }
+    # Forward auth: prefer whatever the client sent (header takes precedence),
+    # fall back to the workspace's stored key (set from the outer's shared
+    # ``OH_SESSION_API_KEYS_0``). The inner agent-server only ever knows
+    # about the header, never the cookie.
+    inbound_key = request.headers.get("x-session-api-key")
+    proxied_key = inbound_key or workspace.api_key
+    if proxied_key:
+        headers["X-Session-API-Key"] = proxied_key
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                running.base_url + upstream_path,
+                workspace.host + upstream_path,
                 headers=headers,
                 content=json.dumps(body).encode("utf-8"),
             )
@@ -171,12 +174,10 @@ async def docker_start_conversation(
         # just created — otherwise a retry against an existing
         # conversation would kill the live one.
         logger.warning(
-            "Initial request to fresh container %s failed: %s",
-            running.container_id[:12],
-            exc,
+            "Initial request to fresh container %s failed: %s", workspace.host, exc
         )
         if is_new:
-            await manager.stop(conversation_id)
+            await registry.stop(conversation_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Conversation container could not accept the request: {exc}",
@@ -184,11 +185,8 @@ async def docker_start_conversation(
 
     if response.status_code >= 400 and is_new:
         # The inner server rejected the create. Don't leave the container
-        # behind in that case — it'd be orphaned, since no client will know
-        # to send DELETE. But only if we were the ones who started it:
-        # a retried create against an existing conversation must not tear
-        # down the live conversation.
-        await manager.stop(conversation_id)
+        # behind in that case.
+        await registry.stop(conversation_id)
 
     return JSONResponse(
         content=response.json() if response.content else None,
@@ -196,14 +194,14 @@ async def docker_start_conversation(
     )
 
 
-@docker_conversation_router.delete("/{conversation_id}")
+@docker_conversation_proxy_router.delete("/{conversation_id}")
 async def docker_delete_conversation(
     conversation_id: UUID,
     request: Request,
-) -> JSONResponse:
-    manager = get_container_manager(request)
-    running = manager.get(conversation_id)
-    if running is None:
+) -> Response:
+    registry = get_registry(request)
+    workspace = registry.get(conversation_id)
+    if workspace is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Conversation not found: {conversation_id}",
@@ -214,260 +212,110 @@ async def docker_delete_conversation(
     # delete failed.
     delete_status = 200
     delete_body: bytes = b""
+    delete_headers: dict[str, str] = {}
+    inbound_key = request.headers.get("x-session-api-key")
+    proxied_key = inbound_key or workspace.api_key
+    if proxied_key:
+        delete_headers["X-Session-API-Key"] = proxied_key
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             upstream = await client.delete(
-                f"{running.base_url}/api/conversations/{conversation_id}",
-                headers={"X-Session-API-Key": running.session_api_key},
+                f"{workspace.host}/api/conversations/{conversation_id}",
+                headers=delete_headers,
             )
         delete_status = upstream.status_code
         delete_body = upstream.content
     except httpx.HTTPError as exc:
         logger.warning("Inner DELETE failed for %s: %s", conversation_id, exc)
     finally:
-        await manager.stop(conversation_id)
+        await registry.stop(conversation_id)
 
-    return JSONResponse(
-        content=json.loads(delete_body) if delete_body else None,
+    return Response(
+        content=delete_body,
         status_code=delete_status,
+        media_type="application/json",
     )
 
 
-@docker_conversation_router.get("/search")
-async def docker_search_conversations(request: Request) -> JSONResponse:
-    """Fan-out listing endpoint — preserves the local
-    :class:`ConversationPage` wire shape (``{"items": [...], "next_page_id":
-    null}``). Each inner agent-server has at most one conversation, so we
-    just concatenate the inner ``items`` lists. ``page_id`` / ``limit`` /
-    ``sort_order`` are not honored across containers in this first cut.
-    """
-    return await _fanout_search(request)
-
-
-@docker_conversation_router.get("/count")
-async def docker_count_conversations(request: Request) -> Response:
-    """Fan-out count — preserves the local contract of returning a bare
-    JSON integer (not ``{"count": N}``). Honors the ``?status=`` filter by
-    forwarding it to each container, so containers whose conversation does
-    not match contribute 0.
-    """
-    return await _fanout_count(request)
-
-
-@docker_conversation_router.get("")
-async def docker_batch_get_conversations(
-    request: Request,
-    ids: Annotated[list[UUID], Query()],
-    include_skills: Annotated[bool, Query()] = False,
-) -> JSONResponse:
-    """Batch-get conversations by id — preserves the local
-    ``GET /api/conversations?ids=...`` contract (returns
-    ``list[ConversationInfo | None]`` with ``None`` for missing ids).
-
-    Each id is looked up in the container registry; matched ids are
-    fetched from their respective container, mismatched ids slot in as
-    ``None``. ``ids`` is required (same as local mode).
-    """
-    if len(ids) >= 100:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Too many ids requested (limit 100).",
-        )
-
-    manager = get_container_manager(request)
-
-    async def _fetch_one(cid: UUID):
-        running = manager.get(cid)
-        if running is None:
-            return None
-        suffix = "?include_skills=true" if include_skills else ""
-        url = f"{running.base_url}/api/conversations/{cid}{suffix}"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    url, headers={"X-Session-API-Key": running.session_api_key}
-                )
-        except httpx.HTTPError as exc:
-            logger.warning("Batch-get failed for %s: %s", cid, exc)
-            return None
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            return None
-        try:
-            return resp.json()
-        except json.JSONDecodeError:
-            return None
-
-    results = await asyncio.gather(*[_fetch_one(cid) for cid in ids])
-    return JSONResponse(content=list(results), status_code=200)
-
-
-@docker_conversation_router.api_route(
+@docker_conversation_proxy_router.api_route(
     "/{conversation_id}",
-    methods=["GET", "PATCH"],
+    methods=["PATCH"],
 )
-async def docker_proxy_conversation_root(
+async def docker_proxy_conversation_root_mutation(
     conversation_id: UUID, request: Request
 ) -> StreamingResponse:
-    manager = get_container_manager(request)
-    running = _container_or_404(manager, conversation_id)
+    """Proxy mutating verbs on ``/api/conversations/{cid}``.
+
+    ``GET`` is intentionally NOT included — the outer's
+    ``conversation_router`` handles it locally by reading the shared
+    persistence dir.
+    """
+    registry = get_registry(request)
+    workspace = _workspace_or_404(registry, conversation_id)
     return await proxy_http(
         request,
-        running,
+        workspace,
         upstream_path=_build_upstream_path(
             request, f"/api/conversations/{conversation_id}"
         ),
     )
 
 
-@docker_conversation_router.api_route(
+@docker_conversation_proxy_router.api_route(
     "/{conversation_id}/{tail:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
 )
 async def docker_proxy_conversation_subpath(
     conversation_id: UUID, tail: str, request: Request
 ) -> StreamingResponse:
-    """Catch-all that proxies every conversation-scoped HTTP route.
+    """Catch-all that proxies every conversation-scoped sub-route.
 
     Covers ``/run``, ``/pause``, ``/interrupt``, ``/secrets``,
     ``/confirmation_policy``, ``/switch_profile``, ``/switch_llm``,
     ``/condense``, ``/fork``, ``/agent_final_response``, all of
-    ``/events/...`` (from ``event_router``), and all of ``/workspace/...``
-    (from ``workspace_router``).
+    ``/events/...``, and all of ``/workspace/...`` (static file
+    server).
     """
-    manager = get_container_manager(request)
-    running = _container_or_404(manager, conversation_id)
+    registry = get_registry(request)
+    workspace = _workspace_or_404(registry, conversation_id)
     upstream_path = _build_upstream_path(
         request, f"/api/conversations/{conversation_id}/{tail}"
     )
-    return await proxy_http(request, running, upstream_path=upstream_path)
+    return await proxy_http(request, workspace, upstream_path=upstream_path)
 
 
 # ---------------------------------------------------------------------------
-# HTTP fan-out helpers (search / count)
+# Workspace static files — same path as the local ``workspace_router``,
+# but served under the workspace-cookie auth group so that <iframe> /
+# <img> embeds work without an X-Session-API-Key header. Registered
+# under ``workspace_api_router`` in :mod:`api`, separately from the
+# header-only ``docker_conversation_proxy_router`` whose catch-all
+# would otherwise shadow this with header-only auth.
 # ---------------------------------------------------------------------------
 
-
-async def _inner_get_json(running: RunningContainer, upstream_path: str):
-    """Issue a GET to one container's inner agent-server and decode JSON.
-
-    Returns ``None`` on any failure so the caller can treat that container
-    as contributing nothing to the aggregate.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                running.base_url + upstream_path,
-                headers={"X-Session-API-Key": running.session_api_key},
-            )
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "Fan-out GET %s failed for %s: %s",
-            upstream_path,
-            running.container_id[:12],
-            exc,
-        )
-        return None
-    if resp.status_code != 200:
-        return None
-    try:
-        return resp.json()
-    except json.JSONDecodeError:
-        return None
+docker_workspace_proxy_router = APIRouter(
+    prefix="/conversations", tags=["Docker Workspace"]
+)
 
 
-async def _fanout_search(request: Request) -> JSONResponse:
-    """Fan-out for ``/api/conversations/search``.
-
-    Returns the same wire shape as :class:`ConversationPage` —
-    ``{"items": [...], "next_page_id": null}``. Each inner server runs at
-    most one conversation, so we just concatenate ``items`` from every
-    container's response.
-    """
-    manager = get_container_manager(request)
-    query = request.url.query
-    upstream_path = (
-        f"/api/conversations/search?{query}" if query else "/api/conversations/search"
-    )
-
-    results = await asyncio.gather(
-        *[_inner_get_json(c, upstream_path) for c in manager.list()]
-    )
-
-    aggregated_items: list = []
-    for result in results:
-        if isinstance(result, dict):
-            items = result.get("items")
-            if isinstance(items, list):
-                aggregated_items.extend(items)
-
-    return JSONResponse(
-        content={"items": aggregated_items, "next_page_id": None},
-        status_code=200,
-    )
-
-
-async def _fanout_count(request: Request) -> Response:
-    """Fan-out for ``/api/conversations/count``.
-
-    The local endpoint returns a bare JSON integer. We forward the same
-    query string (``?status=...``) to every inner container, sum the
-    returned integers, and emit a bare integer.
-    """
-    manager = get_container_manager(request)
-    query = request.url.query
-    upstream_path = (
-        f"/api/conversations/count?{query}" if query else "/api/conversations/count"
-    )
-
-    results = await asyncio.gather(
-        *[_inner_get_json(c, upstream_path) for c in manager.list()]
-    )
-
-    total = 0
-    for result in results:
-        if isinstance(result, int):
-            total += result
-        # Be tolerant of an inner server that ever returns ``{"count": N}``.
-        elif isinstance(result, dict) and isinstance(result.get("count"), int):
-            total += result["count"]
-
-    return Response(content=json.dumps(total), media_type="application/json")
-
-
-# ---------------------------------------------------------------------------
-# Workspace static files — same path as the local workspace_router, but
-# served under the workspace-cookie auth group so that browser iframe /
-# <img> embeds work without the X-Session-API-Key header. Registered
-# BEFORE ``docker_conversation_router``'s catch-all so the more specific
-# workspace path wins. We deliberately do NOT pull in the cookie
-# dependency here — ``api.py`` mounts this router under the existing
-# ``workspace_api_router`` whose dependencies already implement
-# cookie-or-header auth.
-# ---------------------------------------------------------------------------
-
-docker_workspace_router = APIRouter(prefix="/conversations", tags=["Docker Workspace"])
-
-
-@docker_workspace_router.get("/{conversation_id}/workspace/{file_path:path}")
+@docker_workspace_proxy_router.get("/{conversation_id}/workspace/{file_path:path}")
 async def docker_proxy_workspace_file(
     conversation_id: UUID, file_path: str, request: Request
 ) -> StreamingResponse:
     """Proxy workspace static-file reads to the per-conversation container.
 
-    The local :class:`workspace_router` resolves ``file_path`` against the
+    The local ``workspace_router`` resolves ``file_path`` against the
     conversation's working dir on the host. In docker mode the canonical
-    filesystem lives inside the container, so we just hand the request
-    through to the inner server's identical route.
+    filesystem lives inside the sub-container, so we just hand the
+    request through to its identical route.
     """
-    manager = get_container_manager(request)
-    running = _container_or_404(manager, conversation_id)
+    registry = get_registry(request)
+    workspace = _workspace_or_404(registry, conversation_id)
     upstream_path = _build_upstream_path(
         request,
         f"/api/conversations/{conversation_id}/workspace/{file_path}",
     )
-    return await proxy_http(request, running, upstream_path=upstream_path)
+    return await proxy_http(request, workspace, upstream_path=upstream_path)
 
 
 # ---------------------------------------------------------------------------
@@ -485,15 +333,12 @@ async def docker_events_websocket(
 ) -> None:
     """Authenticated WebSocket bridge to the per-conversation container.
 
-    Auth must succeed against the OUTER server's session keys before we
-    reach the inner container — otherwise a request with no key would be
-    indistinguishable from one the outer server has already authorized,
-    since the bridge re-signs with the container's session key. We reuse
-    :func:`openhands.agent_server.sockets._accept_authenticated_websocket`,
-    which supports the same three auth methods the local sockets router
-    accepts (header / query / first-message ``{"type": "auth", ...}``).
-    On success the helper has already ``accept()``ed the socket, so the
-    downstream bridge must NOT accept again.
+    Outer-side auth must succeed against the outer server's session keys
+    BEFORE we touch the inner container. The helper accepts the same
+    three auth methods the local sockets router accepts (header / query /
+    first-message ``{"type": "auth", ...}``); on success it has already
+    ``accept()``ed the socket, so the downstream bridge must not accept
+    again.
     """
     # Imported lazily to avoid a circular import: the sockets module pulls
     # in the in-process conversation service at module scope.
@@ -502,32 +347,26 @@ async def docker_events_websocket(
     if not await _accept_authenticated_websocket(websocket, session_api_key):
         return
 
-    manager = getattr(websocket.app.state, "container_manager", None)
-    if manager is None:
+    registry = _ws_get_registry(websocket)
+    if registry is None:
         await websocket.close(code=1011)
         return
-    running = manager.get(conversation_id)
-    if running is None:
+    workspace = registry.get(conversation_id)
+    if workspace is None:
         # 1008 == policy violation; closest standard code for "no such conv".
         await websocket.close(code=1008)
         return
 
-    # Strip the auth query param before forwarding upstream — the inner
-    # server is reached via the container session key (in the header),
-    # never the outer-facing one.
+    # Strip the auth query param before forwarding upstream — the outer's
+    # session key must never leak into the inner container's request log.
     upstream_path = f"/sockets/events/{conversation_id}"
     forwarded_query = _strip_auth_query(websocket.url.query)
     if forwarded_query:
         upstream_path = f"{upstream_path}?{forwarded_query}"
-    await bridge_websocket(websocket, running, upstream_path=upstream_path)
+    await bridge_websocket(websocket, workspace, upstream_path=upstream_path)
 
 
 def _strip_auth_query(query: str) -> str:
-    """Remove ``session_api_key`` from a urlencoded query string.
-
-    The outer server's session key must never leak into the inner
-    container's logs or request history.
-    """
     if not query:
         return ""
     from urllib.parse import parse_qsl, urlencode
@@ -538,3 +377,106 @@ def _strip_auth_query(query: str) -> str:
         if k != "session_api_key"
     ]
     return urlencode(keep)
+
+
+# ---------------------------------------------------------------------------
+# HTTP: global (non-cid-scoped) routes — bash, git, file, vscode, desktop,
+# hooks, mcp, skills, tool, llm. These live at fixed prefixes like ``/bash``,
+# ``/git``, ``/file``, etc. In docker mode they MUST carry a ``?cid=...``
+# query parameter so the outer knows which sub-container to talk to.
+# ---------------------------------------------------------------------------
+
+# Path prefixes (under ``/api``) of the routers that are global in local
+# mode but conversation-scoped in docker mode. Anything else under ``/api``
+# is either served locally (settings, profiles, workspaces, server_info,
+# conversations metadata) or handled by ``docker_conversation_proxy_router``
+# (conversation mutations).
+_DOCKER_GLOBAL_PREFIXES: tuple[str, ...] = (
+    "bash",
+    "git",
+    "file",
+    "vscode",
+    "desktop",
+    "hooks",
+    "mcp",
+    "skills",
+    "tools",
+    "llm",
+)
+
+_GLOBAL_PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+
+
+def _make_docker_global_handler(prefix: str):
+    """Build a per-prefix proxy handler.
+
+    Registered once per prefix in :data:`_DOCKER_GLOBAL_PREFIXES`. We
+    cannot use a single ``/{tail:path}`` route because that would also
+    swallow ``/api/conversations``, ``/api/settings``, etc. and shadow
+    the local routers mounted afterwards on the same prefix.
+    """
+
+    async def _handler(
+        tail: str,
+        request: Request,
+        cid: Annotated[
+            UUID | None,
+            Query(
+                alias="cid",
+                description=(
+                    "Conversation id whose container should serve the request. "
+                    "Required for global routers (bash / git / file / vscode / "
+                    "desktop / hooks / mcp / skills / tools / llm) when "
+                    "``conversation_runtime == 'docker'``."
+                ),
+            ),
+        ] = None,
+    ) -> StreamingResponse:
+        if cid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Docker mode requires a ``?cid=…`` query parameter on "
+                    f"``/api/{prefix}/...`` so the outer server knows which "
+                    "conversation container to forward to."
+                ),
+            )
+        registry = get_registry(request)
+        workspace = _workspace_or_404(registry, cid)
+        upstream_path = _build_upstream_path(
+            request, f"/api/{prefix}/{tail}" if tail else f"/api/{prefix}"
+        )
+        return await proxy_http(request, workspace, upstream_path=upstream_path)
+
+    _handler.__name__ = f"docker_proxy_global_{prefix}"
+    return _handler
+
+
+def _make_docker_global_bare_handler(prefix: str):
+    """Companion to :func:`_make_docker_global_handler` for the
+    bare-prefix path (e.g. ``GET /api/bash``). Just calls the same logic
+    with an empty tail."""
+    tail_handler = _make_docker_global_handler(prefix)
+
+    async def _handler(
+        request: Request,
+        cid: Annotated[UUID | None, Query(alias="cid")] = None,
+    ) -> StreamingResponse:
+        return await tail_handler("", request, cid)
+
+    _handler.__name__ = f"docker_proxy_global_{prefix}_bare"
+    return _handler
+
+
+docker_global_proxy_router = APIRouter(tags=["Docker Global Proxy"])
+for _prefix in _DOCKER_GLOBAL_PREFIXES:
+    docker_global_proxy_router.add_api_route(
+        f"/{_prefix}/{{tail:path}}",
+        _make_docker_global_handler(_prefix),
+        methods=_GLOBAL_PROXY_METHODS,
+    )
+    docker_global_proxy_router.add_api_route(
+        f"/{_prefix}",
+        _make_docker_global_bare_handler(_prefix),
+        methods=_GLOBAL_PROXY_METHODS,
+    )
