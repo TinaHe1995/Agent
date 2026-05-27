@@ -3,8 +3,16 @@ from __future__ import annotations
 import pathlib
 from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from openhands.sdk.context.prompts import render_template
 from openhands.sdk.llm import Message, TextContent
@@ -15,9 +23,11 @@ from openhands.sdk.skills import (
     Skill,
     SkillKnowledge,
     load_available_skills,
+    merge_skills_by_name,
     to_prompt,
 )
 from openhands.sdk.skills.skill import DEFAULT_MARKETPLACE_PATH
+from openhands.sdk.utils.pydantic_secrets import serialize_secret
 
 
 logger = get_logger(__name__)
@@ -87,6 +97,22 @@ class AgentContext(BaseModel):
         ),
         json_schema_extra={"acp_compatible": True},
     )
+    load_project_skills: bool = Field(
+        default=False,
+        description=(
+            "Whether to automatically load project skills from the conversation "
+            "workspace (e.g. .openhands/skills/, AGENTS.md). Unlike "
+            "load_user_skills / load_public_skills, this flag is not resolved by "
+            "AgentContext itself (the workspace path is unknown at validation "
+            "time); LocalConversation resolves it lazily on the first "
+            "send_message() / run(), when the workspace is known. Also unlike "
+            "load_user_skills / load_public_skills (which yield to explicit "
+            "skills on a name conflict), resolved project skills are "
+            "authoritative: a project skill overrides a same-named skill already "
+            "present in `skills`."
+        ),
+        json_schema_extra={"acp_compatible": True},
+    )
     secrets: Mapping[str, SecretValue] | None = Field(
         default=None,
         description=(
@@ -108,6 +134,21 @@ class AgentContext(BaseModel):
         ),
         json_schema_extra={"acp_compatible": True},
     )
+
+    @field_serializer("secrets", when_used="always")
+    def _serialize_secrets(
+        self, value: Mapping[str, SecretValue] | None, info
+    ) -> dict[str, Any] | None:
+        """Mask raw-string ``secrets`` values via :func:`serialize_secret`."""
+        if value is None:
+            return None
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, SecretSource):
+                out[k] = v.model_dump(mode=info.mode, context=info.context)
+            else:
+                out[k] = serialize_secret(SecretStr(v), info)
+        return out
 
     @field_validator("skills")
     @classmethod
@@ -136,15 +177,14 @@ class AgentContext(BaseModel):
             marketplace_path=self.marketplace_path,
         )
 
-        existing_names = {skill.name for skill in self.skills}
-        for name, skill in auto_skills.items():
-            if name not in existing_names:
-                self.skills.append(skill)
-            else:
-                logger.warning(
+        # Explicit skills are authoritative; auto-loaded skills only fill gaps.
+        explicit_names = {skill.name for skill in self.skills}
+        for name in auto_skills:
+            if name in explicit_names:
+                logger.debug(
                     f"Skipping auto-loaded skill '{name}' (already in explicit skills)"
                 )
-
+        self.skills = merge_skills_by_name(self.skills, auto_skills.values())
         return self
 
     def get_secret_infos(self) -> list[dict[str, str | None]]:
@@ -183,10 +223,11 @@ class AgentContext(BaseModel):
         """Split skills into repo-context and available-skills lists.
 
         Categorization rules (shared by system-message and ACP adapters):
-        - AgentSkills-format: always in available_skills (progressive disclosure).
-          Triggers also auto-inject via ``get_user_message_suffix``.
+        - AgentSkills-format: available_skills unless direct model invocation is
+          disabled. Triggers still auto-inject via ``get_user_message_suffix``.
         - Legacy with ``trigger=None``: full content in REPO_CONTEXT (always active).
-        - Legacy with triggers: listed in available_skills, injected on trigger.
+        - Legacy with triggers: listed in available_skills unless direct model
+          invocation is disabled, injected on trigger.
 
         Returns:
             ``(repo_skills, available_skills)`` tuple.
@@ -195,7 +236,8 @@ class AgentContext(BaseModel):
         available_skills: list[Skill] = []
         for s in self.skills:
             if s.is_agentskills_format or s.trigger is not None:
-                available_skills.append(s)
+                if not s.disable_model_invocation:
+                    available_skills.append(s)
             else:
                 repo_skills.append(s)
         return repo_skills, available_skills
@@ -311,7 +353,10 @@ class AgentContext(BaseModel):
                 f"ACP prompt context does not support AgentContext field(s): {fields}"
             )
 
-    def to_acp_prompt_context(self) -> str | None:
+    def to_acp_prompt_context(
+        self,
+        additional_secret_infos: list[dict[str, str | None]] | None = None,
+    ) -> str | None:
         """Return the AgentContext fields that ACP can consume as prompt text.
 
         ACP servers own their tools, MCP servers, hooks, and execution model, so
@@ -330,11 +375,20 @@ class AgentContext(BaseModel):
         ``user_message_suffix`` is a compatible field but is not emitted here
         because ``LocalConversation`` already applies it through
         ``event.to_llm_message()``; including it would duplicate it.
+
+        Args:
+            additional_secret_infos: Optional list of additional secret info dicts
+                from the conversation's secret_registry, matching the interface of
+                :meth:`get_system_message_suffix`. When provided, these secrets are
+                merged with any secrets already on the AgentContext so the rendered
+                ``<CUSTOM_SECRETS>`` block matches what the regular Agent emits.
         """
         self.validate_acp_compatibility()
         # No model-specific skill filtering for ACP — delegate to the shared
         # renderer which also renders the <CUSTOM_SECRETS> block from secrets.
-        return self.get_system_message_suffix()
+        return self.get_system_message_suffix(
+            additional_secret_infos=additional_secret_infos
+        )
 
     def get_user_message_suffix(
         self, user_message: Message, skip_skill_names: list[str]

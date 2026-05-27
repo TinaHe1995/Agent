@@ -77,7 +77,7 @@ MODELS = {
         "id": "kimi-k2.6",
         "display_name": "Kimi K2.6",
         "llm_config": {
-            "model": "litellm_proxy/accounts/graham-openhands/deployments/mghcd1dc",
+            "model": "litellm_proxy/moonshot/kimi-k2.6",
             "temperature": 1.0,
         },
     },
@@ -232,6 +232,11 @@ MODELS = {
         "llm_config": {"model": "litellm_proxy/deepseek/deepseek-reasoner"},
     },
     # https://api-docs.deepseek.com/news/news260424
+    "deepseek-v4-pro": {
+        "id": "deepseek-v4-pro",
+        "display_name": "DeepSeek V4 Pro",
+        "llm_config": {"model": "litellm_proxy/deepseek/deepseek-v4-pro"},
+    },
     "deepseek-v4-flash": {
         "id": "deepseek-v4-flash",
         "display_name": "DeepSeek V4 Flash",
@@ -342,6 +347,14 @@ MODELS = {
             "model": "litellm_proxy/trinity-large-thinking",
             "temperature": 1.0,
             "top_p": 0.95,
+        },
+    },
+    "amber-vector-3542": {
+        "id": "amber-vector-3542",
+        "display_name": "Amber Vector 3542",
+        "llm_config": {
+            "model": "litellm_proxy/amber-vector-3542",
+            "temperature": 0.0,
         },
     },
 }

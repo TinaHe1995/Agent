@@ -27,6 +27,7 @@ openhands-agent-server = { workspace = true }
 dev = [
     "pre-commit>=4.3.0",
     "packaging>=24.2",
+    "pillow>=12.1.1",
     "psutil>=7.0.0",
     "pyright[nodejs]>=1.1.405",
     "pytest>=9.0.3",
@@ -93,8 +94,11 @@ testpaths = [
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not stress'"
 asyncio_mode = "auto"
+markers = [
+    "stress: stress / scale tests, deselected by default. Run with `pytest -m stress` (see tests/agent_server/stress/__init__.py for details).",
+]
 
 # Pyright configuration for PEP 420 namespace packages
 # This is needed for VSCode to properly resolve imports across multiple packages in the monorepo

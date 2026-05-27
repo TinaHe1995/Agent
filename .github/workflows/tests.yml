@@ -44,6 +44,16 @@ jobs:
                     [ -f "$f" ] && violations="$violations  $f\n"
                   done
 
+                  # Detect test files hiding inside source packages instead of tests/
+                  # Excludes */testing/* dirs (testing utilities, not runnable tests)
+                  stray=$(find openhands-sdk openhands-tools openhands-workspace openhands-agent-server \
+                    \( -name 'test_*.py' -o -name '*_test.py' \) \
+                    -not -path '*/testing/*' \
+                    2>/dev/null || true)
+                  for f in $stray; do
+                    violations="$violations  $f (stray test outside tests/)\n"
+                  done
+
                   if [ -n "$violations" ]; then
                     echo "ERROR: Found test paths outside the allowed directories."
                     echo "The following will NOT be run by any CI job:"
@@ -65,7 +75,7 @@ jobs:
 
             - name: Detect sdk changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       openhands-sdk/**
@@ -76,7 +86,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -135,7 +145,7 @@ jobs:
 
             - name: Detect tools changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       openhands-tools/**
@@ -146,7 +156,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -195,7 +205,7 @@ jobs:
 
             - name: Detect Windows-relevant changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       openhands-tools/**
@@ -206,7 +216,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -267,7 +277,7 @@ jobs:
 
             - name: Detect Agent Server changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       openhands-agent-server/**
@@ -278,7 +288,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -324,7 +334,7 @@ jobs:
 
             - name: Detect workspace changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       openhands-workspace/**
@@ -335,7 +345,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -379,7 +389,7 @@ jobs:
 
             - name: Detect cross changes
               id: changed
-              uses: tj-actions/changed-files@v47
+              uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47
               with:
                   files: |
                       tests/**
@@ -390,7 +400,7 @@ jobs:
 
             - name: Install uv
               if: steps.changed.outputs.any_changed == 'true'
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -436,7 +446,7 @@ jobs:
               uses: actions/checkout@v6
 
             - name: Install uv
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   enable-cache: true
                   python-version: '3.13'
@@ -485,7 +495,7 @@ jobs:
             - name: Pytest coverage PR comment
               if: always()
               continue-on-error: true
-              uses: MishaKav/pytest-coverage-comment@v1
+              uses: MishaKav/pytest-coverage-comment@dd5b80bde6d16941f336518e92929e89069d8451 # v1
               with:
                   github-token: ${{ secrets.GITHUB_TOKEN }}
                   pytest-xml-coverage-path: coverage.xml

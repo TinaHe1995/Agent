@@ -629,10 +629,7 @@ def test_kimi_k2_6_config():
 
     assert model["id"] == "kimi-k2.6"
     assert model["display_name"] == "Kimi K2.6"
-    assert (
-        model["llm_config"]["model"]
-        == "litellm_proxy/accounts/graham-openhands/deployments/mghcd1dc"
-    )
+    assert model["llm_config"]["model"] == "litellm_proxy/moonshot/kimi-k2.6"
     assert model["llm_config"]["temperature"] == 1.0
 
 
@@ -644,6 +641,15 @@ def test_gpt_5_5_config():
     assert model["display_name"] == "GPT-5.5"
     assert model["llm_config"]["model"] == "litellm_proxy/openai/gpt-5.5"
     assert model["llm_config"]["reasoning_effort"] == "high"
+
+
+def test_deepseek_v4_pro_config():
+    """Test that deepseek-v4-pro has correct configuration."""
+    model = MODELS["deepseek-v4-pro"]
+
+    assert model["id"] == "deepseek-v4-pro"
+    assert model["display_name"] == "DeepSeek V4 Pro"
+    assert model["llm_config"]["model"] == "litellm_proxy/deepseek/deepseek-v4-pro"
 
 
 def test_deepseek_v4_flash_config():
@@ -665,4 +671,12 @@ def test_gpt_oss_120b_config():
         model["llm_config"]["model"]
         == "litellm_proxy/fireworks_ai/accounts/fireworks/models/gpt-oss-120b"
     )
+ 
+def test_amber_vector_3542_config():
+    """Test that amber-vector-3542 has correct configuration."""
+    model = MODELS["amber-vector-3542"]
+
+    assert model["id"] == "amber-vector-3542"
+    assert model["display_name"] == "Amber Vector 3542"
+    assert model["llm_config"]["model"] == "litellm_proxy/amber-vector-3542"
     assert model["llm_config"]["temperature"] == 0.0
