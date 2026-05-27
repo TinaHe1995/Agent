@@ -4198,6 +4198,45 @@ class TestACPSessionIdPersistence:
             {"model_id": "model-b", "name": "Model B", "description": None},
         ]
 
+    def test_resume_with_explicit_empty_models_clears_stale_list(self, tmp_path):
+        """Resume where the server *explicitly* reports ``availableModels: []``
+        must CLEAR the persisted list — not preserve it.
+
+        Regression: a truthy ``if self._available_models`` check couldn't tell
+        an omitted ``models`` block (preserve) from an explicit empty list
+        (clear), so a server that dropped its models kept advertising stale
+        picker options after resume. The ``None`` (absent) vs ``[]`` (reported
+        empty) distinction from ``_extract_session_models`` fixes this.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "resumable-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_current_model_id": "model-a",
+            "acp_available_models": [
+                {"model_id": "model-a", "name": "Model A", "description": None},
+            ],
+        }
+        # load_session DOES carry a ``models`` block, but the server now offers
+        # no models (explicit empty list).
+        conn = self._make_conn()
+        load_response = MagicMock()
+        load_response.models = MagicMock()
+        load_response.models.current_model_id = ""
+        load_response.models.available_models = []
+        conn.load_session = AsyncMock(return_value=load_response)
+
+        agent._executor = AsyncExecutor()
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        # The stale list is cleared (overwritten with []), not preserved.
+        assert state.agent_state["acp_available_models"] == []
+
     def test_fresh_replacement_clears_stale_model_when_new_session_omits_models(
         self, tmp_path
     ):
@@ -4951,9 +4990,10 @@ class TestACPAgentCurrentModelIdProperty:
 class TestExtractSessionModels:
     """``_extract_session_models`` reads the model the ACP server reports.
 
-    The ``models`` capability is marked UNSTABLE in the spec — older agents
-    omit the field entirely and the helper must tolerate that without
-    raising, returning ``(None, [])``.
+    The ``models`` capability is marked UNSTABLE in the spec. The second
+    element distinguishes **absent** (``None`` — block missing) from
+    **present-but-empty** (``[]`` — server reports no models), which the
+    resume-persistence logic relies on to preserve vs. clear the stored list.
     """
 
     def test_returns_both_when_response_carries_them(self):
@@ -4976,16 +5016,17 @@ class TestExtractSessionModels:
             )
         ]
 
-    def test_returns_empty_list_when_models_absent(self):
-        # Older agents don't include the ``models`` block at all.
+    def test_returns_none_list_when_models_block_absent(self):
+        # Older agents don't include the ``models`` block at all -> None, so
+        # callers know nothing was reported (and can preserve prior state).
         response = MagicMock(spec=[])
         cur, avail = _extract_session_models(response)
         assert cur is None
-        assert avail == []
+        assert avail is None
 
     def test_returns_empty_list_when_available_models_missing(self):
-        # Half-implemented agents may emit ``currentModelId`` without
-        # ``availableModels`` — propagate that as an empty list, not a crash.
+        # ``models`` block present but ``availableModels`` absent/None: the
+        # block WAS reported, so we return ``[]`` (present, no models), not None.
         response = MagicMock()
         response.models = MagicMock()
         response.models.current_model_id = "gpt-5"
@@ -4994,19 +5035,20 @@ class TestExtractSessionModels:
         assert cur == "gpt-5"
         assert avail == []
 
-    def test_returns_none_when_response_is_none(self):
+    def test_returns_none_list_when_response_is_none(self):
         # ``load_session`` can return ``None`` for servers that don't
-        # implement the call — the helper must not crash.
-        assert _extract_session_models(None) == (None, [])
+        # implement the call — the helper must not crash, and reports "absent".
+        assert _extract_session_models(None) == (None, None)
 
-    def test_returns_none_when_models_field_is_none(self):
+    def test_returns_none_list_when_models_field_is_none(self):
         response = MagicMock()
         response.models = None
-        assert _extract_session_models(response) == (None, [])
+        assert _extract_session_models(response) == (None, None)
 
     def test_returns_none_when_current_model_id_is_empty_string(self):
         # An empty string is treated the same as a missing field — we don't
-        # want to surface "" as a real model name.
+        # want to surface "" as a real model name. The block is present, so
+        # available_models is [] (not None).
         response = MagicMock()
         response.models = MagicMock()
         response.models.current_model_id = ""

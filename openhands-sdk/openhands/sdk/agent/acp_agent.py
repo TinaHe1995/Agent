@@ -215,23 +215,34 @@ def _select_auth_method(
     return None
 
 
-def _extract_session_models(response: Any) -> tuple[str | None, list[ACPModelInfo]]:
+def _extract_session_models(
+    response: Any,
+) -> tuple[str | None, list[ACPModelInfo] | None]:
     """Extract the model state off a session response.
 
     Returns a ``(current_model_id, available_models)`` pair, both best-effort.
     ``available_models`` is normalized into our own stable :class:`ACPModelInfo`
     type at this boundary so nothing downstream depends on the vendored
-    ``acp.schema`` shape. The ``models`` capability is marked **UNSTABLE** in
-    the ACP spec — agents predating it (or implementations that opt out) leave
-    the field absent or ``None``, in which case we return ``(None, [])``.
+    ``acp.schema`` shape.
+
+    The second element distinguishes **absent** from **empty** — this matters
+    for resume persistence (preserve the last-known list when the server didn't
+    report one; clear it when the server explicitly says it has none):
+
+    - ``None``  — the (UNSTABLE) ``models`` block was absent from the response
+      (older agent, opted out, or ``load_session`` not carrying it).
+    - ``[]``    — the server *did* report ``models`` but offers no (usable)
+      models this session.
+    - ``[...]`` — the reported models, minus any with an unusable ``model_id``.
+
     ``getattr`` keeps the helper tolerant of agents that emit a partial
     structure.
     """
     if response is None:
-        return None, []
+        return None, None
     models = getattr(response, "models", None)
     if models is None:
-        return None, []
+        return None, None
     current = getattr(models, "current_model_id", None)
     current = current if isinstance(current, str) and current else None
     raw = getattr(models, "available_models", None) or []
@@ -855,7 +866,11 @@ class ACPAgent(AgentBase):
     # ``available_models`` property (and ``ConversationInfo.available_models``)
     # so clients can render a picker and resolve ``current_model_id`` to a
     # display label themselves — the SDK does no name curation.
-    _available_models: list[ACPModelInfo] = PrivateAttr(default_factory=list)
+    # ``None`` encodes "the server didn't report a ``models`` block this launch"
+    # (distinct from ``[]`` = "reported, but no models"); the persistence logic
+    # in ``init_state`` uses that distinction to preserve vs clear the stored
+    # list on resume. The public ``available_models`` property coerces to ``[]``.
+    _available_models: list[ACPModelInfo] | None = PrivateAttr(default=None)
     # Callback to signal that the ACP subprocess is actively working.
     # Injected by the agent-server to call update_last_execution_time().
     _on_activity: Any = PrivateAttr(default=None)  # Callable[[], None] | None
@@ -1010,9 +1025,10 @@ class ACPAgent(AgentBase):
         Same lifecycle and serialization caveats as ``current_model_id``:
         in-process runtime state, lifted onto
         ``ConversationInfo.available_models`` by the agent-server for
-        cross-process consumers.
+        cross-process consumers. Always a list (the internal ``None``
+        "not-reported" sentinel is coerced to ``[]`` here).
         """
-        return list(self._available_models)
+        return list(self._available_models or [])
 
     @property
     def supports_runtime_model_switch(self) -> bool:
@@ -1158,13 +1174,19 @@ class ACPAgent(AgentBase):
             new_agent_state["acp_current_model_id"] = self._current_model_id
         elif not truly_resumed:
             new_agent_state.pop("acp_current_model_id", None)
-        # The list is gated *independently*: only replace it when this launch
-        # actually learned one (the session response supplied models). On a true
-        # resume where the block was omitted, ``_available_models`` is empty even
-        # though ``current_model_id`` may be set from ``acp_model`` — preserve
-        # the previously persisted list so the picker survives the restore;
-        # clear it only on a fresh (non-resumed) replacement that reported none.
-        if self._available_models:
+        # The list is gated *independently* on whether the server actually
+        # reported a ``models`` block this launch (``None`` = absent), NOT on
+        # whether the list is non-empty — so we can tell "server didn't report"
+        # apart from "server reported it has no models":
+        #   - reported (incl. an explicit ``[]``): overwrite, so a server that
+        #     dropped its models clears the now-stale picker options.
+        #   - not reported on a true resume: preserve the persisted list (the
+        #     UNSTABLE block is often omitted from ``load_session`` responses)
+        #     so the picker survives the restore even though ``current_model_id``
+        #     may be set from a forced ``acp_model``.
+        #   - not reported on a fresh (non-resumed) replacement: clear, since the
+        #     persisted list describes the previous session.
+        if self._available_models is not None:
             new_agent_state["acp_available_models"] = [
                 m.model_dump() for m in self._available_models
             ]
@@ -1298,7 +1320,9 @@ class ACPAgent(AgentBase):
             )
             prior_session_id = None
 
-        async def _init() -> tuple[str, str, str, str | None, list[ACPModelInfo]]:
+        async def _init() -> tuple[
+            str, str, str, str | None, list[ACPModelInfo] | None
+        ]:
             # Spawn the subprocess directly so we can install a
             # filtering reader that skips non-JSON-RPC lines some
             # ACP servers (e.g. claude-code-acp v0.1.x) write to
@@ -1396,7 +1420,9 @@ class ACPAgent(AgentBase):
             # (new_session for fresh, load_session for resume). Defaults stand
             # for agents that don't surface the UNSTABLE ``models`` field.
             reported_model_id: str | None = None
-            available_models: list[ACPModelInfo] = []
+            # ``None`` until a session call reports a ``models`` block; stays
+            # ``None`` for servers that never surface it (preserve-on-resume).
+            available_models: list[ACPModelInfo] | None = None
             if prior_session_id is not None:
                 try:
                     load_response = await conn.load_session(
