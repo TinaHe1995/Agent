@@ -19,10 +19,10 @@ from openhands.sdk.agent.acp_agent import (
     _image_url_to_acp_block,
     _maybe_set_session_model,
     _OpenHandsACPBridge,
-    _resolve_model_name,
     _select_auth_method,
     _serialize_tool_content,
 )
+from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.context import AgentContext
 from openhands.sdk.conversation.state import (
@@ -3441,7 +3441,13 @@ class TestACPSessionIdPersistence:
             "acp_session_id": "resumable-sess",
             "acp_session_cwd": str(tmp_path),
             "acp_current_model_id": "claude-opus-4-1",
-            "acp_current_model_name": "Opus 4.1",
+            "acp_available_models": [
+                {
+                    "model_id": "claude-opus-4-1",
+                    "name": "Opus 4.1",
+                    "description": None,
+                }
+            ],
         }
         # ``load_session`` returns a response whose ``models`` field is
         # absent — same shape as a server that doesn't surface the
@@ -3457,7 +3463,9 @@ class TestACPSessionIdPersistence:
         # Persisted values survive the resume even though load_session
         # didn't re-report them.
         assert state.agent_state["acp_current_model_id"] == "claude-opus-4-1"
-        assert state.agent_state["acp_current_model_name"] == "Opus 4.1"
+        assert state.agent_state["acp_available_models"] == [
+            {"model_id": "claude-opus-4-1", "name": "Opus 4.1", "description": None}
+        ]
 
     def test_fresh_replacement_clears_stale_model_when_new_session_omits_models(
         self, tmp_path
@@ -3480,7 +3488,9 @@ class TestACPSessionIdPersistence:
             "acp_session_id": "stale-sess",
             "acp_session_cwd": str(tmp_path),
             "acp_current_model_id": "claude-opus-4-1",
-            "acp_current_model_name": "Opus 4.1",
+            "acp_available_models": [
+                {"model_id": "claude-opus-4-1", "name": "Opus 4.1"}
+            ],
         }
         # load_session fails → new_session runs; its response has no .models.
         new_session_response = MagicMock(spec=["session_id"])
@@ -3497,7 +3507,7 @@ class TestACPSessionIdPersistence:
         # Replacement id wins, and the stale model fields are gone.
         assert state.agent_state["acp_session_id"] == "replacement-sess"
         assert "acp_current_model_id" not in state.agent_state
-        assert "acp_current_model_name" not in state.agent_state
+        assert "acp_available_models" not in state.agent_state
 
     def test_cwd_mismatch_clears_stale_model_when_new_session_omits_models(
         self, tmp_path
@@ -3515,7 +3525,9 @@ class TestACPSessionIdPersistence:
             "acp_session_id": "old-sess",
             "acp_session_cwd": "/some/other/place",
             "acp_current_model_id": "claude-opus-4-1",
-            "acp_current_model_name": "Opus 4.1",
+            "acp_available_models": [
+                {"model_id": "claude-opus-4-1", "name": "Opus 4.1"}
+            ],
         }
         new_session_response = MagicMock(spec=["session_id"])
         new_session_response.session_id = "fresh-sess"
@@ -3530,7 +3542,7 @@ class TestACPSessionIdPersistence:
         conn.new_session.assert_awaited_once()
         assert state.agent_state["acp_session_id"] == "fresh-sess"
         assert "acp_current_model_id" not in state.agent_state
-        assert "acp_current_model_name" not in state.agent_state
+        assert "acp_available_models" not in state.agent_state
 
     def test_fallback_replacement_id_lands_in_agent_state(self, tmp_path):
         """When load_session fails and new_session runs, init_state must
@@ -4009,13 +4021,21 @@ class TestExtractSessionModels:
         m1 = MagicMock()
         m1.model_id = "default"
         m1.name = "Default (recommended)"
+        m1.description = "Opus 4.7 with 1M context · Most capable"
         response = MagicMock()
         response.models = MagicMock()
         response.models.current_model_id = "default"
         response.models.available_models = [m1]
         cur, avail = _extract_session_models(response)
         assert cur == "default"
-        assert avail == [m1]
+        # Normalized into our stable ACPModelInfo, not the raw acp type.
+        assert avail == [
+            ACPModelInfo(
+                model_id="default",
+                name="Default (recommended)",
+                description="Opus 4.7 with 1M context · Most capable",
+            )
+        ]
 
     def test_returns_empty_list_when_models_absent(self):
         # Older agents don't include the ``models`` block at all.
@@ -4063,104 +4083,76 @@ class TestExtractSessionModels:
         assert _extract_session_models(response) == (None, [])
 
 
-class TestResolveModelName:
-    """``_resolve_model_name`` resolves alias model_ids to a useful display.
+class TestExtractSessionModelsNormalization:
+    """``_extract_session_models`` normalizes raw acp entries to ACPModelInfo.
 
-    The motivating case is claude-agent-acp returning ``"default"`` for
-    ``currentModelId`` while ``ModelInfo.name`` is also an alias
-    (``"Default (recommended)"``) — the *actual* resolved model
-    (``"Opus 4.7 with 1M context"``) lives in ``ModelInfo.description``.
+    The SDK deliberately re-maps the (UNSTABLE) ``acp.schema`` ``ModelInfo``
+    into our own stable type at this boundary, tolerating partial/malformed
+    entries rather than leaking the vendored shape or raising.
     """
 
-    def _model_info(
-        self,
-        model_id: str,
-        name: str | None,
-        description: str | None = None,
-    ) -> Any:
+    def _raw(self, model_id: Any, name: Any = None, description: Any = None) -> Any:
         m = MagicMock()
         m.model_id = model_id
         m.name = name
         m.description = description
         return m
 
-    def test_alias_resolves_via_description_first_segment(self):
-        # claude-agent-acp 0.36.1 actual shape — ``description`` leads with
-        # the resolved model identity, separated from capability blurbs by " · ".
-        models = [
-            self._model_info(
-                "default",
-                "Default (recommended)",
-                "Opus 4.7 with 1M context · Most capable for complex work",
-            ),
-            self._model_info(
-                "sonnet", "Sonnet", "Sonnet 4.6 · Best for everyday tasks"
-            ),
-            self._model_info("haiku", "Haiku", "Haiku 4.5 · Fastest for quick answers"),
+    def test_maps_fields_through(self):
+        response = MagicMock()
+        response.models = MagicMock()
+        response.models.current_model_id = "gpt-5.4/low"
+        response.models.available_models = [
+            self._raw("gpt-5.4/low", "gpt-5.4 (low)", "Strong everyday model."),
         ]
-        assert _resolve_model_name("default", models) == "Opus 4.7 with 1M context"
-        assert _resolve_model_name("sonnet", models) == "Sonnet 4.6"
-        assert _resolve_model_name("haiku", models) == "Haiku 4.5"
-
-    def test_alias_falls_back_to_name_when_description_missing(self):
-        # Server omits description: stop at ``name`` rather than at the raw id.
-        models = [self._model_info("default", "Default (recommended)")]
-        assert _resolve_model_name("default", models) == "Default (recommended)"
-
-    def test_concrete_id_uses_name_not_description(self):
-        # codex-acp: ``description`` is a capability blurb, not a model
-        # identity ("Optimized for professional work and long-running
-        # agents..."). The ``name`` ("gpt-5.4 (low)") is the right display.
-        models = [
-            self._model_info(
-                "gpt-5.4/low",
-                "gpt-5.4 (low)",
-                "Optimized for professional work and long-running agents. ...",
+        _cur, avail = _extract_session_models(response)
+        assert avail == [
+            ACPModelInfo(
+                model_id="gpt-5.4/low",
+                name="gpt-5.4 (low)",
+                description="Strong everyday model.",
             )
         ]
-        assert _resolve_model_name("gpt-5.4/low", models) == "gpt-5.4 (low)"
 
-    def test_falls_back_to_raw_id_when_no_match(self):
-        assert _resolve_model_name("gpt-5.5/xhigh", []) == "gpt-5.5/xhigh"
-        models = [self._model_info("other", "Other")]
-        assert _resolve_model_name("gpt-5.5/xhigh", models) == "gpt-5.5/xhigh"
-
-    def test_falls_back_to_id_when_entry_has_empty_name_and_no_description(self):
-        # Defensive: empty name + empty description shouldn't surface a
-        # blank chip — let the id through.
-        models = [self._model_info("custom_id", "", description="")]
-        assert _resolve_model_name("custom_id", models) == "custom_id"
-        models = [self._model_info("custom_id", None, description=None)]
-        assert _resolve_model_name("custom_id", models) == "custom_id"
-
-    def test_returns_none_when_id_is_none(self):
-        assert _resolve_model_name(None, []) is None
+    def test_non_string_fields_degrade_without_raising(self):
+        # A malformed entry (missing/non-string fields) must not blow up the
+        # whole session bring-up — id falls back to "" and name/desc to None.
+        response = MagicMock()
+        response.models = MagicMock()
+        response.models.current_model_id = "x"
+        response.models.available_models = [self._raw(model_id=42)]
+        _cur, avail = _extract_session_models(response)
+        assert avail == [ACPModelInfo(model_id="", name=None, description=None)]
 
 
-class TestACPAgentCurrentModelNameProperty:
-    """``current_model_name`` exposes the resolved display name."""
+class TestACPAgentAvailableModelsProperty:
+    """``available_models`` exposes the server's model list verbatim.
 
-    def test_defaults_to_none(self):
-        assert _make_agent().current_model_name is None
+    No server-side curation: the property hands back the normalized
+    ``ACPModelInfo`` list so clients render the picker and resolve
+    ``current_model_id`` to a display label themselves.
+    """
 
-    def test_resolves_alias_via_description_first_segment(self):
-        # claude-agent-acp default config: ``modelId="default"`` is an alias,
-        # ``name="Default (recommended)"`` is also an alias — the *actual*
-        # resolved model identity ("Opus 4.7 with 1M context") lives in
-        # ``description``. Surface that.
+    def test_defaults_to_empty(self):
+        assert _make_agent().available_models == []
+
+    def test_reflects_private_attr(self):
         agent = _make_agent()
-        agent._current_model_id = "default"
-        m = MagicMock()
-        m.model_id = "default"
-        m.name = "Default (recommended)"
-        m.description = "Opus 4.7 with 1M context · Most capable for complex work"
-        agent._available_models = [m]
-        assert agent.current_model_name == "Opus 4.7 with 1M context"
+        models = [
+            ACPModelInfo(
+                model_id="default",
+                name="Default (recommended)",
+                description="Opus 4.7 with 1M context · Most capable",
+            ),
+            ACPModelInfo(model_id="sonnet", name="Sonnet"),
+        ]
+        agent._available_models = models
+        assert agent.available_models == models
 
-    def test_falls_back_to_raw_id_when_lookup_misses(self):
-        # codex-acp pattern: concrete id, available_models may or may not
-        # carry a matching entry — either way we want the id surfaced.
+    def test_returns_a_copy(self):
+        # Mutating the returned list must not corrupt the agent's state.
         agent = _make_agent()
-        agent._current_model_id = "gpt-5.5/xhigh"
-        agent._available_models = []
-        assert agent.current_model_name == "gpt-5.5/xhigh"
+        agent._available_models = [ACPModelInfo(model_id="default")]
+        got = agent.available_models
+        got.append(ACPModelInfo(model_id="injected"))
+        assert [m.model_id for m in agent.available_models] == ["default"]

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from openhands.sdk import LLM
+from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.conversation_stats import ConversationStats
 from openhands.sdk.conversation.request import (  # re-export for backward compat
@@ -191,23 +192,25 @@ class _ConversationInfoBase(BaseModel):
             "agents, this is lifted off ``ACPAgent.current_model_id`` "
             "(populated from the ``models.currentModelId`` field on the "
             "ACP session response, or from ``acp_model`` when the caller "
-            "forced an override). ``None`` for older ACP servers that "
-            "don't surface the field, or while the agent is still "
-            "initializing. Native OpenHands agents leave this ``None`` — "
+            "forced an override). May be an opaque alias (e.g. "
+            'claude-agent-acp\'s ``"default"``); match it against '
+            "``available_models`` to get a display label. ``None`` for older "
+            "ACP servers that don't surface the field, or while the agent is "
+            "still initializing. Native OpenHands agents leave this ``None`` — "
             "consumers should read ``agent.llm.model`` for those."
         ),
     )
-    current_model_name: str | None = Field(
-        default=None,
+    available_models: list[ACPModelInfo] = Field(
+        default_factory=list,
         description=(
-            "Human-readable display name for the active model. For ACP "
-            "agents, this is lifted off ``ACPAgent.current_model_name``, "
-            "which resolves opaque aliases (e.g. claude-agent-acp's "
-            '``"default"``) to the matching ``ModelInfo.name`` from the '
-            'session response (e.g. ``"Default (recommended)"``). When '
-            "the alias-resolution lookup misses, this equals "
-            "``current_model_id``. Native OpenHands agents leave this "
-            "``None``."
+            "Models the ACP server offers for this session, lifted off "
+            "``ACPAgent.available_models`` (the ``models.availableModels`` "
+            "field on the ACP session response). Each entry carries a "
+            "``model_id`` plus an optional ``name``/``description``. Surfaced "
+            "verbatim so clients can render a model picker and resolve "
+            "``current_model_id`` to a display label themselves — the server "
+            "does no name curation. Empty for ACP servers that don't surface "
+            "the (UNSTABLE) capability and for native OpenHands agents."
         ),
     )
 

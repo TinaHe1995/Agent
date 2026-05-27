@@ -44,6 +44,7 @@ from acp.schema import (
 from acp.transports import default_environment
 from pydantic import Field, PrivateAttr, SecretStr, field_serializer
 
+from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
@@ -201,14 +202,17 @@ def _select_auth_method(
     return None
 
 
-def _extract_session_models(response: Any) -> tuple[str | None, list[Any]]:
+def _extract_session_models(response: Any) -> tuple[str | None, list[ACPModelInfo]]:
     """Extract the model state off a session response.
 
     Returns a ``(current_model_id, available_models)`` pair, both best-effort.
-    The ``models`` capability is marked **UNSTABLE** in the ACP spec — agents
-    predating it (or implementations that opt out) leave the field absent or
-    ``None``, in which case we return ``(None, [])``.  ``getattr`` keeps the
-    helper tolerant of agents that emit a partial structure.
+    ``available_models`` is normalized into our own stable :class:`ACPModelInfo`
+    type at this boundary so nothing downstream depends on the vendored
+    ``acp.schema`` shape. The ``models`` capability is marked **UNSTABLE** in
+    the ACP spec — agents predating it (or implementations that opt out) leave
+    the field absent or ``None``, in which case we return ``(None, [])``.
+    ``getattr`` keeps the helper tolerant of agents that emit a partial
+    structure.
     """
     if response is None:
         return None, []
@@ -217,56 +221,9 @@ def _extract_session_models(response: Any) -> tuple[str | None, list[Any]]:
         return None, []
     current = getattr(models, "current_model_id", None)
     current = current if isinstance(current, str) and current else None
-    available = getattr(models, "available_models", None) or []
-    return current, list(available)
-
-
-_GENERIC_MODEL_ALIASES = frozenset({"default", "auto", "sonnet", "opus", "haiku"})
-
-
-def _resolve_model_name(
-    current_model_id: str | None,
-    available_models: list[Any],
-) -> str | None:
-    """Map a raw ``currentModelId`` to a human-readable model identity.
-
-    Three cases, in order:
-
-      1. ``current_model_id`` is a known generic alias (e.g.
-         claude-agent-acp's ``"default"`` / ``"sonnet"`` / ``"opus"`` /
-         ``"haiku"``). The matching ``ModelInfo.name`` is also an alias in
-         these cases (``"Default (recommended)"``, ``"Sonnet"``, …) and
-         doesn't tell the user what's actually running. The *resolved*
-         model identity lives in ``ModelInfo.description`` — the first
-         segment before ``" · "`` — e.g. ``"Opus 4.7 with 1M context"`` for
-         ``"default"``. Surface that.
-
-      2. ``current_model_id`` is concrete (e.g. codex-acp's
-         ``"gpt-5.5/xhigh"``, an explicit Anthropic version like
-         ``"claude-opus-4-1"``, …). Use ``ModelInfo.name`` when present —
-         it's typically a slightly prettier form of the id
-         (``"GPT-5.5 (xhigh)"``).
-
-      3. No match in ``available_models``. Pass the raw id through so the
-         chip stays at least as informative as before this helper existed.
-    """
-    if current_model_id is None:
-        return None
-    is_alias = current_model_id.lower() in _GENERIC_MODEL_ALIASES
-    for model_info in available_models:
-        if getattr(model_info, "model_id", None) != current_model_id:
-            continue
-        if is_alias:
-            desc = getattr(model_info, "description", None)
-            if isinstance(desc, str) and desc:
-                head = desc.split(" · ", 1)[0].strip()
-                if head:
-                    return head
-        name = getattr(model_info, "name", None)
-        if isinstance(name, str) and name:
-            return name
-        break
-    return current_model_id
+    raw = getattr(models, "available_models", None) or []
+    available = [ACPModelInfo.from_protocol(m) for m in raw]
+    return current, available
 
 
 async def _maybe_set_session_model(
@@ -829,12 +786,12 @@ class ACPAgent(AgentBase):
     # agent-server lifts it onto ``ConversationInfo`` so the value can cross
     # the API boundary even though the agent itself doesn't serialize it.
     _current_model_id: str | None = PrivateAttr(default=None)
-    # ``models.availableModels`` from the same session response — used to
-    # resolve aliases like claude-agent-acp's ``"default"`` to their
-    # human-readable name via ``current_model_name``.  Each element is an
-    # ACP ``ModelInfo`` (kept as ``Any`` here to avoid pulling the SDK type
-    # into the frozen model class).
-    _available_models: list[Any] = PrivateAttr(default_factory=list)
+    # ``models.availableModels`` from the same session response, normalized
+    # to our stable ``ACPModelInfo`` type.  Surfaced verbatim via the
+    # ``available_models`` property (and ``ConversationInfo.available_models``)
+    # so clients can render a picker and resolve ``current_model_id`` to a
+    # display label themselves — the SDK does no name curation.
+    _available_models: list[ACPModelInfo] = PrivateAttr(default_factory=list)
     # Callback to signal that the ACP subprocess is actively working.
     # Injected by the agent-server to call update_last_execution_time().
     _on_activity: Any = PrivateAttr(default=None)  # Callable[[], None] | None
@@ -974,24 +931,24 @@ class ACPAgent(AgentBase):
         return self._current_model_id
 
     @property
-    def current_model_name(self) -> str | None:
-        """Human-readable name for the active model.
+    def available_models(self) -> list[ACPModelInfo]:
+        """Models the ACP server offers for this session.
 
-        Some ACP servers (notably ``claude-agent-acp``) report opaque
-        aliases like ``"default"`` as ``currentModelId`` and expose the
-        resolved underlying model only through the matching entry in
-        ``models.availableModels``.  This property performs that lookup
-        and returns ``ModelInfo.name`` when there's a match (e.g.
-        ``"Default (recommended)"``), falling back to the raw
-        ``current_model_id`` otherwise — so servers that already report a
-        concrete id (e.g. ``codex-acp``'s ``"gpt-5.5/xhigh"``) pass
-        through unchanged.
+        Captured verbatim from ``models.availableModels`` on the
+        ``new_session`` / ``load_session`` response (UNSTABLE ACP capability);
+        empty for servers that don't surface it.  Each entry carries the
+        server's ``model_id`` plus an optional ``name``/``description`` —
+        enough for a client to render a model picker and resolve
+        ``current_model_id`` to a display label without any server-side
+        curation.  ``current_model_id`` is the value to pass to
+        ``set_session_model`` to switch.
 
         Same lifecycle and serialization caveats as ``current_model_id``:
-        in-process runtime state, lifted onto ``ConversationInfo`` by the
-        agent-server for cross-process consumers.
+        in-process runtime state, lifted onto
+        ``ConversationInfo.available_models`` by the agent-server for
+        cross-process consumers.
         """
-        return _resolve_model_name(self._current_model_id, self._available_models)
+        return list(self._available_models)
 
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
@@ -1067,15 +1024,17 @@ class ACPAgent(AgentBase):
         # in a different working directory would at best silently miss the
         # prior session and at worst load a different session that happens to
         # exist at the new cwd.
-        # Persist the model the ACP server resolved for this session
-        # (raw id + human-readable name) into ``agent_state`` for the same
-        # reason as ``acp_session_id`` / ``acp_session_cwd``: it's per-session
-        # state that needs to survive agent-server restarts and cold reads of
-        # the conversation list, but it lives on the frozen ACPAgent as a
-        # PrivateAttr (so doesn't serialize via ``model_dump``).  Without
-        # this, ``ConversationInfo.current_model_*`` would only be populated
-        # while the subprocess is alive — i.e. the chip would vanish from
-        # idle / restored conversations in the sidebar.
+        # Persist the model state the ACP server reported for this session
+        # (current id + the available_models list) into ``agent_state`` for
+        # the same reason as ``acp_session_id`` / ``acp_session_cwd``: it's
+        # per-session state that needs to survive agent-server restarts and
+        # cold reads of the conversation list, but it lives on the frozen
+        # ACPAgent as a PrivateAttr (so doesn't serialize via ``model_dump``).
+        # The list rides along so clients can still resolve the current id to a
+        # display label (and render a picker) on cold reads; without it,
+        # ``ConversationInfo.current_model_id`` / ``available_models`` would
+        # only be populated while the subprocess is alive — i.e. the chip would
+        # vanish from idle / restored conversations in the sidebar.
         #
         # On resume, ``load_session`` may not surface ``models`` (the
         # capability is UNSTABLE, and some servers only attach it to
@@ -1096,10 +1055,12 @@ class ACPAgent(AgentBase):
         }
         if self._current_model_id is not None:
             new_agent_state["acp_current_model_id"] = self._current_model_id
-            new_agent_state["acp_current_model_name"] = self.current_model_name
+            new_agent_state["acp_available_models"] = [
+                m.model_dump() for m in self._available_models
+            ]
         elif not truly_resumed:
             new_agent_state.pop("acp_current_model_id", None)
-            new_agent_state.pop("acp_current_model_name", None)
+            new_agent_state.pop("acp_available_models", None)
         state.agent_state = new_agent_state
 
         if self._installed_suffix:
@@ -1284,7 +1245,7 @@ class ACPAgent(AgentBase):
             # ``new_session`` and ``load_session`` return different concrete
             # response types and we only care about the ``models`` attribute.
             reported_model_id: str | None = None
-            available_models: list[Any] = []
+            available_models: list[ACPModelInfo] = []
             if prior_session_id is not None:
                 try:
                     load_response = await conn.load_session(

@@ -246,7 +246,7 @@ def _compose_conversation_info(
     # agent.agent_context.secrets) serialize to strings. Without it, validation
     # fails because ConversationInfo expects dict[str, str] but receives SecretStr.
     #
-    # ``current_model_id`` and ``current_model_name`` are read off the live
+    # ``current_model_id`` and ``available_models`` are read off the live
     # agent instance and lifted onto ConversationInfo as top-level fields
     # because the agent itself stores them in PrivateAttrs (ACPAgent is
     # frozen) and PrivateAttrs don't survive ``model_dump``.  ``getattr``
@@ -255,16 +255,20 @@ def _compose_conversation_info(
     # Fall back to ``state.agent_state`` (which IS persisted to disk via
     # ``base_state.json`` alongside ``acp_session_id``) so cold reads from
     # the conversation list — where the agent's PrivateAttrs are still
-    # ``None`` because ``init_state`` hasn't fired — still surface the
-    # model the agent last resolved. ``ACPAgent._init`` writes the same
-    # values into ``agent_state["acp_current_model_*"]`` at session start.
+    # ``None``/empty because ``init_state`` hasn't fired — still surface the
+    # model state the agent last resolved. ``ACPAgent._init`` writes the same
+    # values into ``agent_state["acp_current_model_id" / "acp_available_models"]``
+    # at session start. The persisted ``available_models`` is a list of plain
+    # dicts; ``ConversationInfo`` coerces it back into ``ACPModelInfo``.
     agent_state = getattr(state, "agent_state", {}) or {}
     current_model_id = getattr(
         state.agent, "current_model_id", None
     ) or agent_state.get("acp_current_model_id")
-    current_model_name = getattr(
-        state.agent, "current_model_name", None
-    ) or agent_state.get("acp_current_model_name")
+    available_models = (
+        getattr(state.agent, "available_models", None)
+        or agent_state.get("acp_available_models")
+        or []
+    )
     return ConversationInfo(
         **state.model_dump(mode="json"),
         title=stored.title,
@@ -272,7 +276,7 @@ def _compose_conversation_info(
         created_at=stored.created_at,
         updated_at=stored.updated_at,
         current_model_id=current_model_id,
-        current_model_name=current_model_name,
+        available_models=available_models,
     )
 
 

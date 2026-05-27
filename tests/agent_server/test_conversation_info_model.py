@@ -1,23 +1,23 @@
-"""Tests for ``_compose_conversation_info`` lifting ``current_model_id``.
+"""Tests for ``_compose_conversation_info`` lifting ACP model state.
 
 The chain is:
 
-  1. ``ACPAgent._init`` writes the resolved model into ``_current_model_id``
-     (a PrivateAttr, because ``AgentBase`` is frozen).
-  2. PrivateAttrs don't survive ``model_dump``, so the value can't ride out
+  1. ``ACPAgent._init`` captures the session's ``current_model_id`` and
+     ``available_models`` into PrivateAttrs (because ``AgentBase`` is frozen).
+  2. PrivateAttrs don't survive ``model_dump``, so the values can't ride out
      on the serialized ``agent`` field of the API response.
-  3. The agent-server lifts the value off the live agent instance into a
-     top-level ``current_model_id`` field on ``ConversationInfo`` so the
-     downstream OpenHands app_server can read it.
+  3. The agent-server lifts them off the live agent instance into top-level
+     ``current_model_id`` / ``available_models`` fields on ``ConversationInfo``
+     so the downstream OpenHands app_server (chip) and the model picker can
+     read them — the picker resolves the id to a label from the list itself.
 
-These tests pin down step 3 — that ``_compose_conversation_info`` actually
-calls ``getattr(state.agent, "current_model_id", None)`` and routes the
-result into the response model.
+These tests pin down step 3 — that ``_compose_conversation_info`` reads the
+attributes off the agent (falling back to persisted ``agent_state``) and
+routes them into the response model.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -28,6 +28,7 @@ from openhands.agent_server.models import ConversationInfo, StoredConversation
 from openhands.agent_server.utils import utc_now
 from openhands.sdk import LLM, Agent, Tool
 from openhands.sdk.agent.acp_agent import ACPAgent
+from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -139,33 +140,24 @@ def test_current_model_id_propagates_init_resolution(
     assert info.current_model_id == expected
 
 
-def _model_info(
-    model_id: str, name: str | None, description: str | None = None
-) -> object:
-    m = MagicMock()
-    m.model_id = model_id
-    m.name = name
-    m.description = description
-    return m
+def test_available_models_lifted_from_acp_agent():
+    """``ConversationInfo.available_models`` mirrors the agent's model list.
 
-
-def test_current_model_name_is_lifted_alongside_id():
-    """``ConversationInfo.current_model_name`` mirrors the agent's resolved name.
-
-    Simulates the claude-agent-acp default-config case: ``current_model_id``
-    is the alias ``"default"`` and ``current_model_name`` is the resolved
-    underlying model from ``ModelInfo.description`` (``"Opus 4.7 with 1M
-    context"``) — neither ``modelId`` nor ``name`` carry the actual model
-    identity for that case.
+    The list is surfaced verbatim (as normalized ``ACPModelInfo``) so the
+    client can render a picker and resolve ``current_model_id`` to a label
+    itself — the server does no name curation. Simulates claude-agent-acp's
+    default config where ``current_model_id`` is the opaque alias ``"default"``
+    and the readable identity lives in the matching ``available_models`` entry.
     """
     agent = ACPAgent(acp_command=["echo", "test"])
     agent._current_model_id = "default"
     agent._available_models = [
-        _model_info(
-            "default",
-            "Default (recommended)",
-            "Opus 4.7 with 1M context · Most capable for complex work",
-        )
+        ACPModelInfo(
+            model_id="default",
+            name="Default (recommended)",
+            description="Opus 4.7 with 1M context · Most capable for complex work",
+        ),
+        ACPModelInfo(model_id="sonnet", name="Sonnet", description="Sonnet 4.6"),
     ]
     state = _make_state(agent)
     stored = _make_stored(state)
@@ -173,15 +165,11 @@ def test_current_model_name_is_lifted_alongside_id():
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_id == "default"
-    assert info.current_model_name == "Opus 4.7 with 1M context"
+    assert info.available_models == agent._available_models
 
 
-def test_current_model_name_falls_back_to_id_when_no_match():
-    """codex-acp pattern: concrete id, no ``available_models`` lookup needed.
-
-    Locks in the contract that ``current_model_name`` is always at least
-    as informative as ``current_model_id``.
-    """
+def test_available_models_empty_when_server_omits_them():
+    """Servers that don't surface the UNSTABLE ``models`` capability yield []."""
     agent = ACPAgent(acp_command=["echo", "test"])
     agent._current_model_id = "gpt-5.5/xhigh"
     state = _make_state(agent)
@@ -190,11 +178,11 @@ def test_current_model_name_falls_back_to_id_when_no_match():
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_id == "gpt-5.5/xhigh"
-    assert info.current_model_name == "gpt-5.5/xhigh"
+    assert info.available_models == []
 
 
-def test_current_model_name_is_none_for_native_openhands_agent():
-    """Native agents don't have the attribute; ``getattr`` returns None."""
+def test_available_models_empty_for_native_openhands_agent():
+    """Native agents don't have the attribute; the lift yields []."""
     agent = Agent(
         llm=LLM(
             model="gpt-4o",
@@ -208,50 +196,64 @@ def test_current_model_name_is_none_for_native_openhands_agent():
 
     info = _compose_conversation_info(stored, state)
 
-    assert info.current_model_name is None
+    assert info.available_models == []
 
 
 def test_current_model_fields_read_from_persisted_agent_state():
-    """Cold conversation list: the live agent's PrivateAttrs are still None
-    because ``init_state`` hasn't fired, but ``agent_state`` persisted the
-    values from the last session.  The lift should source from there so the
-    chip survives cold reads.
+    """Cold conversation list: the live agent's PrivateAttrs are still
+    None/empty because ``init_state`` hasn't fired, but ``agent_state``
+    persisted the values from the last session.  The lift should source from
+    there so the chip + picker survive cold reads.  The persisted
+    ``available_models`` is a list of plain dicts; ``ConversationInfo``
+    coerces it back into ``ACPModelInfo``.
     """
     agent = ACPAgent(acp_command=["echo", "test"])
-    # Crucially, leave ``_current_model_id`` at its None default — this
-    # simulates an agent freshly reconstructed from the persisted JSON
-    # before any ``init_state`` call has run for this conversation.
+    # Crucially, leave the PrivateAttrs at their defaults — this simulates an
+    # agent freshly reconstructed from persisted JSON before any ``init_state``.
     state = _make_state(agent)
     state.agent_state = {
         "acp_session_id": "prior-session",
         "acp_current_model_id": "default",
-        "acp_current_model_name": "Default (recommended)",
+        "acp_available_models": [
+            {
+                "model_id": "default",
+                "name": "Default (recommended)",
+                "description": "Opus 4.7 with 1M context",
+            }
+        ],
     }
     stored = _make_stored(state)
 
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_id == "default"
-    assert info.current_model_name == "Default (recommended)"
+    assert info.available_models == [
+        ACPModelInfo(
+            model_id="default",
+            name="Default (recommended)",
+            description="Opus 4.7 with 1M context",
+        )
+    ]
 
 
 def test_live_agent_attrs_take_precedence_over_persisted_state():
     """Within an active session, the live agent is the freshest source."""
     agent = ACPAgent(acp_command=["echo", "test"])
     agent._current_model_id = "claude-opus-4-1"
-    m = MagicMock()
-    m.model_id = "claude-opus-4-1"
-    m.name = "Opus 4.1"
-    agent._available_models = [m]
+    agent._available_models = [
+        ACPModelInfo(model_id="claude-opus-4-1", name="Opus 4.1")
+    ]
     state = _make_state(agent)
     # Stale persisted state from a prior session that picked a different model.
     state.agent_state = {
         "acp_current_model_id": "haiku",
-        "acp_current_model_name": "Haiku",
+        "acp_available_models": [{"model_id": "haiku", "name": "Haiku"}],
     }
     stored = _make_stored(state)
 
     info = _compose_conversation_info(stored, state)
 
     assert info.current_model_id == "claude-opus-4-1"
-    assert info.current_model_name == "Opus 4.1"
+    assert info.available_models == [
+        ACPModelInfo(model_id="claude-opus-4-1", name="Opus 4.1")
+    ]
