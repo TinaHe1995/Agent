@@ -259,6 +259,22 @@ def test_live_agent_attrs_take_precedence_over_persisted_state():
     ]
 
 
+def test_current_model_id_falls_back_to_acp_model_on_cold_read():
+    """Cold read of a switched/overridden conversation whose server never
+    surfaced ``models``: no live PrivateAttr and no persisted hint, but
+    ``acp_model`` is a real serialized field and is authoritative — so the chip
+    still resolves instead of going blank.
+    """
+    agent = ACPAgent(acp_command=["echo", "test"], acp_model="enterprise-x")
+    # Leave _current_model_id at None and agent_state empty: pure cold read.
+    state = _make_state(agent)
+    stored = _make_stored(state)
+
+    info = _compose_conversation_info(stored, state)
+
+    assert info.current_model_id == "enterprise-x"
+
+
 def test_supports_runtime_model_switch_lifted_from_agent_state():
     """The static provider capability is read from persisted ``agent_state``
     (written at session init), so it's correct on cold list reads too.

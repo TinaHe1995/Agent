@@ -246,32 +246,45 @@ def _compose_conversation_info(
     # agent.agent_context.secrets) serialize to strings. Without it, validation
     # fails because ConversationInfo expects dict[str, str] but receives SecretStr.
     #
-    # ``current_model_id`` and ``available_models`` are read off the live
-    # agent instance and lifted onto ConversationInfo as top-level fields
-    # because the agent itself stores them in PrivateAttrs (ACPAgent is
-    # frozen) and PrivateAttrs don't survive ``model_dump``.  ``getattr``
-    # handles non-ACP agents which don't have the attributes at all.
-    #
-    # Fall back to ``state.agent_state`` (which IS persisted to disk via
-    # ``base_state.json`` alongside ``acp_session_id``) so cold reads from
-    # the conversation list — where the agent's PrivateAttrs are still
-    # ``None``/empty because ``init_state`` hasn't fired — still surface the
-    # model state the agent last resolved. ``ACPAgent._init`` writes the same
-    # values into ``agent_state["acp_current_model_id" / "acp_available_models"]``
-    # at session start. The persisted ``available_models`` is a list of plain
-    # dicts; ``ConversationInfo`` coerces it back into ``ACPModelInfo``.
+    # ACP model state is lifted onto top-level ConversationInfo fields because
+    # the agent holds it in PrivateAttrs (ACPAgent is frozen) which don't survive
+    # ``model_dump``. ``getattr`` keeps non-ACP agents a no-op. We read the live
+    # agent (fresh within a session) and fall back to ``state.agent_state`` —
+    # persisted to ``base_state.json`` by ``ACPAgent._init`` (and kept in sync by
+    # ``switch_acp_model``) — so cold list reads, where PrivateAttrs are still
+    # empty because ``init_state`` hasn't fired, still surface the last-known
+    # state. Persisted ``acp_available_models`` is a list of dicts that
+    # ``ConversationInfo`` coerces back into ``ACPModelInfo``.
     agent_state = getattr(state, "agent_state", {}) or {}
-    current_model_id = getattr(
-        state.agent, "current_model_id", None
-    ) or agent_state.get("acp_current_model_id")
+    agent = state.agent
+    # current_model_id: live PrivateAttr (fresh after a runtime switch) → the
+    # persisted hint → the authoritative ``acp_model`` the agent runs on resume.
+    # The final fallback covers a switched/overridden conversation whose server
+    # never surfaced the UNSTABLE ``models`` block: ``acp_model`` is a real
+    # (serialized) field, so it's the source of truth a cold read can trust.
+    current_model_id = (
+        getattr(agent, "current_model_id", None)
+        or agent_state.get("acp_current_model_id")
+        or getattr(agent, "acp_model", None)
+    )
+    # available_models: the property returns ``[]`` (never ``None``) for *both* a
+    # cold-read agent (PrivateAttr default, init_state hasn't fired) and a live
+    # agent that genuinely has no models, so an ``is None`` check can't tell them
+    # apart — and would drop the persisted picker payload on every cold list
+    # read. The ``or`` chain is deliberate: an empty live list falls back to the
+    # persisted snapshot, which is exactly right on cold reads (surface the
+    # last-known list) and benign for a live empty session (the persisted value
+    # is itself empty/absent there).
     available_models = (
-        getattr(state.agent, "available_models", None)
+        getattr(agent, "available_models", None)
         or agent_state.get("acp_available_models")
         or []
     )
-    # Static provider capability — read from persisted agent_state (written at
-    # session init) so it's correct on cold list reads too. Defaults False for
-    # non-ACP agents and conversations that haven't started a session.
+    # Static provider capability. Unlike the two fields above it has no
+    # meaningful live-vs-persisted distinction — it's derived from the stable
+    # provider identity and written once at session init — so we read the
+    # persisted value directly. Defaults False for non-ACP agents and
+    # conversations that haven't started a session.
     supports_runtime_model_switch = bool(
         agent_state.get("acp_supports_runtime_model_switch", False)
     )
