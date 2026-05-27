@@ -1005,6 +1005,13 @@ class LocalConversation(BaseConversation):
                             ConversationExecutionStatus.RUNNING
                         )
 
+                    # The state lock is held across this await. This is safe
+                    # only because every other state mutator is dispatched via
+                    # run_in_executor onto a worker thread: FIFOLock is thread-
+                    # (not task-) reentrant, so a state-mutating coroutine
+                    # awaited on this event-loop thread would silently re-enter
+                    # the lock and corrupt history. Do not await state mutations
+                    # on the event-loop thread.
                     await self.agent.astep(
                         self,
                         on_event=self._on_event,
