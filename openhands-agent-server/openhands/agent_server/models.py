@@ -210,7 +210,13 @@ class _ConversationInfoBase(BaseModel):
             "verbatim so clients can render a model picker and resolve "
             "``current_model_id`` to a display label themselves — the server "
             "does no name curation. Empty for ACP servers that don't surface "
-            "the (UNSTABLE) capability and for native OpenHands agents."
+            "the (UNSTABLE) capability and for native OpenHands agents. "
+            "Client contract: ``current_model_id`` is NOT guaranteed to be a "
+            "member — a forced ``acp_model`` override may name a model absent "
+            "from the list — so treat a miss as 'show the raw id'. Some "
+            "entries are opaque aliases whose human identity lives in "
+            '``description`` (e.g. claude-agent-acp\'s ``"default"`` -> '
+            '``"Opus 4.7 with 1M context · ..."``).'
         ),
     )
     supports_runtime_model_switch: bool = Field(
