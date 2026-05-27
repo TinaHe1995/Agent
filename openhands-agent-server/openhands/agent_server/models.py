@@ -222,11 +222,15 @@ class _ConversationInfoBase(BaseModel):
     supports_runtime_model_switch: bool = Field(
         default=False,
         description=(
-            "Whether the ACP provider supports live, mid-conversation model "
-            "switching (via ``session/set_model``). Tells the inline picker "
-            "whether to enable a live-switch control. ``False`` for "
-            "unknown/custom ACP servers, native OpenHands agents, and ACP "
-            "conversations that haven't started a session yet."
+            "Whether a live, mid-conversation model switch (via "
+            "``session/set_model``) will be attempted for this conversation — "
+            "tells the inline picker whether to offer a live-switch control. "
+            "Mirrors the SDK's switch gate: ``True`` for known switch-capable "
+            "providers; ``True`` for unknown/custom ACP servers too, since "
+            "OpenHands attempts the switch optimistically rather than refusing "
+            "(a rejection then surfaces as an error). ``False`` for native "
+            "OpenHands agents, for a known provider that declares no support, "
+            "and before the conversation has started a session."
         ),
     )
 
