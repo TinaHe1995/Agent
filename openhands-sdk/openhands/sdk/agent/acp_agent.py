@@ -235,7 +235,6 @@ async def _reapply_session_model_on_resume(
     agent_name: str,
     session_id: str,
     acp_model: str | None,
-    timeout: float,
 ) -> None:
     """Reapply the persisted model to a *resumed* session.
 
@@ -244,29 +243,13 @@ async def _reapply_session_model_on_resume(
     the ACP server's default. This issues ``set_session_model`` so the resumed
     live session matches the serialized ``acp_model``.
 
-    The gating mirrors :meth:`ACPAgent.set_acp_model` exactly — attempt for
-    custom/unknown servers (``provider is None``, which ``set_acp_model`` also
-    lets switch and whose switches are persisted as authoritative) and for known
-    providers that support runtime switching; skip only known providers that
-    don't. This deliberately differs from the *initial-selection* gate
-    (``supports_set_session_model``): claude-agent-acp selects its initial model
-    via ``_meta`` yet supports ``set_session_model`` for later switches, so on
-    resume it needs this call to honour the persisted model rather than the
-    server default.
-
-    Error handling mirrors :meth:`ACPAgent.set_acp_model`:
-
-    - The call is bounded by ``timeout`` (the agent's ``acp_prompt_timeout``) so
-      a server that hangs after reconnect cannot block session startup forever;
-      a ``TimeoutError`` propagates.
-    - A server-internal failure (JSON-RPC ``-32603``) propagates — silently
-      continuing on the wrong model while serialized state claims otherwise
-      would be worse than a loud startup failure.
-    - A client/protocol rejection (e.g. ``method-not-found`` on a server that
-      doesn't actually support the call, or an invalid persisted model id) is
-      swallowed and logged — like the ``load_session`` fallback — so a
-      stale-capability/stale-model server can't break resume. The session keeps
-      the server default until the next explicit switch.
+    The gating mirrors :meth:`ACPAgent.set_acp_model` (attempt for custom/unknown
+    servers and known providers that support runtime switching; skip only known
+    providers that don't), deliberately differing from the initial-selection
+    gate: claude-agent-acp selects its initial model via ``_meta`` yet supports
+    ``set_session_model`` for later switches. A server that rejects the call is
+    tolerated (logged) — like the ``load_session`` fallback above — so resume
+    can't break; the session keeps the server default until the next switch.
     """
     if not acp_model:
         return
@@ -274,13 +257,8 @@ async def _reapply_session_model_on_resume(
     if provider is not None and not provider.supports_runtime_model_switch:
         return
     try:
-        await asyncio.wait_for(
-            conn.set_session_model(model_id=acp_model, session_id=session_id),
-            timeout=timeout,
-        )
+        await conn.set_session_model(model_id=acp_model, session_id=session_id)
     except ACPRequestError as e:
-        if e.code in _RETRIABLE_SERVER_ERROR_CODES:
-            raise
         logger.warning(
             "Could not reapply model %r on resumed session %s (%s); the live "
             "session may run on the server default until the next switch",
@@ -1286,7 +1264,6 @@ class ACPAgent(AgentBase):
                     agent_name,
                     session_id,
                     self.acp_model,
-                    self.acp_prompt_timeout,
                 )
 
             # Resolve the permission mode.  Known providers each have their

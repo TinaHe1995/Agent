@@ -44,12 +44,6 @@ from openhands.sdk.workspace import LocalWorkspace
 
 
 LEASE_RENEW_INTERVAL_SECONDS = 15.0
-# How long close() waits for an in-flight model switch to release its lock
-# before tearing the conversation down anyway. A switch is normally sub-second;
-# this only bounds the pathological wedged-server case so close() can't block
-# for the worker's full acp_prompt_timeout (default 30 min) while lease renewal
-# is already stopped.
-ACP_SWITCH_LOCK_CLOSE_TIMEOUT_SECONDS = 10.0
 # Bounds initial-state push so subscribe_to_events does not stall on a
 # subscriber whose __call__ blocks (e.g. WS with a full TCP send buffer).
 INITIAL_STATE_PUSH_TIMEOUT_SECONDS = 0.5
@@ -78,9 +72,6 @@ class EventService:
     # wrapping up; consumed by _run_and_publish to re-run the stranded message.
     _rerun_requested: bool = field(default=False, init=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _acp_model_switch_lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock, init=False
-    )
     _callback_wrapper: AsyncCallbackWrapper | None = field(default=None, init=False)
     _lease: ConversationLease | None = field(default=None, init=False)
     _lease_generation: int | None = field(default=None, init=False)
@@ -921,75 +912,27 @@ class EventService:
         )
 
     async def switch_acp_model(self, model: str) -> None:
-        """Switch the model on a running ACP conversation.
+        """Switch the model on a running ACP conversation, mid-conversation.
 
-        Runs the (blocking) protocol-level ``session/set_model`` round-trip in
-        a worker thread so the event loop is not blocked, then mirrors the new
-        model into ``meta.json`` so the switch survives an agent-server restart.
+        Runs the (blocking) protocol-level ``session/set_model`` round-trip in a
+        worker thread, then mirrors the new model into ``meta.json`` so the
+        switch survives an agent-server restart: ``start()`` rebuilds the agent
+        from ``self.stored.agent`` and ``ConversationState.create()`` copies
+        that over the persisted base_state.json on resume. Only ``acp_model``
+        needs updating — ``model_post_init`` re-derives the sentinel
+        ``llm.model`` on reload.
         """
-        # Serialize concurrent switches for this conversation. The live switch
-        # and the meta.json mirror must commit as one unit; otherwise two
-        # interleaved requests could leave meta.json pointing at a different
-        # model than the last live switch (A switches live->A, B switches
-        # live->B and saves meta=B, then A saves meta=A while the session runs
-        # on B). The lock keeps persisted metadata consistent with the live
-        # session.
-        async with self._acp_model_switch_lock:
-            if self._conversation is None:
-                raise RuntimeError(
-                    "Conversation is not active; it has not been started or has "
-                    "been closed."
-                )
-            conversation = self._conversation
-
-            async def _switch_and_persist() -> None:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, conversation.switch_acp_model, model)
-                # Persist the switch into meta.json. ``start()`` rebuilds the
-                # runtime agent from ``self.stored.agent``, and
-                # ``ConversationState.create()`` copies that agent over the
-                # persisted base_state.json on resume — so without mirroring the
-                # new model here, a restart would silently revert to the old one.
-                # Only ``acp_model`` needs updating: ``model_post_init``
-                # re-derives the sentinel ``llm.model`` on reload.
-                self.stored = self.stored.model_copy(
-                    update={
-                        "agent": self.stored.agent.model_copy(
-                            update={"acp_model": model}
-                        )
-                    }
-                )
-                await self.save_meta()
-
-            # ``run_in_executor`` cannot cancel the worker thread once it starts,
-            # so a cancellation (client disconnect / shutdown) could leave the
-            # live session + base_state.json switched while meta.json is never
-            # mirrored — and would release the lock with the worker still in
-            # flight. Run the switch + mirror as one shielded unit: on
-            # cancellation, let it finish (keeping the lock held) so persisted
-            # metadata matches the live session, then propagate the cancel.
-            task = asyncio.create_task(_switch_and_persist())
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                # Let the in-flight switch settle (the worker thread can't be
-                # cancelled) so meta.json is mirrored, but always re-raise the
-                # cancellation. CancelledError is a BaseException, so the
-                # except below only catches the task's own failure — which we
-                # log rather than swallow silently, so e.g. a meta.json write
-                # that fails after the live switch is visible (meta could be
-                # left at the old model while base_state.json has the new one)
-                # instead of disappearing — then we re-raise the cancel.
-                try:
-                    await task
-                except Exception:
-                    logger.warning(
-                        "ACP model switch task failed while handling "
-                        "cancellation for conversation %s",
-                        self.stored.id,
-                        exc_info=True,
-                    )
-                raise
+        if self._conversation is None:
+            raise RuntimeError(
+                "Conversation is not active; it has not been started or has "
+                "been closed."
+            )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._conversation.switch_acp_model, model)
+        self.stored = self.stored.model_copy(
+            update={"agent": self.stored.agent.model_copy(update={"acp_model": model})}
+        )
+        await self.save_meta()
 
     async def close(self):
         if self._lease_task is not None:
@@ -1023,36 +966,10 @@ class EventService:
             self._run_task = None
 
         await self._pub_sub.close()
-        # Coordinate with in-flight model switches: switch_acp_model holds this
-        # lock while its (shielded) worker applies the live switch and mirrors
-        # meta.json. Waiting for it here avoids tearing the conversation down
-        # from under an in-flight switch (which would leave the worker running
-        # against a closed ACP runtime and mirror meta.json for a torn-down
-        # session). The wait is bounded: a switch is normally sub-second, but a
-        # wedged server could otherwise hold the lock for the full
-        # acp_prompt_timeout while lease renewal is already stopped, so after
-        # the bound we proceed with teardown anyway.
-        switch_lock_held = False
-        try:
-            await asyncio.wait_for(
-                self._acp_model_switch_lock.acquire(),
-                timeout=ACP_SWITCH_LOCK_CLOSE_TIMEOUT_SECONDS,
-            )
-            switch_lock_held = True
-        except TimeoutError:
-            logger.warning(
-                "Tearing down conversation %s without the model-switch lock; "
-                "a switch may still be in flight",
-                self.stored.id,
-            )
-        try:
-            if self._conversation:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._conversation.close)
-                self._conversation = None
-        finally:
-            if switch_lock_held:
-                self._acp_model_switch_lock.release()
+        if self._conversation:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._conversation.close)
+            self._conversation = None
 
         if self._lease is not None and self._lease_generation is not None:
             self._lease.release(self._lease_generation)

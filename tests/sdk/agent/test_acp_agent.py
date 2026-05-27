@@ -3221,7 +3221,7 @@ class TestReapplySessionModelOnResume:
         # would skip it.
         conn = AsyncMock()
         await _reapply_session_model_on_resume(
-            conn, "claude-agent-acp", "sess-1", "claude-haiku-4-5-20251001", 600.0
+            conn, "claude-agent-acp", "sess-1", "claude-haiku-4-5-20251001"
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="claude-haiku-4-5-20251001", session_id="sess-1"
@@ -3231,7 +3231,7 @@ class TestReapplySessionModelOnResume:
     async def test_codex_reapplies_persisted_model_on_resume(self):
         conn = AsyncMock()
         await _reapply_session_model_on_resume(
-            conn, "codex-acp", "sess-1", "gpt-5.4/low", 600.0
+            conn, "codex-acp", "sess-1", "gpt-5.4/low"
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="gpt-5.4/low", session_id="sess-1"
@@ -3240,9 +3240,7 @@ class TestReapplySessionModelOnResume:
     @pytest.mark.asyncio
     async def test_missing_model_skips_reapply(self):
         conn = AsyncMock()
-        await _reapply_session_model_on_resume(
-            conn, "claude-agent-acp", "sess-1", None, 600.0
-        )
+        await _reapply_session_model_on_resume(conn, "claude-agent-acp", "sess-1", None)
         conn.set_session_model.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3253,7 +3251,7 @@ class TestReapplySessionModelOnResume:
         # resumed session would silently revert to the server default).
         conn = AsyncMock()
         await _reapply_session_model_on_resume(
-            conn, "some-custom-acp", "sess-1", "whatever", 600.0
+            conn, "some-custom-acp", "sess-1", "whatever"
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="whatever", session_id="sess-1"
@@ -3280,9 +3278,7 @@ class TestReapplySessionModelOnResume:
             "openhands.sdk.agent.acp_agent.detect_acp_provider_by_agent_name",
             return_value=unsupported,
         ):
-            await _reapply_session_model_on_resume(
-                conn, "legacy-acp", "sess-1", "x", 600.0
-            )
+            await _reapply_session_model_on_resume(conn, "legacy-acp", "sess-1", "x")
         conn.set_session_model.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3295,37 +3291,23 @@ class TestReapplySessionModelOnResume:
             code=-32601, message="method not found"
         )
         await _reapply_session_model_on_resume(
-            conn, "some-custom-acp", "sess-1", "whatever", 600.0
+            conn, "some-custom-acp", "sess-1", "whatever"
         )
         conn.set_session_model.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_server_error_propagates_on_resume(self):
-        # A server-internal failure (-32603) must NOT be silently swallowed:
-        # continuing on the wrong model while serialized state claims otherwise
-        # is worse than a loud startup failure (matches set_acp_model).
+    async def test_any_request_error_is_swallowed_on_resume(self):
+        # Any ACPRequestError (here a -32603 server error) is tolerated on
+        # resume — like the load_session fallback — so a flaky/stale server
+        # can't break session startup; the session keeps the server default.
         conn = AsyncMock()
         conn.set_session_model.side_effect = ACPRequestError(
             code=-32603, message="internal error"
         )
-        with pytest.raises(ACPRequestError):
-            await _reapply_session_model_on_resume(
-                conn, "codex-acp", "sess-1", "gpt-5.4/low", 600.0
-            )
-
-    @pytest.mark.asyncio
-    async def test_hang_times_out_on_resume(self):
-        # A server that hangs after reconnect must not block session startup
-        # forever; the bounded call raises TimeoutError instead.
-        async def _hang(**kwargs):
-            await asyncio.sleep(10)
-
-        conn = AsyncMock()
-        conn.set_session_model = AsyncMock(side_effect=_hang)
-        with pytest.raises(TimeoutError):
-            await _reapply_session_model_on_resume(
-                conn, "codex-acp", "sess-1", "gpt-5.4/low", 0.01
-            )
+        await _reapply_session_model_on_resume(
+            conn, "codex-acp", "sess-1", "gpt-5.4/low"
+        )
+        conn.set_session_model.assert_awaited_once()
 
 
 class TestSetACPModel:
