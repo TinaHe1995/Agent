@@ -4321,6 +4321,53 @@ class TestACPSessionIdPersistence:
             "model-x"
         ]
 
+    def test_resume_rejected_override_with_absent_models_clears_stale_id(
+        self, tmp_path
+    ):
+        """Resume where ``set_session_model`` is rejected AND ``load_session``
+        omits the ``models`` block must CLEAR the stale persisted current id.
+
+        This is the case the preserve-on-resume rule would otherwise keep:
+        ``truly_resumed`` is true and ``_available_models`` is ``None`` (server
+        didn't report a block), so the only signal that the persisted id is now
+        wrong is that we attempted to force ``acp_model`` and the server rejected
+        it (``_model_override_applied`` is False). The persisted id named that
+        rejected override, so it no longer reflects the live session.
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        # ``model-x`` was the authoritative model last launch (applied + persisted).
+        agent = _make_agent(acp_model="model-x")
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "resumable-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_current_model_id": "model-x",
+        }
+        # load_session succeeds (id preserved => truly_resumed) but carries no
+        # models block, and the server now rejects the reapply of ``model-x``.
+        conn = self._make_conn()
+        conn.initialize.return_value.agent_info.name = "codex-acp"
+        conn.initialize.return_value.auth_methods = []
+        load_response = MagicMock(spec=[])  # no .models block
+        conn.load_session = AsyncMock(return_value=load_response)
+        conn.set_session_model = AsyncMock(
+            side_effect=ACPRequestError(code=-32601, message="method not found")
+        )
+
+        agent._executor = AsyncExecutor()
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        # Resume kept the same session id (so this is a true resume)...
+        assert state.agent_state["acp_session_id"] == "resumable-sess"
+        # ...the override was not applied, so neither the live attr nor the
+        # persisted hint may claim ``model-x``.
+        assert agent.current_model_id is None
+        assert agent._model_override_applied is False
+        assert "acp_current_model_id" not in state.agent_state
+
     def test_fresh_replacement_clears_stale_model_when_new_session_omits_models(
         self, tmp_path
     ):

@@ -888,6 +888,15 @@ class ACPAgent(AgentBase):
     # in ``init_state`` uses that distinction to preserve vs clear the stored
     # list on resume. The public ``available_models`` property coerces to ``[]``.
     _available_models: list[ACPModelInfo] | None = PrivateAttr(default=None)
+    # Whether the caller's ``acp_model`` was actually pushed to the server in
+    # the most recent session init (via session ``_meta`` or ``set_session_model``).
+    # ``False`` when there's no override, the provider can't apply it (unknown
+    # server on a fresh session), or the server rejected the call on resume — in
+    # those cases the live session runs its own default, so neither
+    # ``_current_model_id`` nor the ``ConversationInfo`` fallback may surface
+    # ``acp_model`` as the active model. Read by ``init_state`` to decide whether
+    # a stale persisted ``acp_current_model_id`` must be cleared.
+    _model_override_applied: bool = PrivateAttr(default=False)
     # Callback to signal that the ACP subprocess is actively working.
     # Injected by the agent-server to call update_last_execution_time().
     _on_activity: Any = PrivateAttr(default=None)  # Callable[[], None] | None
@@ -1187,18 +1196,33 @@ class ACPAgent(AgentBase):
         # ``current_model_id`` is known whenever the caller forced ``acp_model``
         # (e.g. a prior runtime switch) or the server reported one, even on a
         # resume whose ``load_session`` omitted the UNSTABLE ``models`` block.
-        # The clear branch mirrors the ``acp_available_models`` gating below so
-        # the two fields can't disagree: drop the persisted id when either the
-        # session was replaced (``not truly_resumed``) OR the server *did*
-        # report a ``models`` block this launch but with no usable current id
-        # (``_available_models is not None`` while ``_current_model_id is None``,
-        # e.g. ``currentModelId: ""`` / ``availableModels: []``).  Without the
-        # second clause a stale id would survive a resume even though the server
-        # explicitly reported no current model, leaving a chip that points at a
-        # model absent from the (now-cleared) picker list.
+        # When it is *not* known (``None``), drop any stale persisted id unless
+        # we're in the one case where the persisted value is still our best
+        # guess: a true resume where the server didn't report a ``models`` block
+        # AND no override was attempted (so the server is presumably still on the
+        # model it had last launch).  Clear it otherwise —
+        #   - ``not truly_resumed``: the session was replaced, so the persisted id
+        #     describes a dead session;
+        #   - ``_available_models is not None``: the server reported a ``models``
+        #     block but no usable current id (``currentModelId: ""``), so it
+        #     explicitly has none;
+        #   - override attempted but not applied (``acp_model`` set yet
+        #     ``_model_override_applied`` is False): we tried to force a model and
+        #     the server rejected/ignored it, so the persisted id (which named
+        #     that override) no longer reflects reality.
+        # This mirrors the ``acp_available_models`` gating below so the two fields
+        # can't disagree, and keeps the chip/picker from advertising a model the
+        # live session isn't actually running.
+        override_attempted_not_applied = bool(self.acp_model) and (
+            not self._model_override_applied
+        )
         if self._current_model_id is not None:
             new_agent_state["acp_current_model_id"] = self._current_model_id
-        elif not truly_resumed or self._available_models is not None:
+        elif (
+            not truly_resumed
+            or self._available_models is not None
+            or override_attempted_not_applied
+        ):
             new_agent_state.pop("acp_current_model_id", None)
         # The list is gated *independently* on whether the server actually
         # reported a ``models`` block this launch (``None`` = absent), NOT on
@@ -1347,7 +1371,7 @@ class ACPAgent(AgentBase):
             prior_session_id = None
 
         async def _init() -> tuple[
-            str, str, str, str | None, list[ACPModelInfo] | None
+            str, str, str, str | None, list[ACPModelInfo] | None, bool
         ]:
             # Spawn the subprocess directly so we can install a
             # filtering reader that skips non-JSON-RPC lines some
@@ -1545,6 +1569,7 @@ class ACPAgent(AgentBase):
                 agent_version,
                 current_model_id,
                 available_models,
+                override_applied,
             )
 
         # _conn / _process / _filtered_reader are assigned inside _init() (right
@@ -1556,6 +1581,7 @@ class ACPAgent(AgentBase):
             self._agent_version,
             self._current_model_id,
             self._available_models,
+            self._model_override_applied,
         ) = self._executor.run_async(_init)
         self._working_dir = working_dir
 
