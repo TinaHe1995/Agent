@@ -213,6 +213,16 @@ class _ConversationInfoBase(BaseModel):
             "the (UNSTABLE) capability and for native OpenHands agents."
         ),
     )
+    supports_runtime_model_switch: bool = Field(
+        default=False,
+        description=(
+            "Whether the ACP provider supports live, mid-conversation model "
+            "switching (via ``session/set_model``). Tells the inline picker "
+            "whether to enable a live-switch control. ``False`` for "
+            "unknown/custom ACP servers, native OpenHands agents, and ACP "
+            "conversations that haven't started a session yet."
+        ),
+    )
 
 
 class ConversationInfo(_ConversationInfoBase):

@@ -269,6 +269,12 @@ def _compose_conversation_info(
         or agent_state.get("acp_available_models")
         or []
     )
+    # Static provider capability — read from persisted agent_state (written at
+    # session init) so it's correct on cold list reads too. Defaults False for
+    # non-ACP agents and conversations that haven't started a session.
+    supports_runtime_model_switch = bool(
+        agent_state.get("acp_supports_runtime_model_switch", False)
+    )
     return ConversationInfo(
         **state.model_dump(mode="json"),
         title=stored.title,
@@ -277,6 +283,7 @@ def _compose_conversation_info(
         updated_at=stored.updated_at,
         current_model_id=current_model_id,
         available_models=available_models,
+        supports_runtime_model_switch=supports_runtime_model_switch,
     )
 
 

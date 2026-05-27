@@ -257,3 +257,35 @@ def test_live_agent_attrs_take_precedence_over_persisted_state():
     assert info.available_models == [
         ACPModelInfo(model_id="claude-opus-4-1", name="Opus 4.1")
     ]
+
+
+def test_supports_runtime_model_switch_lifted_from_agent_state():
+    """The static provider capability is read from persisted ``agent_state``
+    (written at session init), so it's correct on cold list reads too.
+    """
+    agent = ACPAgent(acp_command=["echo", "test"])
+    state = _make_state(agent)
+    state.agent_state = {"acp_supports_runtime_model_switch": True}
+    stored = _make_stored(state)
+
+    info = _compose_conversation_info(stored, state)
+
+    assert info.supports_runtime_model_switch is True
+
+
+def test_supports_runtime_model_switch_defaults_false():
+    """No hint (native agent, or ACP conversation that hasn't started) -> False."""
+    agent = Agent(
+        llm=LLM(
+            model="gpt-4o",
+            api_key=SecretStr("test-key"),
+            usage_id="test-llm",
+        ),
+        tools=[Tool(name="TerminalTool")],
+    )
+    state = _make_state(agent)
+    stored = _make_stored(state)
+
+    info = _compose_conversation_info(stored, state)
+
+    assert info.supports_runtime_model_switch is False
