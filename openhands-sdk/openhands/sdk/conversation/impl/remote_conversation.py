@@ -66,8 +66,8 @@ LEGACY_CONVERSATIONS_PATH = "/api/conversations"
 @dataclass(frozen=True)
 class _RunCompletionSignal:
     status: str
-    # True for full-state snapshot signals (from the post-run ConversationStateUpdateEvent);
-    # False for per-field ERROR/STUCK signals (which raise before reaching reconcile).
+    # True for full-state snapshot signals (post-run ConversationStateUpdateEvent);
+    # False for per-field ERROR/STUCK signals (which raise before reconcile).
     # Asserted in _wait_for_run_completion to catch future regressions.
     from_post_run_snapshot: bool
 
