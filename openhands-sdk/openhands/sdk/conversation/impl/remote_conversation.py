@@ -1100,14 +1100,15 @@ class RemoteConversation(BaseConversation):
         # Log a warning after this many consecutive REST terminal polls without a
         # post-run WS snapshot. This is a health signal, not a return path —
         # returning immediately on REST FINISHED would reintroduce the stop-hook race.
-        TERMINAL_POLL_THRESHOLD = 3
-        # Hard fallback: after this many consecutive terminal REST polls (~30 s with
-        # default poll_interval) treat the server as done. Stop hooks are expected to
-        # be fast (seconds); 30 consecutive polls far outlasts any realistic hook
-        # window, so accepting REST-confirmed FINISHED here is safe in practice.
-        # This bounds the hang to ~30 s when the WS post-run snapshot is never
-        # received (e.g. socket drop after the run finishes on the server).
-        TERMINAL_POLL_HARD_FALLBACK = 30
+        TERMINAL_POLL_WARNING_THRESHOLD = 3
+        # Time-based hard fallback: accept REST-confirmed terminal status after
+        # the server has been reporting terminal for at least this many seconds
+        # without a post-run WS snapshot. Stop hooks are fast (seconds); 30 s
+        # is a safe bound regardless of poll_interval. This prevents an
+        # indefinite hang when the WS snapshot is never delivered (e.g., socket
+        # dropped after the run finishes on the server).
+        TERMINAL_HARD_FALLBACK_SECS = 30.0
+        terminal_first_seen_at: float | None = None
 
         while True:
             elapsed = time.monotonic() - start_time
@@ -1126,16 +1127,11 @@ class RemoteConversation(BaseConversation):
             try:
                 signal = self._terminal_status_queue.get(timeout=poll_interval)
                 ws_status = signal.status
-                # Raises ConversationRunError on ERROR/STUCK; otherwise no-op.
+                # Raises ConversationRunError on ERROR/STUCK; returns otherwise.
+                # _immediate_terminal_statuses() == {ERROR, STUCK}; if ws_status
+                # were in that set, _handle_conversation_status would have raised
+                # above, so execution only continues for non-immediate statuses.
                 self._handle_conversation_status(ws_status)
-                if ws_status in self._immediate_terminal_statuses():
-                    logger.info(
-                        "Run completed via WebSocket notification "
-                        "(status: %s, elapsed: %.1fs)",
-                        ws_status,
-                        elapsed,
-                    )
-                    return
                 if not signal.from_post_run_snapshot:
                     continue
                 logger.info(
@@ -1161,6 +1157,7 @@ class RemoteConversation(BaseConversation):
             except Exception as exc:
                 self._handle_poll_exception(exc)
                 consecutive_terminal_polls = 0  # Reset on error
+                terminal_first_seen_at = None
             else:
                 # Raises ConversationRunError for ERROR/STUCK states
                 self._handle_conversation_status(status)
@@ -1170,7 +1167,10 @@ class RemoteConversation(BaseConversation):
                     # REST is advisory because stop hooks can still veto it;
                     # prefer waiting for the server's post-run WebSocket state update.
                     consecutive_terminal_polls += 1
-                    if consecutive_terminal_polls == TERMINAL_POLL_THRESHOLD:
+                    now = time.monotonic()
+                    if terminal_first_seen_at is None:
+                        terminal_first_seen_at = now
+                    if consecutive_terminal_polls == TERMINAL_POLL_WARNING_THRESHOLD:
                         logger.warning(
                             "REST has reported terminal status %s for %d polls "
                             "without a post-run WebSocket snapshot; continuing "
@@ -1180,16 +1180,15 @@ class RemoteConversation(BaseConversation):
                             consecutive_terminal_polls,
                             elapsed,
                         )
-                    if consecutive_terminal_polls >= TERMINAL_POLL_HARD_FALLBACK:
+                    terminal_secs = now - terminal_first_seen_at
+                    if terminal_secs >= TERMINAL_HARD_FALLBACK_SECS:
                         logger.warning(
-                            "REST has reported terminal status %s for %d consecutive "
-                            "polls (~%.0fs) with no post-run WebSocket snapshot; "
-                            "accepting as final to avoid an indefinite hang "
-                            "(elapsed: %.1fs). This may indicate a WebSocket "
-                            "delivery issue.",
+                            "REST has reported terminal status %s for %.0fs "
+                            "with no post-run WebSocket snapshot; accepting as "
+                            "final to avoid an indefinite hang (elapsed: %.1fs). "
+                            "This may indicate a WebSocket delivery issue.",
                             status,
-                            consecutive_terminal_polls,
-                            consecutive_terminal_polls * poll_interval,
+                            terminal_secs,
                             elapsed,
                         )
                         self._state.refresh_from_server()
@@ -1197,6 +1196,7 @@ class RemoteConversation(BaseConversation):
                         return
                 else:
                     consecutive_terminal_polls = 0
+                    terminal_first_seen_at = None
 
     @staticmethod
     def _immediate_terminal_statuses() -> frozenset[str]:

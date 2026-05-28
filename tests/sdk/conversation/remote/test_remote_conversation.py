@@ -1,5 +1,6 @@
 """Tests for RemoteConversation."""
 
+import time
 import uuid
 from unittest.mock import Mock, patch
 
@@ -1236,8 +1237,11 @@ class TestRemoteConversation:
 
         When the post-run WS full-state snapshot is never delivered (e.g. socket
         dropped after the run finished), the client should not hang until the
-        overall timeout. After TERMINAL_POLL_HARD_FALLBACK consecutive REST
+        overall timeout. After TERMINAL_HARD_FALLBACK_SECS of consecutive REST
         terminal polls it must accept the status and return.
+
+        time.monotonic is patched to advance 10 s per call so the 30 s threshold
+        is crossed after ~3 REST polls (real wall time ~poll_interval * 3).
         """
         conversation_id = str(uuid.uuid4())
         mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
@@ -1255,13 +1259,23 @@ class TestRemoteConversation:
         mock_ws_client.return_value = Mock()
 
         conversation = RemoteConversation(agent=self.agent, workspace=self.workspace)
-        # The default mock returns "finished" for all GET polls (setup_mock_client).
-        conversation.run(blocking=True, poll_interval=0.01)
 
-        # Should have hit the hard fallback (TERMINAL_POLL_HARD_FALLBACK = 30).
-        assert poll_count[0] >= 30, (
-            f"Expected >=30 REST polls for hard fallback, got {poll_count[0]}"
-        )
+        # Patch time.monotonic to advance 10 s per call so the 30 s hard-fallback
+        # threshold is crossed after ~3 REST polls.
+        call_counter = [0]
+        base = time.monotonic()
+
+        def fast_monotonic() -> float:
+            call_counter[0] += 1
+            return base + call_counter[0] * 10.0
+
+        with patch(
+            "openhands.sdk.conversation.impl.remote_conversation.time.monotonic",
+            side_effect=fast_monotonic,
+        ):
+            conversation.run(blocking=True, poll_interval=0.01)
+
+        assert poll_count[0] >= 1, f"Expected at least 1 REST poll, got {poll_count[0]}"
 
     @patch(
         "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
