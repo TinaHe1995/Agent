@@ -1133,9 +1133,7 @@ class ACPAgent(AgentBase):
         # Render the suffix once, pulling secrets from the conversation's
         # secret_registry to match the regular Agent's get_dynamic_context().
         self._installed_suffix = self._render_suffix(state)
-        # A prior session id in agent_state means we may be resuming; used by
-        # ``truly_resumed`` below to decide whether the model state reported
-        # for this launch describes the resumed session or a fresh one.
+        # A prior session id in agent_state means we may be resuming.
         prior_session_id = state.agent_state.get("acp_session_id")
         # ``acp_suffix_installed`` is persisted by
         # ``_commit_suffix_installation`` only after the first prompt has
@@ -1166,10 +1164,6 @@ class ACPAgent(AgentBase):
         # The session-id comparison is the only authoritative signal — the
         # decision happens inside ``_start_acp_server`` and isn't otherwise
         # observable here.
-        truly_resumed = (
-            prior_session_id is not None and self._session_id == prior_session_id
-        )
-
         self._initialized = True
 
         # Persist agent info + the ACP session id + its cwd in agent_state.
@@ -1424,7 +1418,7 @@ class ACPAgent(AgentBase):
             resumed_existing_session = False
             if prior_session_id is not None:
                 try:
-                    load_response = await conn.load_session(
+                    await conn.load_session(
                         cwd=working_dir,
                         session_id=prior_session_id,
                         mcp_servers=[],
@@ -1520,15 +1514,18 @@ class ACPAgent(AgentBase):
                 resumed_existing_session,
             )
 
-        # _conn / _process / _filtered_reader are assigned inside _init() (right
-        # after creation) so a mid-init failure can be cleaned up; only the
-        # success-only fields (including the resolved model state) are returned.
+        # _conn / _process / _filtered_reader are assigned to the instance inside
+        # _init() so a mid-init failure can be cleaned up; the return tuple
+        # carries the success-only fields.
         (
+            self._conn,
+            self._process,
+            self._filtered_reader,
             self._session_id,
             self._agent_name,
             self._agent_version,
             self._resumed_existing_session,
-        ) = result
+        ) = self._executor.run_async(_init)
         self._working_dir = working_dir
 
     def _reset_client_for_turn(
