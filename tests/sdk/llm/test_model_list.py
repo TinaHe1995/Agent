@@ -121,6 +121,15 @@ def test_nemotron_3_super_uses_full_infra_name():
         )
 
 
+def test_claude_opus_4_5_uses_full_infra_name():
+    """The OpenHands proxy serves the dated snapshot ``claude-opus-4-5-20251101``;
+    the bare alias ``claude-opus-4-5`` is not a valid proxy model name and must
+    not be offered under the OpenHands provider.
+    """
+    assert "claude-opus-4-5-20251101" in VERIFIED_OPENHANDS_MODELS
+    assert "claude-opus-4-5" not in VERIFIED_OPENHANDS_MODELS
+
+
 def test_trinity_model_is_openhands_only():
     """trinity-large-thinking should be available only via the OpenHands provider
     and must not be listed under any other provider.
