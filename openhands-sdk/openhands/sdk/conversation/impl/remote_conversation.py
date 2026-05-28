@@ -66,6 +66,10 @@ LEGACY_CONVERSATIONS_PATH = "/api/conversations"
 @dataclass(frozen=True)
 class _RunCompletionSignal:
     status: str
+    # from_post_run_snapshot is retained for debugger inspection; it is not
+    # read by _wait_for_run_completion because ERROR/STUCK signals always raise
+    # before reaching the log/reconcile/return path, and all other signals
+    # originate from the authoritative post-run full-state snapshot.
     from_post_run_snapshot: bool
 
 
