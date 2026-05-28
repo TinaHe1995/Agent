@@ -649,6 +649,7 @@ class RemoteConversation(BaseConversation):
     _client: httpx.Client
     _cleanup_initiated: bool
     _terminal_status_queue: Queue[_RunCompletionSignal]
+    _run_armed: threading.Event
     _conversation_info_base_path: str
     _conversation_action_base_path: str
     delete_on_close: bool = False
@@ -713,6 +714,7 @@ class RemoteConversation(BaseConversation):
         self._conversation_action_base_path = LEGACY_CONVERSATIONS_PATH
         self._cleanup_initiated = False
         self._terminal_status_queue: Queue[_RunCompletionSignal] = Queue()
+        self._run_armed = threading.Event()
 
         should_create = conversation_id is None
         if conversation_id is not None:
@@ -851,6 +853,17 @@ class RemoteConversation(BaseConversation):
                 return
 
             if event.key == FULL_STATE_KEY:
+                # Only accept full-state snapshots as run-completion signals
+                # when a run is actually in progress. The WS subscription
+                # delivers an initial full-state snapshot during connect(); if
+                # that snapshot carries a non-RUNNING status (e.g. "idle"), it
+                # could be picked up by _wait_for_run_completion() as the
+                # completion signal for the *next* run() invocation, causing
+                # blocking=True to return before the server has actually
+                # finished. Gating on _run_armed (set after POST /run)
+                # ensures only post-run snapshots are treated as authoritative.
+                if not self._run_armed.is_set():
+                    return
                 raw_status = event.value.get("execution_status")
                 if raw_status is not None:
                     try:
@@ -1021,8 +1034,11 @@ class RemoteConversation(BaseConversation):
         Raises:
             ConversationRunError: If the run fails or times out.
         """
-        # Drain any stale terminal status events from previous runs.
-        # This prevents stale events from causing early returns.
+        # Disarm and drain any stale terminal status events from previous runs
+        # before arming for the new one. _run_armed gates full-state WS snapshots
+        # in run_complete_callback; clearing it here prevents the initial WS
+        # subscription snapshot from being mistaken for the post-run snapshot.
+        self._run_armed.clear()
         self._drain_terminal_status_queue()
 
         # Trigger a run on the server using the dedicated run endpoint.
@@ -1045,7 +1061,13 @@ class RemoteConversation(BaseConversation):
             logger.info(f"run() triggered successfully: {resp}")
 
         if blocking:
-            self._wait_for_run_completion(poll_interval, timeout)
+            # Arm after POST so that only WS full-state snapshots arriving
+            # after the run was triggered are treated as run-completion signals.
+            self._run_armed.set()
+            try:
+                self._wait_for_run_completion(poll_interval, timeout)
+            finally:
+                self._run_armed.clear()
 
     def _wait_for_run_completion(
         self,
@@ -1075,10 +1097,17 @@ class RemoteConversation(BaseConversation):
         """
         start_time = time.monotonic()
         consecutive_terminal_polls = 0
-        # Warn after this many consecutive REST terminal polls without the
-        # authoritative post-run snapshot. This is a health signal only; returning
-        # from REST FINISHED would reintroduce the stop-hook race.
+        # Log a warning after this many consecutive REST terminal polls without a
+        # post-run WS snapshot. This is a health signal, not a return path —
+        # returning immediately on REST FINISHED would reintroduce the stop-hook race.
         TERMINAL_POLL_THRESHOLD = 3
+        # Hard fallback: after this many consecutive terminal REST polls (~30 s with
+        # default poll_interval) treat the server as done. Stop hooks are expected to
+        # be fast (seconds); 30 consecutive polls far outlasts any realistic hook
+        # window, so accepting REST-confirmed FINISHED here is safe in practice.
+        # This bounds the hang to ~30 s when the WS post-run snapshot is never
+        # received (e.g. socket drop after the run finishes on the server).
+        TERMINAL_POLL_HARD_FALLBACK = 30
 
         while True:
             elapsed = time.monotonic() - start_time
@@ -1138,8 +1167,8 @@ class RemoteConversation(BaseConversation):
 
                 if status and ConversationExecutionStatus(status).is_terminal():
                     # ERROR/STUCK have already been handled above. FINISHED from
-                    # REST is only a hint because stop hooks can still veto it;
-                    # wait for the server's post-run WebSocket state update.
+                    # REST is advisory because stop hooks can still veto it;
+                    # prefer waiting for the server's post-run WebSocket state update.
                     consecutive_terminal_polls += 1
                     if consecutive_terminal_polls == TERMINAL_POLL_THRESHOLD:
                         logger.warning(
@@ -1151,6 +1180,21 @@ class RemoteConversation(BaseConversation):
                             consecutive_terminal_polls,
                             elapsed,
                         )
+                    if consecutive_terminal_polls >= TERMINAL_POLL_HARD_FALLBACK:
+                        logger.warning(
+                            "REST has reported terminal status %s for %d consecutive "
+                            "polls (~%.0fs) with no post-run WebSocket snapshot; "
+                            "accepting as final to avoid an indefinite hang "
+                            "(elapsed: %.1fs). This may indicate a WebSocket "
+                            "delivery issue.",
+                            status,
+                            consecutive_terminal_polls,
+                            consecutive_terminal_polls * poll_interval,
+                            elapsed,
+                        )
+                        self._state.refresh_from_server()
+                        self._state.events.reconcile()
+                        return
                 else:
                     consecutive_terminal_polls = 0
 

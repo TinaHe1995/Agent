@@ -138,12 +138,27 @@ class TestRemoteConversation:
         status: str = "finished",
         **values,
     ):
+        """Install a side effect that fires a full-state WS event on the first
+        REST GET poll after POST /run.
+
+        The event is fired from the GET side effect (inside
+        _wait_for_run_completion, after _run_armed is set) rather than from the
+        POST side effect. Firing from POST races _run_armed.set(), which follows
+        the POST return, so the event would be silently discarded by
+        run_complete_callback's arming guard.
+        """
         ws_callback = [lambda event: None]
         original_side_effect = mock_client_instance.request.side_effect
+        fired = [False]
 
         def custom_side_effect(method, url, **kwargs):
             resp = original_side_effect(method, url, **kwargs)
-            if method == "POST" and url == f"/api/conversations/{conversation_id}/run":
+            if (
+                not fired[0]
+                and method == "GET"
+                and url == f"/api/conversations/{conversation_id}"
+            ):
+                fired[0] = True
                 ws_callback[0](self.full_state_event(status, **values))
             return resp
 
@@ -706,17 +721,27 @@ class TestRemoteConversation:
         mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
         ws_callback = [lambda event: None]
 
-        # Override the default request side_effect to return 409 for /run endpoint
+        # Override the default request side_effect to return 409 for /run endpoint.
+        # The full-state completion event fires on the first GET poll (after arming)
+        # rather than inline with the POST, since _run_armed is set after POST returns.
         original_side_effect = mock_client_instance.request.side_effect
+        fired = [False]
 
         def custom_side_effect(method, url, **kwargs):
             if method == "POST" and "/run" in url:
                 mock_run_response = Mock()
                 mock_run_response.status_code = 409  # Already running
                 mock_run_response.raise_for_status.return_value = None
-                ws_callback[0](self.full_state_event("finished"))
                 return mock_run_response
-            return original_side_effect(method, url, **kwargs)
+            resp = original_side_effect(method, url, **kwargs)
+            if (
+                not fired[0]
+                and method == "GET"
+                and url == f"/api/conversations/{conversation_id}"
+            ):
+                fired[0] = True
+                ws_callback[0](self.full_state_event("finished"))
+            return resp
 
         mock_client_instance.request.side_effect = custom_side_effect
 
@@ -843,19 +868,21 @@ class TestRemoteConversation:
         mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
         ws_callback = [lambda event: None]
         original_side_effect = mock_client_instance.request.side_effect
+        first_poll = [True]
 
         def custom_side_effect(method, url, **kwargs):
-            if method == "POST" and url == f"/api/conversations/{conversation_id}/run":
-                response = original_side_effect(method, url, **kwargs)
-                ws_callback[0](self.full_state_event("waiting_for_confirmation"))
-                return response
             if method == "GET" and url == f"/api/conversations/{conversation_id}":
+                if first_poll[0]:
+                    # Fire the full-state event on the first REST poll, which runs
+                    # inside _wait_for_run_completion() after _run_armed is set.
+                    first_poll[0] = False
+                    ws_callback[0](self.full_state_event("waiting_for_confirmation"))
                 response = Mock()
                 response.status_code = 200
                 response.raise_for_status.return_value = None
                 response.json.return_value = {
                     "id": conversation_id,
-                    "execution_status": "running",
+                    "execution_status": "waiting_for_confirmation",
                     "stats": {"usage_to_metrics": {}},
                 }
                 return response
@@ -868,7 +895,7 @@ class TestRemoteConversation:
         conversation = RemoteConversation(agent=self.agent, workspace=self.workspace)
         ws_callback[0] = mock_ws_client.call_args.kwargs["callback"]
 
-        conversation.run(blocking=True, poll_interval=0.01, timeout=0.05)
+        conversation.run(blocking=True, poll_interval=0.01)
 
         assert conversation.state.execution_status.value == "waiting_for_confirmation"
 
@@ -1148,6 +1175,93 @@ class TestRemoteConversation:
         # poll_interval=10s means a fall-through would take 30+ seconds; we
         # also assert below that we surfaced quickly.
         assert "boom" in str(excinfo.value) or "error" in str(excinfo.value).lower()
+
+    @patch(
+        "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
+    )
+    def test_remote_conversation_run_stale_pre_run_snapshot_is_ignored(
+        self, mock_ws_client
+    ):
+        """A full-state WS snapshot received before run() POST must not complete run().
+
+        The WS subscription delivers an initial full-state snapshot during
+        connect(). If that snapshot carries a non-RUNNING status (e.g. "idle"),
+        it must NOT be treated as the post-run completion signal — _run_armed
+        is not yet set at that point. run() should only complete once a
+        full-state snapshot arrives after the POST /run call.
+        """
+        conversation_id = str(uuid.uuid4())
+        mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
+        ws_callback = [lambda event: None]
+        original_side_effect = mock_client_instance.request.side_effect
+        poll_count = [0]
+
+        def custom_side_effect(method, url, **kwargs):
+            resp = original_side_effect(method, url, **kwargs)
+            if method == "GET" and url == f"/api/conversations/{conversation_id}":
+                poll_count[0] += 1
+                if poll_count[0] == 1:
+                    # Fire the real post-run snapshot on the first REST poll (armed).
+                    ws_callback[0](self.full_state_event("finished"))
+            return resp
+
+        mock_client_instance.request.side_effect = custom_side_effect
+        mock_ws_instance = Mock()
+        mock_ws_client.return_value = mock_ws_instance
+
+        conversation = RemoteConversation(agent=self.agent, workspace=self.workspace)
+        ws_callback[0] = mock_ws_client.call_args.kwargs["callback"]
+
+        # Inject a stale "idle" snapshot directly into the queue as if it
+        # arrived from the initial subscription, before run() is called.
+        # _run_armed is not set yet, so run_complete_callback would discard it,
+        # but simulating a direct queue put lets us verify the guard works end-to-end.
+        ws_callback[0](self.full_state_event("idle"))
+        assert conversation._terminal_status_queue.empty(), (
+            "Stale pre-run snapshot must not enter the queue (_run_armed not set)"
+        )
+
+        # run() should complete via the first REST poll's full-state event, not
+        # the stale pre-run snapshot.
+        conversation.run(blocking=True, poll_interval=0.01)
+        assert poll_count[0] >= 1
+
+    @patch(
+        "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
+    )
+    def test_remote_conversation_run_rest_hard_fallback_when_ws_silent(
+        self, mock_ws_client
+    ):
+        """run() completes via REST hard-fallback when WS snapshot never arrives.
+
+        When the post-run WS full-state snapshot is never delivered (e.g. socket
+        dropped after the run finished), the client should not hang until the
+        overall timeout. After TERMINAL_POLL_HARD_FALLBACK consecutive REST
+        terminal polls it must accept the status and return.
+        """
+        conversation_id = str(uuid.uuid4())
+        mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
+        poll_count = [0]
+        original_side_effect = mock_client_instance.request.side_effect
+
+        def custom_side_effect(method, url, **kwargs):
+            resp = original_side_effect(method, url, **kwargs)
+            if method == "GET" and url == f"/api/conversations/{conversation_id}":
+                poll_count[0] += 1
+                # Never fire the post-run WS snapshot — simulate silent socket.
+            return resp
+
+        mock_client_instance.request.side_effect = custom_side_effect
+        mock_ws_client.return_value = Mock()
+
+        conversation = RemoteConversation(agent=self.agent, workspace=self.workspace)
+        # The default mock returns "finished" for all GET polls (setup_mock_client).
+        conversation.run(blocking=True, poll_interval=0.01)
+
+        # Should have hit the hard fallback (TERMINAL_POLL_HARD_FALLBACK = 30).
+        assert poll_count[0] >= 30, (
+            f"Expected >=30 REST polls for hard fallback, got {poll_count[0]}"
+        )
 
     @patch(
         "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
