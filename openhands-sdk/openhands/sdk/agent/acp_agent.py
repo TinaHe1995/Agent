@@ -1133,8 +1133,6 @@ class ACPAgent(AgentBase):
         # Render the suffix once, pulling secrets from the conversation's
         # secret_registry to match the regular Agent's get_dynamic_context().
         self._installed_suffix = self._render_suffix(state)
-        # A prior session id in agent_state means we may be resuming.
-        prior_session_id = state.agent_state.get("acp_session_id")
         # ``acp_suffix_installed`` is persisted by
         # ``_commit_suffix_installation`` only after the first prompt has
         # actually returned successfully, so on resume we know whether the
@@ -1437,12 +1435,6 @@ class ACPAgent(AgentBase):
                         e,
                     )
 
-            # Track whether ``acp_model`` was actually pushed to the server so
-            # ``current_model_id`` below can stay honest: a caller override that
-            # never reached the server (unknown provider on a fresh session, or
-            # a resume whose ``set_session_model`` the server rejected) must not
-            # be surfaced as the live model.
-            override_applied = False
             if session_id is None:
                 # Fresh session. Build _meta content for session options (e.g.
                 # model selection). Extra kwargs to new_session() become the
@@ -1451,46 +1443,27 @@ class ACPAgent(AgentBase):
                 session_meta = build_session_model_meta(agent_name, self.acp_model)
                 response = await conn.new_session(cwd=working_dir, **session_meta)
                 session_id = response.session_id
-                reported_model_id, available_models = _extract_session_models(response)
                 # Initial-selection protocol call for providers that use it
                 # (codex-acp, gemini-cli); no-op for claude, which selected its
                 # model via the _meta above.
-                applied_via_call = await _maybe_set_session_model(
+                await _maybe_set_session_model(
                     conn,
                     agent_name,
                     session_id,
                     self.acp_model,
                 )
-                # The override actually reached the server iff it rode in via the
-                # session ``_meta`` (claude — non-empty ``session_meta``) or the
-                # protocol call was issued (codex/gemini).  An unknown/custom
-                # provider gets neither, so ``acp_model`` is set on the agent but
-                # the server is running its own default.
-                override_applied = bool(session_meta) or applied_via_call
             else:
                 # Resumed session. load_session() does not carry model _meta, so
                 # reapply the persisted (possibly runtime-switched) acp_model via
                 # the runtime-switch capability — otherwise the resumed live
                 # session would run on the server default while serialized state
                 # claims the switched model.
-                override_applied = await _reapply_session_model_on_resume(
+                await _reapply_session_model_on_resume(
                     conn,
                     agent_name,
                     session_id,
                     self.acp_model,
                 )
-
-            # Resolve the model the agent will actually use.  Prefer the caller's
-            # ``acp_model`` only when it was actually applied to the server above;
-            # otherwise the server is running its own model, so surface what it
-            # reported in ``models.currentModelId`` (``None`` for older agents
-            # that don't surface the field).  Trusting ``acp_model`` on paths
-            # where it never reached the server would mislabel the chip/picker.
-            current_model_id = (
-                self.acp_model
-                if (self.acp_model and override_applied)
-                else reported_model_id
-            )
 
             # Resolve the permission mode.  Known providers each have their
             # own mode ID (bypassPermissions, full-access, yolo …).
