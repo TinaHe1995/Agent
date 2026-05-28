@@ -42,7 +42,14 @@ from acp.schema import (
     UsageUpdate,
 )
 from acp.transports import default_environment
-from pydantic import Field, PrivateAttr, SecretStr, field_serializer
+from pydantic import (
+    Field,
+    PrivateAttr,
+    SecretStr,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+)
 
 from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
@@ -67,6 +74,7 @@ from openhands.sdk.settings.acp_providers import (
 from openhands.sdk.tool import Tool  # noqa: TC002
 from openhands.sdk.tool.builtins.finish import FinishAction, FinishObservation
 from openhands.sdk.utils import maybe_truncate
+from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 from openhands.sdk.utils.pydantic_secrets import serialize_secret
 
 
@@ -105,6 +113,28 @@ _RETRIABLE_CONNECTION_ERRORS = (OSError, ConnectionError, BrokenPipeError, EOFEr
 # -32603 = "Internal error" (JSON-RPC spec) — covers ACP server crashes,
 #          upstream model 500s, and transient infrastructure errors.
 _RETRIABLE_SERVER_ERROR_CODES: frozenset[int] = frozenset({-32603})
+
+
+def _decrypt_acp_env_value(cipher: Cipher, value: object) -> object:
+    """Decrypt a single ``acp_env`` value when it is a Fernet token.
+
+    Returned unchanged when the value isn't a string, isn't a Fernet
+    token (legacy plaintext from clients that haven't gone through the
+    encryption pipeline), or fails to decrypt — mirrors the MCP env /
+    header pattern in :mod:`openhands.sdk.settings.model`.
+    """
+    if not isinstance(value, str):
+        return value
+    if not value.startswith(FERNET_TOKEN_PREFIX):
+        return value
+    decrypted = cipher.try_decrypt_str(value)
+    if decrypted is None:
+        logger.warning(
+            "ACP env value looks encrypted but could not be decrypted "
+            "(cipher mismatch or corruption); leaving the ciphertext in place."
+        )
+        return value
+    return decrypted
 
 # Maximum characters for ACP tool call content — matches MAX_CMD_OUTPUT_SIZE
 # used by the terminal tool and the default max_message_chars in LLM config.
@@ -807,6 +837,39 @@ class ACPAgent(AgentBase):
         default_factory=dict,
         description="Additional environment variables for the ACP server process",
     )
+
+    @field_validator("acp_env", mode="before")
+    @classmethod
+    def _decrypt_acp_env_values(cls, value: Any, info: ValidationInfo) -> Any:
+        """Decrypt persisted ACP environment values when a cipher is available.
+
+        Mirrors the settings-side ``_decrypt_acp_env_values`` on
+        :class:`openhands.sdk.settings.model.ACPAgentSettings`. The
+        settings variant handles the on-disk → memory round-trip,
+        but the conversation-start path goes
+        :class:`StartConversationRequest.agent_settings` → the request's
+        ``_populate_agent_from_settings`` (a ``mode='before'``
+        model_validator that runs *without* cipher context) →
+        ``settings.create_agent()`` → :class:`ACPAgent`. By the time
+        ``conversation_service.start_conversation`` re-validates the full
+        :class:`StoredConversation` with the server's cipher in context,
+        the agent has already been constructed and its ``acp_env`` field
+        still holds ciphertext. Without a validator here, that ciphertext
+        survives the re-validation step and reaches the subprocess as the
+        env-var value — breaking any provider call that interprets the
+        variable (e.g. an Anthropic request reading a Fernet token in
+        place of ``ANTHROPIC_BASE_URL``).
+
+        Legacy plaintext values pass through unchanged so first writes
+        from clients that haven't gone through the encryption pipeline
+        still validate cleanly.
+        """
+        if not isinstance(value, dict):
+            return value
+        cipher: Cipher | None = info.context.get("cipher") if info.context else None
+        if cipher is None:
+            return value
+        return {k: _decrypt_acp_env_value(cipher, v) for k, v in value.items()}
 
     @field_serializer("acp_env", when_used="always")
     def _serialize_acp_env(self, value: dict[str, str], info):

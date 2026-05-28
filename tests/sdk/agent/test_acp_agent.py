@@ -240,6 +240,100 @@ class TestACPAgentSerialization:
         assert isinstance(agent, ACPAgent)
         assert agent.acp_command == ["echo", "test"]
 
+    def test_acp_env_decrypts_ciphertext_with_cipher_in_context(self):
+        """Round-trip Fernet-encrypted ``acp_env`` values via cipher context.
+
+        Regression for a real production bug in v1.24.0: the on-disk →
+        ACPAgentSettings → ACPAgent path could leave Fernet ciphertext as
+        the field value because only the settings-side variant had a
+        decryption ``field_validator``. The conversation-start flow
+        validates the full :class:`StoredConversation` with cipher
+        context after the agent was already constructed (without cipher)
+        from ``StartConversationRequest.agent_settings`` — and without
+        the validator here, the ciphertext survives that re-validation
+        and reaches the ACP subprocess as the env-var value. The
+        provider call then fails (e.g. Anthropic reads the Fernet token
+        as ``ANTHROPIC_BASE_URL`` and 400s on URL parsing).
+        """
+        from base64 import urlsafe_b64encode
+
+        from openhands.sdk.utils.cipher import Cipher
+
+        cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+        encrypted_key = cipher.encrypt(__import__("pydantic").SecretStr("sk-real"))
+        encrypted_url = cipher.encrypt(
+            __import__("pydantic").SecretStr("https://api.example.com")
+        )
+        assert encrypted_key is not None
+        assert encrypted_url is not None
+
+        # Build the wire payload an agent-server would receive: an
+        # ACPAgent dict whose ``acp_env`` values are Fernet ciphertext.
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {
+                "ANTHROPIC_API_KEY": encrypted_key,
+                "ANTHROPIC_BASE_URL": encrypted_url,
+            },
+        }
+
+        restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {
+            "ANTHROPIC_API_KEY": "sk-real",
+            "ANTHROPIC_BASE_URL": "https://api.example.com",
+        }
+
+    def test_acp_env_plaintext_passes_through_with_cipher(self):
+        """First writes from clients that never went through the encryption
+        pipeline carry plaintext. They must still validate cleanly when the
+        server happens to have a cipher in context."""
+        from base64 import urlsafe_b64encode
+
+        from openhands.sdk.utils.cipher import Cipher
+
+        cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {"FOO": "plaintext-value"},
+        }
+        restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {"FOO": "plaintext-value"}
+
+    def test_acp_env_undecryptable_ciphertext_passes_through_with_warning(
+        self, caplog
+    ):
+        """Cipher mismatch / corruption shouldn't crash agent construction.
+
+        Mirrors the MCP env/header pattern: a ciphertext we can't decrypt
+        is left in place with a logged warning so the operator can repair
+        it, rather than turning into a hard failure that bricks the
+        agent.
+        """
+        from base64 import urlsafe_b64encode
+
+        from openhands.sdk.utils.cipher import Cipher
+
+        cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+        # Looks like a Fernet token (prefix matches) but isn't a valid
+        # one — try_decrypt_str returns None.
+        bogus = "gAAAAA" + ("x" * 80)
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {"BUSTED": bogus},
+        }
+        with caplog.at_level("WARNING"):
+            restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {"BUSTED": bogus}
+        assert any(
+            "could not be decrypted" in r.message for r in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # Feature validation (init_state guards)
