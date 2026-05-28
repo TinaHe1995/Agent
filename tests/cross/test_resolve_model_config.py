@@ -668,10 +668,10 @@ def test_gpt_oss_120b_config():
     assert model["id"] == "gpt-oss-120b"
     assert model["display_name"] == "GPT OSS 120B"
     assert (
-        model["llm_config"]["model"]
-        == "litellm_proxy/fireworks_ai/accounts/fireworks/models/gpt-oss-120b"
+        model["llm_config"]["model"] == "litellm_proxy/openrouter/openai/gpt-oss-120b"
     )
- 
+
+
 def test_amber_vector_3542_config():
     """Test that amber-vector-3542 has correct configuration."""
     model = MODELS["amber-vector-3542"]
