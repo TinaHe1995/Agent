@@ -128,3 +128,38 @@ def test_agent_context_secrets_plaintext_passes_through_with_cipher():
         context={"cipher": cipher},
     )
     assert ctx.secrets == {"FOO": "plaintext-value"}
+
+
+def test_agent_context_secrets_secret_source_passes_through_with_cipher():
+    """``SecretSource`` entries serialize to a dict on the wire, so they
+    must slip past ``validate_secret_dict``'s ``isinstance(value, str)``
+    gate untouched while raw-string siblings are still decrypted.
+
+    Locks in the invariant the ``_decrypt_secrets`` docstring describes:
+    if ``SecretSource`` serialization ever produced a bare string, the
+    str-gate would silently start mangling it and ciphertext could reach
+    the prompt.
+    """
+    from base64 import urlsafe_b64encode
+
+    from pydantic import SecretStr
+
+    from openhands.sdk.context.agent_context import AgentContext
+    from openhands.sdk.secret import SecretSource, StaticSecret
+    from openhands.sdk.utils.cipher import Cipher
+
+    cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+    source = StaticSecret(value=SecretStr("source-secret"))
+    ctx = AgentContext(secrets={"RAW": "plaintext", "SRC": source})
+
+    dumped = ctx.model_dump(mode="json", context={"cipher": cipher})
+    # The raw string is encrypted to a Fernet token; the SecretSource stays
+    # a dict (its own nested ``value`` is the part that gets encrypted).
+    assert dumped["secrets"]["RAW"].startswith("gAAAA")
+    assert isinstance(dumped["secrets"]["SRC"], dict)
+
+    restored = AgentContext.model_validate(dumped, context={"cipher": cipher})
+    assert restored.secrets is not None
+    assert restored.secrets["RAW"] == "plaintext"
+    assert isinstance(restored.secrets["SRC"], SecretSource)
+    assert restored.secrets["SRC"].get_value() == "source-secret"

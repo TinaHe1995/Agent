@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 from pydantic import SecretStr
 
@@ -113,6 +113,18 @@ def validate_secret(v: str | SecretStr | None, info) -> SecretStr | None:
         return v
     else:
         return SecretStr(secret_value)
+
+
+@overload
+def decrypt_str_with_cipher_or_keep(
+    cipher: Cipher, value: str, *, description: str = ...
+) -> str: ...
+
+
+@overload
+def decrypt_str_with_cipher_or_keep(
+    cipher: Cipher, value: Any, *, description: str = ...
+) -> Any: ...
 
 
 def decrypt_str_with_cipher_or_keep(
