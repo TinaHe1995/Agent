@@ -42,6 +42,10 @@ _UNSAFE_CALLS = frozenset(
         "__import__",
     }
 )
+# Attribute-root deny-list is intentionally narrow: scripts cannot import
+# modules, so only names that are pre-injected via _safe_globals() need to
+# be listed here. os and subprocess are the two that would be most harmful
+# if they were ever inadvertently exposed.
 _UNSAFE_ATTRIBUTE_ROOTS = frozenset({"os", "subprocess"})
 
 
@@ -146,18 +150,21 @@ class WorkflowContext:
             else self._default_semaphore
         )
 
-        async def run_one(item: Any) -> str:
+        async def run_one(index: int, item: Any) -> str:
             rendered_prompt = _render_required_template(prompt, item)
             rendered_description = _render_template(description, item)
             async with semaphore:
-                return await self._run_agent_task(
-                    prompt=rendered_prompt,
-                    subagent_type=subagent_type,
-                    description=rendered_description,
-                )
+                try:
+                    return await self._run_agent_task(
+                        prompt=rendered_prompt,
+                        subagent_type=subagent_type,
+                        description=rendered_description,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"[item {index}] {exc}") from exc
 
         results = await asyncio.gather(
-            *(run_one(item) for item in items),
+            *(run_one(i, item) for i, item in enumerate(items)),
             return_exceptions=True,
         )
         failures = [result for result in results if isinstance(result, BaseException)]
@@ -181,7 +188,12 @@ class WorkflowContext:
         subagent_type: str = "general-purpose",
         description: str | None = None,
     ) -> str:
-        """Run a single reducer sub-agent with serialized intermediate results."""
+        """Run a single reducer sub-agent with serialized intermediate results.
+
+        Delegates to ``run_agent``, which acquires ``_default_semaphore``.
+        Counts against the shared concurrency limit if called while a
+        ``map_agents`` operation is in progress.
+        """
         return await self.run_agent(
             prompt=f"{prompt}\n\nInput:\n{_format_value(items)}",
             subagent_type=subagent_type,

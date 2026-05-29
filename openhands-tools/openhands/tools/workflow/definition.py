@@ -67,9 +67,11 @@ attributes are rejected. Large reducer inputs may be truncated before being sent
 to the reducer sub-agent.
 
 Available `wf` methods:
-- `await wf.run_agent(...)`
-- `await wf.map_agents(...)`
-- `await wf.reduce_agent(...)`
+- `await wf.run_agent(prompt, subagent_type="general-purpose", description=None)`
+- `await wf.map_agents(items, prompt, subagent_type="general-purpose",
+  max_concurrency=None, description=None)`
+- `await wf.reduce_agent(items, prompt, subagent_type="general-purpose",
+  description=None)`
 - `wf.flatten(values)` — flatten one level of nesting (not recursive)
 
 `map_agents` accepts either a callable prompt, such as
