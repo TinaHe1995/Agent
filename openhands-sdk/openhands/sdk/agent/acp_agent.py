@@ -74,8 +74,10 @@ from openhands.sdk.settings.acp_providers import (
 from openhands.sdk.tool import Tool  # noqa: TC002
 from openhands.sdk.tool.builtins.finish import FinishAction, FinishObservation
 from openhands.sdk.utils import maybe_truncate
-from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
-from openhands.sdk.utils.pydantic_secrets import serialize_secret
+from openhands.sdk.utils.pydantic_secrets import (
+    serialize_secret,
+    validate_secret_dict,
+)
 
 
 logger = get_logger(__name__)
@@ -114,27 +116,6 @@ _RETRIABLE_CONNECTION_ERRORS = (OSError, ConnectionError, BrokenPipeError, EOFEr
 #          upstream model 500s, and transient infrastructure errors.
 _RETRIABLE_SERVER_ERROR_CODES: frozenset[int] = frozenset({-32603})
 
-
-def _decrypt_acp_env_value(cipher: Cipher, value: object) -> object:
-    """Decrypt a single ``acp_env`` value when it is a Fernet token.
-
-    Returned unchanged when the value isn't a string, isn't a Fernet
-    token (legacy plaintext from clients that haven't gone through the
-    encryption pipeline), or fails to decrypt — mirrors the MCP env /
-    header pattern in :mod:`openhands.sdk.settings.model`.
-    """
-    if not isinstance(value, str):
-        return value
-    if not value.startswith(FERNET_TOKEN_PREFIX):
-        return value
-    decrypted = cipher.try_decrypt_str(value)
-    if decrypted is None:
-        logger.warning(
-            "ACP env value looks encrypted but could not be decrypted "
-            "(cipher mismatch or corruption); leaving the ciphertext in place."
-        )
-        return value
-    return decrypted
 
 # Maximum characters for ACP tool call content — matches MAX_CMD_OUTPUT_SIZE
 # used by the terminal tool and the default max_message_chars in LLM config.
@@ -864,12 +845,7 @@ class ACPAgent(AgentBase):
         from clients that haven't gone through the encryption pipeline
         still validate cleanly.
         """
-        if not isinstance(value, dict):
-            return value
-        cipher: Cipher | None = info.context.get("cipher") if info.context else None
-        if cipher is None:
-            return value
-        return {k: _decrypt_acp_env_value(cipher, v) for k, v in value.items()}
+        return validate_secret_dict(value, info, description="ACP env")
 
     @field_serializer("acp_env", when_used="always")
     def _serialize_acp_env(self, value: dict[str, str], info):

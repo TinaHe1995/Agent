@@ -78,3 +78,53 @@ def test_agent_context_serialization_roundtrip():
     assert isinstance(deserialized_from_json.skills[2].trigger, TaskTrigger)
     assert deserialized_from_json.skills[2] == task_skill
     assert deserialized_from_json.model_dump() == serialized
+
+
+def test_agent_context_secrets_round_trip_through_cipher_context():
+    """``AgentContext.secrets`` raw-string values must round-trip cleanly
+    when re-validated with a cipher.
+
+    Regression for the same bug class as ``ACPAgent.acp_env``: the
+    field has a ``field_serializer`` that encrypts under cipher
+    context (via :func:`serialize_secret`) but until now had no
+    matching ``field_validator``. So ciphertext survived
+    ``StoredConversation.model_validate(..., context={'cipher': ...})``
+    in the conversation-start flow and reached the agent's system
+    prompt as ``gAAAA...`` instead of the configured value.
+    """
+    from base64 import urlsafe_b64encode
+
+    from openhands.sdk.context.agent_context import AgentContext
+    from openhands.sdk.utils.cipher import Cipher
+
+    cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+    plaintext = {"GITHUB_TOKEN": "ghp-real-token", "DB_PASS": "pw"}
+
+    ctx = AgentContext(secrets=plaintext)
+    dumped = ctx.model_dump(mode="json", context={"cipher": cipher})
+    # Sanity check: the dump produced Fernet ciphertext, not plaintext.
+    for key, raw_value in plaintext.items():
+        stored = dumped["secrets"][key]
+        assert isinstance(stored, str)
+        assert stored != raw_value
+        assert stored.startswith("gAAAA")
+
+    restored = AgentContext.model_validate(dumped, context={"cipher": cipher})
+    assert restored.secrets == plaintext
+
+
+def test_agent_context_secrets_plaintext_passes_through_with_cipher():
+    """First writes from older clients carry plaintext. They must validate
+    cleanly when cipher is present in context (no FERNET_TOKEN_PREFIX,
+    no decryption attempted)."""
+    from base64 import urlsafe_b64encode
+
+    from openhands.sdk.context.agent_context import AgentContext
+    from openhands.sdk.utils.cipher import Cipher
+
+    cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
+    ctx = AgentContext.model_validate(
+        {"secrets": {"FOO": "plaintext-value"}},
+        context={"cipher": cipher},
+    )
+    assert ctx.secrets == {"FOO": "plaintext-value"}
