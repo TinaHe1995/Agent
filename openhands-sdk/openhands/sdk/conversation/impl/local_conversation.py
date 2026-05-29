@@ -732,7 +732,6 @@ class LocalConversation(BaseConversation):
         Note: if a caller passes ``extra_headers`` as a kwarg directly to
         ``completion()``, ``select_chat_options`` skips ``llm.extra_headers``
         entirely — the same limitation that affects OpenRouter headers.
-        Worth fixing in ``select_chat_options`` but out of scope here.
         """
         existing = llm.extra_headers or {}
         if "x-litellm-session-id" not in existing:
