@@ -16,6 +16,7 @@ from openhands.agent_server.persistence import (
     PersistedSettings,
     reset_stores,
 )
+from openhands.agent_server.persistence.models import _deep_merge
 from openhands.sdk.settings import (
     AGENT_SETTINGS_SCHEMA_VERSION,
     CONVERSATION_SETTINGS_SCHEMA_VERSION,
@@ -565,16 +566,12 @@ def test_deep_merge_top_level_null_is_set_not_delete():
     """A ``None`` on a top-level *field* is left as-is (set), NOT deleted —
     so it flows to validation and fails loudly instead of silently resetting
     the field to its default."""
-    from openhands.agent_server.persistence.models import _deep_merge
-
     merged = _deep_merge({"confirmation_mode": True}, {"confirmation_mode": None})
     assert merged == {"confirmation_mode": None}
 
 
 def test_deep_merge_nested_null_deletes_entry():
     """A ``None`` *inside a nested map* removes that entry; siblings survive."""
-    from openhands.agent_server.persistence.models import _deep_merge
-
     merged = _deep_merge(
         {"acp_env": {"KEEP": "a", "DROP": "b"}},
         {"acp_env": {"DROP": None}},
@@ -584,16 +581,21 @@ def test_deep_merge_nested_null_deletes_entry():
 
 def test_deep_merge_nested_null_on_absent_key_is_noop():
     """Unsetting a nested key that isn't present is a no-op, not an error."""
-    from openhands.agent_server.persistence.models import _deep_merge
-
     merged = _deep_merge({"acp_env": {"KEEP": "a"}}, {"acp_env": {"MISSING": None}})
     assert merged == {"acp_env": {"KEEP": "a"}}
 
 
+def test_deep_merge_new_map_embedded_null_stored_as_is():
+    """Corner case (documented in ``_deep_merge``): when the nested map itself
+    doesn't exist in base yet, the overlay dict is assigned wholesale — null
+    entries inside are NOT treated as deletes (can't delete from a map that
+    doesn't exist yet). Pins the guarantee against a future refactor."""
+    merged = _deep_merge({}, {"new_map": {"KEY": None}})
+    assert merged == {"new_map": {"KEY": None}}
+
+
 def test_deep_merge_non_null_still_wins():
     """Regression: non-null values still set/overwrite and merge as before."""
-    from openhands.agent_server.persistence.models import _deep_merge
-
     merged = _deep_merge({"a": 1, "b": {"x": 1}}, {"a": 2, "b": {"y": 2}})
     assert merged == {"a": 2, "b": {"x": 1, "y": 2}}
 
