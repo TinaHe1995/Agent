@@ -129,6 +129,14 @@ MODELS = {
             "model": "litellm_proxy/anthropic/claude-opus-4-7",
         },
     },
+    # https://www.anthropic.com/news/claude-opus-4-8
+    "claude-opus-4-8": {
+        "id": "claude-opus-4-8",
+        "display_name": "Claude Opus 4.8",
+        "llm_config": {
+            "model": "litellm_proxy/anthropic/claude-opus-4-8",
+        },
+    },
     "claude-sonnet-4-6": {
         "id": "claude-sonnet-4-6",
         "display_name": "Claude Sonnet 4.6",
@@ -335,6 +343,14 @@ MODELS = {
             "model": "litellm_proxy/trinity-large-thinking",
             "temperature": 1.0,
             "top_p": 0.95,
+        },
+    },
+    "amber-vector-3542": {
+        "id": "amber-vector-3542",
+        "display_name": "Amber Vector 3542",
+        "llm_config": {
+            "model": "litellm_proxy/amber-vector-3542",
+            "temperature": 0.0,
         },
     },
 }
