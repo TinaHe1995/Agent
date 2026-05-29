@@ -119,6 +119,8 @@ class WorkflowContext:
         subagent_type: str,
         description: str | None,
     ) -> str:
+        if self._closed:
+            raise WorkflowScriptError("WorkflowContext is already closed")
         task = await asyncio.to_thread(
             self._manager.start_task,
             prompt=prompt,
