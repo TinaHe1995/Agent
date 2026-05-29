@@ -85,10 +85,11 @@ the workflow observation seen by the LLM; use the return value of `main()` to
 surface results.
 
 If one or more `map_agents` items fail, the whole call raises an
-`ExceptionGroup`. Workflow scripts cannot catch `ExceptionGroup` because it is
-not included in `_safe_globals`; the error propagates to the parent agent as an
-error observation. To handle partial failures, design sub-agent prompts to
-return an error sentinel value instead of raising.
+`ExceptionGroup`. The name `ExceptionGroup` is not available by name in the
+workflow sandbox, so scripts cannot use `except*` for selective group handling.
+A plain `except Exception` will still catch the entire group. To handle partial
+failures and collect all results, design sub-agent prompts to return an error
+sentinel value instead of raising.
 
 `map_agents` accepts either a callable prompt, such as
 `lambda item: f"Review this finding: {item}"`, or a string template containing
@@ -161,7 +162,7 @@ class WorkflowToolSet(ToolDefinition[WorkflowAction, WorkflowObservation]):
     def create(
         cls,
         conv_state: "ConversationState",  # noqa: ARG003
-    ) -> Sequence[ToolDefinition]:
+    ) -> Sequence[WorkflowTool]:
         from openhands.tools.workflow.impl import WorkflowExecutor
 
         return WorkflowTool.create(executor=WorkflowExecutor())
