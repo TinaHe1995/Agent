@@ -108,9 +108,12 @@ class WorkflowTool(ToolDefinition[WorkflowAction, WorkflowObservation]):
     @classmethod
     def create(
         cls,
-        executor: "WorkflowExecutor",
+        conv_state: "ConversationState | None" = None,  # noqa: ARG003
+        executor: "WorkflowExecutor | None" = None,
         description: str = _WORKFLOW_DESCRIPTION,
     ) -> Sequence["WorkflowTool"]:
+        from openhands.tools.workflow.impl import WorkflowExecutor
+
         return [
             cls(
                 action_type=WorkflowAction,
@@ -123,7 +126,7 @@ class WorkflowTool(ToolDefinition[WorkflowAction, WorkflowObservation]):
                     idempotentHint=False,
                     openWorldHint=True,
                 ),
-                executor=executor,
+                executor=executor if executor is not None else WorkflowExecutor(),
             )
         ]
 

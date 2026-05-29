@@ -188,7 +188,7 @@ class WorkflowContext:
             description=description,
         )
 
-    def flatten(self, values: Sequence[Any]) -> list[Any]:
+    def flatten(self, values: list[Any]) -> list[Any]:
         """Flatten one list level."""
         flattened: list[Any] = []
         for value in values:
