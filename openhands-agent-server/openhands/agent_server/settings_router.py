@@ -170,7 +170,21 @@ async def update_settings(
     """Update settings with partial changes.
 
     Accepts ``agent_settings_diff`` and/or ``conversation_settings_diff``
-    for incremental updates. Values are deep-merged with existing settings.
+    for incremental updates. Diffs are applied with JSON Merge Patch
+    (RFC 7386) semantics: nested objects merge recursively, and a ``null``
+    value **deletes** that key.
+
+    The ``null``-deletes rule is the "unset" primitive that lets a client
+    remove a single map entry without round-tripping the whole map. For
+    example, to drop one ACP env-var::
+
+        PATCH /api/settings
+        {"agent_settings_diff": {"acp_env": {"STALE_KEY": null}}}
+
+    and to remove one MCP server's header::
+
+        {"agent_settings_diff":
+            {"mcp_config": {"mcpServers": {"svc": {"headers": {"X-Old": null}}}}}}
 
     Uses file locking to prevent concurrent updates from overwriting each other.
 

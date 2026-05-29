@@ -32,7 +32,14 @@ from openhands.sdk.utils.pydantic_secrets import serialize_secret, validate_secr
 
 
 class SettingsUpdatePayload(TypedDict, total=False):
-    """Typed payload for PersistedSettings.update() method."""
+    """Typed payload for PersistedSettings.update() method.
+
+    The ``*_diff`` dicts are applied with JSON Merge Patch (RFC 7386)
+    semantics via :func:`_deep_merge`: nested objects merge recursively, and
+    a ``None`` value deletes that key (the "unset" primitive). This means a
+    single map entry can be removed by sending ``{"acp_env": {"NAME": None}}``
+    rather than re-sending the whole map.
+    """
 
     agent_settings_diff: dict[str, Any]
     conversation_settings_diff: dict[str, Any]
@@ -40,13 +47,30 @@ class SettingsUpdatePayload(TypedDict, total=False):
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge overlay dict into base dict.
+    """Recursively merge ``overlay`` into ``base`` with JSON Merge Patch
+    (RFC 7386) semantics.
 
-    For nested dicts, merges recursively. For other types, overlay wins.
+    - Nested dicts are merged recursively.
+    - A ``None`` value in the overlay **removes** that key from the result —
+      this is the "unset" primitive a plain deep-merge lacks. It lets a
+      ``PATCH /api/settings`` diff delete a single map entry (e.g. one
+      ``acp_env`` / MCP ``env`` key) without having to round-trip and
+      re-send the whole redacted map.
+    - For any other scalar/list value, the overlay wins.
+
+    Deleting a key falls the field back to its model default on the next
+    validation pass (e.g. ``acp_env`` -> ``{}``). Note: because ``None``
+    means "remove", a client cannot use this path to *set* a field to a
+    literal ``null``; nothing in the settings models relies on that.
     """
     result = dict(base)
     for key, value in overlay.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+        if value is None:
+            # RFC 7386: a null member removes the target key (no-op if absent).
+            result.pop(key, None)
+        elif (
+            key in result and isinstance(result[key], dict) and isinstance(value, dict)
+        ):
             result[key] = _deep_merge(result[key], value)
         else:
             result[key] = value
