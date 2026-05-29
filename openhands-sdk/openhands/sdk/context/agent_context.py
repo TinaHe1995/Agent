@@ -158,9 +158,7 @@ class AgentContext(BaseModel):
         ``isinstance(value, str)`` gate and continue to construct
         normally through their own validators.
         """
-        return validate_secret_dict(
-            value, info, description="AgentContext secrets"
-        )
+        return validate_secret_dict(value, info, description="AgentContext secrets")
 
     @field_serializer("secrets", when_used="always")
     def _serialize_secrets(

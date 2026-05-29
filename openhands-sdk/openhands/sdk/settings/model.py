@@ -100,9 +100,10 @@ def _decrypt_mcp_value_or_keep(cipher: Cipher, value: str) -> str:
     log description; the leaf decryption lives in
     :func:`decrypt_str_with_cipher_or_keep` and is shared with every
     other dict-of-string secret-bearing field."""
-    return cast(str, decrypt_str_with_cipher_or_keep(
-        cipher, value, description="MCP env/headers"
-    ))
+    return cast(
+        str,
+        decrypt_str_with_cipher_or_keep(cipher, value, description="MCP env/headers"),
+    )
 
 
 SettingsValueType = Literal[
