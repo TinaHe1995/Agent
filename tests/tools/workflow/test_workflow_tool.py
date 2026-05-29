@@ -84,12 +84,16 @@ async def main(wf):
         '  "result:inspect beta"\n]'
     )
     assert result.startswith("result:summarize the results")
-    assert manager.prompts == [
+    # map_agents uses asyncio.to_thread; thread scheduling is non-deterministic so the
+    # first two prompts may arrive in any order. gather() preserves result ordering but
+    # not dispatch order — use set comparison for the map phase.
+    assert set(manager.prompts[:2]) == {
         "researcher: inspect alpha",
         "researcher: inspect beta",
-        expected_reduce_prompt,
-    ]
-    assert manager.descriptions == ["job alpha", "job beta", "final summary"]
+    }
+    assert manager.prompts[2] == expected_reduce_prompt
+    assert set(manager.descriptions[:2]) == {"job alpha", "job beta"}
+    assert manager.descriptions[2] == "final summary"
 
 
 def test_run_agent_returns_task_result() -> None:

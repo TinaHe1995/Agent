@@ -404,8 +404,9 @@ def _safe_globals() -> dict[str, Any]:
         "sum": sum,
         "tuple": tuple,
         # type() is included for 1-arg introspection (e.g. type(x).__name__); the
-        # 3-arg class-creation form remains safe because all method bodies execute in
-        # the same restricted globals and cannot access unsafe builtins or modules.
+        # 3-arg class-creation form is safe because method bodies execute in the same
+        # restricted globals AND the AST validator blocks __dunder__ attribute access,
+        # which closes the classic __subclasses__()-based sandbox escape path.
         "type": type,
         "TypeError": TypeError,
         "ValueError": ValueError,
