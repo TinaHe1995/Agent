@@ -1,14 +1,19 @@
 """Tests for AgentContext serialization and deserialization."""
 
 import json
+from base64 import urlsafe_b64encode
+
+from pydantic import SecretStr
 
 from openhands.sdk.context.agent_context import AgentContext
+from openhands.sdk.secret import SecretSource, StaticSecret
 from openhands.sdk.skills import (
     KeywordTrigger,
     Skill,
     TaskTrigger,
 )
 from openhands.sdk.skills.types import InputMetadata
+from openhands.sdk.utils.cipher import Cipher
 
 
 def test_agent_context_serialization_roundtrip():
@@ -92,11 +97,6 @@ def test_agent_context_secrets_round_trip_through_cipher_context():
     in the conversation-start flow and reached the agent's system
     prompt as ``gAAAA...`` instead of the configured value.
     """
-    from base64 import urlsafe_b64encode
-
-    from openhands.sdk.context.agent_context import AgentContext
-    from openhands.sdk.utils.cipher import Cipher
-
     cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
     plaintext = {"GITHUB_TOKEN": "ghp-real-token", "DB_PASS": "pw"}
 
@@ -117,11 +117,6 @@ def test_agent_context_secrets_plaintext_passes_through_with_cipher():
     """First writes from older clients carry plaintext. They must validate
     cleanly when cipher is present in context (no FERNET_TOKEN_PREFIX,
     no decryption attempted)."""
-    from base64 import urlsafe_b64encode
-
-    from openhands.sdk.context.agent_context import AgentContext
-    from openhands.sdk.utils.cipher import Cipher
-
     cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
     ctx = AgentContext.model_validate(
         {"secrets": {"FOO": "plaintext-value"}},
@@ -140,14 +135,6 @@ def test_agent_context_secrets_secret_source_passes_through_with_cipher():
     str-gate would silently start mangling it and ciphertext could reach
     the prompt.
     """
-    from base64 import urlsafe_b64encode
-
-    from pydantic import SecretStr
-
-    from openhands.sdk.context.agent_context import AgentContext
-    from openhands.sdk.secret import SecretSource, StaticSecret
-    from openhands.sdk.utils.cipher import Cipher
-
     cipher = Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
     source = StaticSecret(value=SecretStr("source-secret"))
     ctx = AgentContext(secrets={"RAW": "plaintext", "SRC": source})

@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     Field,
     SecretStr,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -140,7 +141,7 @@ class AgentContext(BaseModel):
 
     @field_validator("secrets", mode="before")
     @classmethod
-    def _decrypt_secrets(cls, value: Any, info) -> Any:
+    def _decrypt_secrets(cls, value: Any, info: ValidationInfo) -> Any:
         """Decrypt persisted raw-string ``secrets`` values when a cipher
         is in context.
 

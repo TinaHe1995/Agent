@@ -2,7 +2,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Literal, overload
 
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationInfo
 
 from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 
@@ -164,7 +164,7 @@ def decrypt_str_with_cipher_or_keep(
 
 def validate_secret_dict(
     value: Any,
-    info,
+    info: ValidationInfo,
     *,
     description: str = "secret",
 ) -> Any:
