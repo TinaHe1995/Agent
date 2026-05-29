@@ -127,6 +127,9 @@ def test_claude_opus_4_5_uses_full_infra_name():
     not be offered under the OpenHands provider.
     """
     assert "claude-opus-4-5-20251101" in VERIFIED_OPENHANDS_MODELS
+    # Scope is intentionally narrower than test_nemotron_3_super_uses_full_infra_name
+    # (which loops over all providers): VERIFIED_ANTHROPIC_MODELS legitimately keeps
+    # the bare alias because direct-Anthropic BYOK may accept it.
     assert "claude-opus-4-5" not in VERIFIED_OPENHANDS_MODELS
 
 
