@@ -1044,6 +1044,7 @@ def test_upsert_acp_env_var_invalid_name_returns_422(client_with_settings):
 
 
 def test_delete_acp_env_var_invalid_name_returns_422(client_with_settings):
+    """Invalid names are rejected on the DELETE path too (SECRET_NAME_PATTERN)."""
     response = client_with_settings.delete("/api/settings/agent-env/1bad-name")
     assert response.status_code == 422
 
@@ -1059,5 +1060,7 @@ def test_upsert_acp_env_var_on_non_acp_agent_returns_409(client_with_settings):
 
 
 def test_delete_acp_env_var_on_non_acp_agent_returns_409(client_with_settings):
+    """The default OpenHands agent has no acp_env field — the DELETE path fails
+    loudly with 409 rather than silently coercing into the OpenHands schema."""
     response = client_with_settings.delete("/api/settings/agent-env/ANTHROPIC_API_KEY")
     assert response.status_code == 409
