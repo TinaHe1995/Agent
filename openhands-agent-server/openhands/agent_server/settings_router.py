@@ -469,6 +469,12 @@ async def upsert_acp_env_var(
     server-side mutation is an unconditional dict assignment under the
     store's file lock.
 
+    Encryption-at-rest is conditional on a configured cipher
+    (``OH_SECRET_KEY``): keyed deployments persist Fernet ciphertext, while
+    a keyless local server writes plaintext to ``settings.json`` — identical
+    to the ``/api/settings/secrets`` endpoints and every other secret-bearing
+    field.
+
     Raises:
         HTTPException: 422 if name format is invalid, 409 if the active
         agent isn't ACP, 500 on file I/O failures.

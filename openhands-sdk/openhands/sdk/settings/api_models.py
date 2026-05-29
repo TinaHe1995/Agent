@@ -138,14 +138,21 @@ class SecretCreateRequest(BaseModel):
 # These models mirror the secrets API shape on purpose: clients that already
 # know how to talk to ``/api/settings/secrets`` can lift the same hook code
 # almost verbatim.
+#
+# Encryption-at-rest is inherited from the existing ``ACPAgentSettings``
+# ``acp_env`` serializer and is therefore conditional on a configured cipher
+# (``OH_SECRET_KEY``), exactly like every other secret-bearing field. On a
+# keyless local server values persist as plaintext in ``settings.json`` — same
+# as the ``/api/settings/secrets`` endpoints; it is not a guarantee this CRUD
+# surface adds on its own.
 
 
 class AcpEnvVarItem(BaseModel):
     """One ACP env-var entry, without its value.
 
     Returned in list responses and from upsert. Values are intentionally
-    not surfaced — the dedicated ``GET /agent-env/{name}`` endpoint exists
-    if a backend client needs to round-trip the plaintext value.
+    not surfaced — use ``GET /api/settings`` with the ``X-Expose-Secrets``
+    header if a backend client needs to round-trip the plaintext value.
     """
 
     name: str
