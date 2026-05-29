@@ -278,6 +278,8 @@ def validate_workflow_script(script: str) -> None:
         or main_def.args.kwonlyargs
         or main_def.args.vararg
         or main_def.args.kwarg
+        or main_def.args.defaults
+        or main_def.args.posonlyargs
     ):
         raise WorkflowScriptError("Workflow entry point must be `async def main(wf):`")
 

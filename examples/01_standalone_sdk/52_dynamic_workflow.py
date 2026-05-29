@@ -95,7 +95,7 @@ conversation = Conversation(
     agent=parent_agent,
     workspace=Path.cwd(),
     visualizer=DelegationVisualizer(name="CoverageWorkflow"),
-    max_iteration_per_run=6,
+    max_iteration_per_run=6,  # increase if more turns needed to write the script
 )
 
 conversation.send_message(
