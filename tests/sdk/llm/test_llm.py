@@ -335,7 +335,7 @@ def test_llm_token_counting_includes_tools(mock_token_counter, default_llm):
 
     assert token_count == 123
     _, kwargs = mock_token_counter.call_args
-    assert kwargs["tools"]
+    assert len(kwargs["tools"]) == 1
     assert kwargs["tools"][0]["function"]["name"] == "finish"
     assert "message" in kwargs["tools"][0]["function"]["parameters"]["properties"]
 

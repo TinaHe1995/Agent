@@ -40,13 +40,12 @@ def get_total_token_count(
         (event.tools for event in events if isinstance(event, SystemPromptEvent)),
         None,
     )
-    if tools:
-        return llm.get_token_count(
-            messages,
-            tools=tools,
-            add_security_risk_prediction=True,
-        )
-    return llm.get_token_count(messages)
+    return llm.get_token_count(
+        messages,
+        tools=tools or None,
+        # Security-risk tokens are always included in real tool requests.
+        add_security_risk_prediction=bool(tools),
+    )
 
 
 def get_shortest_prefix_above_token_count(
