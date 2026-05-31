@@ -103,6 +103,26 @@ class TestGetTotalTokenCount:
         assert kwargs["tools"] == tools
         assert kwargs["add_security_risk_prediction"] is True
 
+    def test_system_prompt_empty_tools_are_not_counted(self, mock_llm: LLM):
+        """Test that empty tool lists do not add tool schema tokens."""
+        events = [
+            SystemPromptEvent(
+                source="agent",
+                system_prompt=TextContent(text="system"),
+                tools=[],
+            ),
+            message_event("Test"),
+        ]
+
+        mock_llm.get_token_count.side_effect = None  # type: ignore
+        mock_llm.get_token_count.return_value = 3  # type: ignore
+
+        assert get_total_token_count(events, mock_llm) == 3
+
+        kwargs = mock_llm.get_token_count.call_args.kwargs  # type: ignore
+        assert kwargs["tools"] is None
+        assert kwargs["add_security_risk_prediction"] is False
+
 
 class TestGetShortestPrefixAboveTokenCount:
     """Tests for get_shortest_prefix_above_token_count function."""

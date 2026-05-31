@@ -13,7 +13,9 @@ def get_total_token_count(
 
     This function converts the events to LLM messages and uses the provided LLM
     to count the total number of tokens. This is useful for understanding how many
-    tokens a sequence of events will consume in the context window.
+    tokens a sequence of events will consume in the context window. A view is
+    expected to have one system prompt event; if multiple are present, only the
+    first system prompt's tools are included.
 
     Args:
         events: List of LLM convertible events to count tokens for
