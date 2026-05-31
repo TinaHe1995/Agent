@@ -2027,10 +2027,11 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         ]
         use_mock_tools = self.should_mock_tool_calls(cc_tools)
         if use_mock_tools:
+            tool_call_state: dict[str, Any] = {}
             formatted_messages, _ = self.pre_request_prompt_mock(
                 formatted_messages,
                 cc_tools,
-                {},
+                tool_call_state,
                 include_security_params=add_security_risk_prediction,
             )
             cc_tools = []
