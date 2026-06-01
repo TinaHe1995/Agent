@@ -17,7 +17,10 @@ from acp.schema import PromptResponse
 from pydantic import SecretStr
 
 from openhands.sdk.agent.acp_agent import (
+    _ACP_AUTH_REQUIRED_CODE,
     ACPAgent,
+    ACPAuthProbeResult,
+    _apply_env_conflict_rules,
     _estimate_cost_from_tokens,
     _extract_session_models,
     _extract_token_usage,
@@ -5977,3 +5980,215 @@ class TestACPAgentSupportsRuntimeModelSwitch:
         agent._session_id = "sess-1"
         agent._agent_name = "locked-down-provider"
         assert agent.supports_runtime_model_switch is False
+
+
+def _auth_method(method_id: str) -> MagicMock:
+    """Build a minimal ACP AuthMethod stand-in exposing ``.id``."""
+    m = MagicMock()
+    m.id = method_id
+    return m
+
+
+class TestApplyEnvConflictRules:
+    """``_apply_env_conflict_rules`` drops CLAUDECODE and auth-conflict vars."""
+
+    def test_drops_claudecode(self):
+        env = {"CLAUDECODE": "1", "KEEP": "v"}
+        _apply_env_conflict_rules(env)
+        assert env == {"KEEP": "v"}
+
+    def test_strips_anthropic_vars_under_claude_config_dir(self):
+        env = {
+            "CLAUDE_CONFIG_DIR": "/home/u/.claude",
+            "ANTHROPIC_API_KEY": "sk-x",
+            "ANTHROPIC_BASE_URL": "https://proxy",
+            "OTHER": "ok",
+        }
+        _apply_env_conflict_rules(env)
+        assert env == {"CLAUDE_CONFIG_DIR": "/home/u/.claude", "OTHER": "ok"}
+
+    def test_keeps_anthropic_vars_without_dominant(self):
+        env = {"ANTHROPIC_API_KEY": "sk-x", "ANTHROPIC_BASE_URL": "https://proxy"}
+        _apply_env_conflict_rules(env)
+        assert env == {
+            "ANTHROPIC_API_KEY": "sk-x",
+            "ANTHROPIC_BASE_URL": "https://proxy",
+        }
+
+
+class TestACPProbeAuth:
+    """``ACPAgent.probe_auth`` runs a prompt-free initialize + session/new probe.
+
+    The transport layer (subprocess, JSON-RPC reader, connection) is mocked so
+    the test exercises the classification + teardown logic without spawning a
+    real ACP server — mirroring ``TestACPSessionIdPersistence``.
+    """
+
+    @staticmethod
+    def _transport_patches(conn):
+        """Stack the transport-layer mocks so probe_auth runs without a real
+        subprocess. Returns ``(ExitStack, mock_process)``.
+        """
+        from contextlib import ExitStack
+
+        mock_process = MagicMock()
+        mock_process.stdin = MagicMock()
+        mock_process.stdout = MagicMock()
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return mock_process
+
+        async def _fake_filter(_src, _dst):
+            return None
+
+        stack = ExitStack()
+        stack.enter_context(
+            patch(
+                "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
+                new=_fake_create_subprocess_exec,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "openhands.sdk.agent.acp_agent.ClientSideConnection",
+                return_value=conn,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "openhands.sdk.agent.acp_agent._filter_jsonrpc_lines",
+                new=_fake_filter,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "openhands.sdk.agent.acp_agent.asyncio.StreamReader",
+                return_value=MagicMock(),
+            )
+        )
+        return stack, mock_process
+
+    @staticmethod
+    def _make_conn(
+        *,
+        new_session_exc: Exception | None = None,
+        auth_methods: list | None = None,
+        agent_name: str = "codex-acp",
+        agent_version: str = "2.0",
+    ):
+        conn = MagicMock()
+
+        init_response = MagicMock()
+        init_response.agent_info = MagicMock()
+        init_response.agent_info.name = agent_name
+        init_response.agent_info.version = agent_version
+        init_response.auth_methods = auth_methods or []
+        conn.initialize = AsyncMock(return_value=init_response)
+
+        conn.authenticate = AsyncMock()
+        if new_session_exc is not None:
+            conn.new_session = AsyncMock(side_effect=new_session_exc)
+        else:
+            new_response = MagicMock()
+            new_response.session_id = "probe-sess"
+            conn.new_session = AsyncMock(return_value=new_response)
+        conn.close = AsyncMock()
+        return conn
+
+    def test_empty_command_raises(self):
+        with pytest.raises(ValueError, match="non-empty command"):
+            ACPAgent.probe_auth([])
+
+    def test_authenticated_when_new_session_succeeds(self, tmp_path):
+        conn = self._make_conn()
+        stack, proc = self._transport_patches(conn)
+        with stack:
+            result = ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path))
+
+        assert isinstance(result, ACPAuthProbeResult)
+        assert result.authenticated is True
+        assert result.agent_name == "codex-acp"
+        assert result.agent_version == "2.0"
+        conn.initialize.assert_awaited_once()
+        conn.new_session.assert_awaited_once()
+        # session/new is called with the probe cwd; no prompt is ever sent.
+        _, kwargs = conn.new_session.call_args
+        assert kwargs["cwd"] == str(tmp_path)
+        # Teardown always runs.
+        conn.close.assert_awaited_once()
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+    def test_unauthenticated_on_auth_required(self, tmp_path):
+        conn = self._make_conn(
+            new_session_exc=ACPRequestError(
+                _ACP_AUTH_REQUIRED_CODE, "Authentication required"
+            )
+        )
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            result = ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path))
+
+        assert result.authenticated is False
+        # The probe still tears the subprocess down on the not-logged-in path.
+        conn.close.assert_awaited_once()
+
+    def test_non_auth_request_error_propagates(self, tmp_path):
+        conn = self._make_conn(
+            new_session_exc=ACPRequestError(-32603, "Internal error")
+        )
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            with pytest.raises(ACPRequestError):
+                ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path))
+        # Teardown runs even when the error propagates.
+        conn.close.assert_awaited_once()
+
+    def test_subprocess_spawn_failure_propagates(self, tmp_path):
+        # If even the connection can't be established, the error must propagate
+        # so the caller (endpoint) can report "unknown" rather than guess.
+        conn = self._make_conn()
+        conn.initialize = AsyncMock(side_effect=BrokenPipeError("no pipe"))
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            with pytest.raises(BrokenPipeError):
+                ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path))
+
+    def test_authenticates_when_method_credentials_present(self, tmp_path):
+        # An offered API-key method whose env var is supplied gets an explicit
+        # authenticate() call before session/new (mirrors _start_acp_server).
+        conn = self._make_conn(auth_methods=[_auth_method("openai-api-key")])
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            result = ACPAgent.probe_auth(
+                ["echo", "test"],
+                env={"OPENAI_API_KEY": "sk-test"},
+                cwd=str(tmp_path),
+            )
+        conn.authenticate.assert_awaited_once()
+        assert result.auth_methods == ["openai-api-key"]
+        assert result.authenticated is True
+
+    def test_no_authenticate_when_no_method_matches(self, tmp_path):
+        # Auth methods offered but no matching credential → skip authenticate;
+        # session/new may still succeed via the CLI's own cached login.
+        conn = self._make_conn(auth_methods=[_auth_method("openai-api-key")])
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            result = ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path))
+        conn.authenticate.assert_not_awaited()
+        assert result.auth_methods == ["openai-api-key"]
+        assert result.authenticated is True
+
+    def test_timeout_raises(self, tmp_path):
+        # A handshake that never completes is capped by the timeout.
+        conn = self._make_conn()
+
+        async def _never(*_a, **_k):
+            await asyncio.sleep(10)
+
+        conn.initialize = _never
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            with pytest.raises(TimeoutError):
+                ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path), timeout=0.2)

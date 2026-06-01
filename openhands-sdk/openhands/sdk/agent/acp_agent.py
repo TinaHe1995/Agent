@@ -45,6 +45,8 @@ from acp.schema import (
 )
 from acp.transports import default_environment
 from pydantic import (
+    BaseModel,
+    ConfigDict,
     Field,
     PrivateAttr,
     SecretStr,
@@ -125,6 +127,23 @@ _RETRIABLE_CONNECTION_ERRORS = (OSError, ConnectionError, BrokenPipeError, EOFEr
 #          upstream model 500s, and transient infrastructure errors.
 _RETRIABLE_SERVER_ERROR_CODES: frozenset[int] = frozenset({-32603})
 
+# JSON-RPC error code an ACP server returns from ``session/new`` when the
+# underlying CLI has no working credentials — ``RequestError.auth_required``
+# (acp.exceptions, code -32000, "Authentication required").  This is the one
+# error ``ACPAgent.probe_auth`` classifies as "not logged in" rather than a
+# failure: any other error means the probe could not determine login state.
+_ACP_AUTH_REQUIRED_CODE: int = -32000
+
+# Default hard cap (seconds) for ``ACPAgent.probe_auth``.  Generous because a
+# cold ``npx -y`` first run can take 10-30s to download the ACP CLI; deployed
+# images that pre-bake the CLI complete in a few seconds.
+_ACP_AUTH_PROBE_TIMEOUT: float = float(os.environ.get("ACP_AUTH_PROBE_TIMEOUT", "60.0"))
+
+# Cap (seconds) on the graceful connection-close during a probe teardown.
+# Bounded so a wedged ACP subprocess can't hang teardown — after this we fall
+# through to terminate()/kill() regardless.
+_ACP_TEARDOWN_TIMEOUT: float = 5.0
+
 
 # Maximum characters for ACP tool call content — matches MAX_CMD_OUTPUT_SIZE
 # used by the terminal tool and the default max_message_chars in LLM config.
@@ -143,6 +162,24 @@ MAX_ACP_CONTENT_CHARS: int = 30_000
 _ENV_CONFLICT_MAP: dict[str, frozenset[str]] = {
     "CLAUDE_CONFIG_DIR": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
 }
+
+
+def _apply_env_conflict_rules(env: dict[str, str]) -> None:
+    """Strip env vars that would break the active auth mechanism, in place.
+
+    Drops ``CLAUDECODE`` so a nested Claude Code instance does not refuse to
+    start, then applies :data:`_ENV_CONFLICT_MAP` (e.g. removing
+    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` when ``CLAUDE_CONFIG_DIR``
+    selects Claude Code's OAuth credential-file flow).  Shared by
+    :meth:`ACPAgent._start_acp_server` and :meth:`ACPAgent.probe_auth` so both
+    paths build the subprocess environment with identical rules.
+    """
+    env.pop("CLAUDECODE", None)
+    for dominant, conflicts in _ENV_CONFLICT_MAP.items():
+        if dominant in env:
+            for conflict in conflicts:
+                env.pop(conflict, None)
+
 
 # Limit for asyncio.StreamReader buffers used by the ACP subprocess pipes.
 # The default (64 KiB) is too small for session_update notifications that
@@ -806,6 +843,164 @@ class _OpenHandsACPBridge:
 
 
 # ---------------------------------------------------------------------------
+# Shared ACP handshake helpers (used by _start_acp_server and probe_auth)
+# ---------------------------------------------------------------------------
+
+
+async def _spawn_acp_connection(
+    client: _OpenHandsACPBridge,
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+) -> tuple[Any, ClientSideConnection, asyncio.StreamReader]:
+    """Spawn the ACP subprocess and wrap it in a JSON-RPC connection.
+
+    Spawns ``command`` directly (rather than via the ACP helper) so a
+    filtering reader can drop the non-JSON-RPC lines some servers (e.g.
+    ``claude-code-acp`` v0.1.x) write to stdout. Returns the live
+    ``(process, connection, filtered_reader)`` triple; the **caller owns
+    teardown** (see :func:`_teardown_acp_connection`).
+    """
+    process = await asyncio.create_subprocess_exec(
+        command,
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        limit=_STREAM_READER_LIMIT,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+
+    # Wrap subprocess stdout in a filtering reader that only forwards
+    # JSON-RPC lines (see _filter_jsonrpc_lines).
+    filtered_reader = asyncio.StreamReader(limit=_STREAM_READER_LIMIT)
+    asyncio.get_event_loop().create_task(
+        _filter_jsonrpc_lines(process.stdout, filtered_reader)
+    )
+
+    conn = ClientSideConnection(
+        client,
+        process.stdin,  # write to subprocess
+        filtered_reader,  # read filtered output
+    )
+    return process, conn, filtered_reader
+
+
+async def _acp_initialize(
+    conn: ClientSideConnection,
+    env: dict[str, str],
+) -> tuple[str, str, list[str]]:
+    """Run the ACP ``initialize`` handshake and authenticate if required.
+
+    Returns ``(agent_name, agent_version, auth_method_ids)`` discovered from
+    ``InitializeResponse``. Some servers (e.g. ``codex-acp``) require an
+    explicit ``authenticate`` call before session creation; the method is
+    auto-selected from the credentials present in ``env`` and the cached
+    subscription/OAuth files (see :func:`_select_auth_method`). When no method
+    matches, session creation may still succeed if the CLI has its own login.
+
+    Shared by :meth:`ACPAgent._start_acp_server` and
+    :meth:`ACPAgent.probe_auth`.
+    """
+    init_response = await conn.initialize(protocol_version=1)
+    agent_name = ""
+    agent_version = ""
+    if init_response.agent_info is not None:
+        agent_name = init_response.agent_info.name or ""
+        agent_version = init_response.agent_info.version or ""
+    logger.info(
+        "ACP server initialized: agent_name=%r, agent_version=%r",
+        agent_name,
+        agent_version,
+    )
+
+    auth_methods = init_response.auth_methods or []
+    if auth_methods:
+        method_id = _select_auth_method(auth_methods, env)
+        if method_id is not None:
+            logger.info("Authenticating with ACP method: %s", method_id)
+            auth_kwargs: dict[str, Any] = {}
+            # gemini-cli: pass gateway baseUrl to route API calls through the
+            # LiteLLM proxy. claude-agent-acp and codex-acp read their provider
+            # base URL from env vars directly.
+            if method_id == "gemini-api-key":
+                provider = detect_acp_provider_by_agent_name(agent_name)
+                base_url_var = (
+                    provider.base_url_env_var if provider is not None else None
+                )
+                if base_url_var:
+                    base_url = env.get(base_url_var)
+                    if base_url:
+                        auth_kwargs["gateway"] = {"baseUrl": base_url}
+            await conn.authenticate(method_id=method_id, **auth_kwargs)
+        else:
+            logger.warning(
+                "ACP server offers auth methods %s but no matching "
+                "env var is set — session creation may fail",
+                [m.id for m in auth_methods],
+            )
+    return agent_name, agent_version, [m.id for m in auth_methods]
+
+
+async def _teardown_acp_connection(conn: Any, process: Any) -> None:
+    """Best-effort teardown of a probe's ACP connection and subprocess.
+
+    Closes the JSON-RPC connection (bounded by :data:`_ACP_TEARDOWN_TIMEOUT` so
+    a wedged subprocess can't hang here), then terminates and kills the
+    subprocess. Every step is guarded so a failure in one does not skip the
+    others; used by :meth:`ACPAgent.probe_auth`, which owns a short-lived
+    connection rather than the instance-level resources
+    :meth:`ACPAgent._cleanup` manages.
+    """
+    try:
+        await asyncio.wait_for(conn.close(), timeout=_ACP_TEARDOWN_TIMEOUT)
+    except Exception:
+        logger.debug("Error closing probe ACP connection", exc_info=True)
+    if process is not None:
+        for stop in (process.terminate, process.kill):
+            try:
+                stop()
+            except Exception:
+                logger.debug("Error stopping probe ACP process", exc_info=True)
+
+
+class ACPAuthProbeResult(BaseModel):
+    """Result of a prompt-free ACP authentication probe.
+
+    Produced by :meth:`ACPAgent.probe_auth`. ``authenticated`` is the headline
+    signal: ``True`` when ``session/new`` succeeded (the CLI found working
+    credentials — a subscription login *or* an API key), ``False`` when the
+    server returned ``auth_required``. The remaining fields echo what the
+    ``initialize`` handshake reported, for display/diagnostics.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    authenticated: bool = Field(
+        description=(
+            "True when session/new succeeded ⇒ the ACP CLI is logged in "
+            "(by subscription or API key). False on an auth_required error."
+        )
+    )
+    auth_methods: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Auth method ids from initialize.authMethods. Informational only: "
+            "the menu of how to log in, not a reliable logged-in signal."
+        ),
+    )
+    agent_name: str = Field(
+        default="", description="ACP server name from InitializeResponse.agent_info."
+    )
+    agent_version: str = Field(
+        default="",
+        description="ACP server version from InitializeResponse.agent_info.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # ACPAgent
 # ---------------------------------------------------------------------------
 
@@ -1356,16 +1551,10 @@ class ACPAgent(AgentBase):
                 )
                 if value:
                     env[name] = value
-        # Strip CLAUDECODE so nested Claude Code instances don't refuse to start
-        env.pop("CLAUDECODE", None)
-
-        # Strip env vars that conflict with an active auth mechanism.
-        # E.g. CLAUDE_CONFIG_DIR (OAuth credential file) conflicts with
-        # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (API-key + proxy auth).
-        for dominant, conflicts in _ENV_CONFLICT_MAP.items():
-            if dominant in env:
-                for conflict in conflicts:
-                    env.pop(conflict, None)
+        # Drop CLAUDECODE (nested Claude Code) and strip env vars that conflict
+        # with an active auth mechanism (e.g. CLAUDE_CONFIG_DIR's OAuth
+        # credential file vs ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL).
+        _apply_env_conflict_rules(env)
 
         command = self.acp_command[0]
         args = list(self.acp_command[1:]) + list(self.acp_args)
@@ -1396,33 +1585,11 @@ class ACPAgent(AgentBase):
         async def _init() -> tuple[
             str, str, str, str | None, list[ACPModelInfo] | None, bool
         ]:
-            # Spawn the subprocess directly so we can install a
-            # filtering reader that skips non-JSON-RPC lines some
-            # ACP servers (e.g. claude-code-acp v0.1.x) write to
-            # stdout.
-            process = await asyncio.create_subprocess_exec(
-                command,
-                *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                limit=_STREAM_READER_LIMIT,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-
-            # Wrap the subprocess stdout in a filtering reader that
-            # only passes lines starting with '{' (JSON-RPC messages).
-            filtered_reader = asyncio.StreamReader(limit=_STREAM_READER_LIMIT)
-            asyncio.get_event_loop().create_task(
-                _filter_jsonrpc_lines(process.stdout, filtered_reader)
-            )
-
-            conn = ClientSideConnection(
-                client,
-                process.stdin,  # write to subprocess
-                filtered_reader,  # read filtered output
+            # Spawn the subprocess and install a JSON-RPC filtering reader
+            # (some servers, e.g. claude-code-acp v0.1.x, write non-protocol
+            # lines to stdout).
+            process, conn, filtered_reader = await _spawn_acp_connection(
+                client, command, args, env
             )
 
             # Track the subprocess/connection on self as soon as they exist, so
@@ -1436,48 +1603,12 @@ class ACPAgent(AgentBase):
             self._conn = conn
             self._filtered_reader = filtered_reader
 
-            # Initialize the protocol and discover server identity
-            init_response = await conn.initialize(protocol_version=1)
-            agent_name = ""
-            agent_version = ""
-            if init_response.agent_info is not None:
-                agent_name = init_response.agent_info.name or ""
-                agent_version = init_response.agent_info.version or ""
-            logger.info(
-                "ACP server initialized: agent_name=%r, agent_version=%r",
-                agent_name,
-                agent_version,
+            # Initialize the protocol, discover server identity, and
+            # authenticate if the server requires it (auto-selected from the
+            # credentials available in env / cached subscription files).
+            agent_name, agent_version, _auth_method_ids = await _acp_initialize(
+                conn, env
             )
-
-            # Authenticate if the server requires it.  Some ACP servers
-            # (e.g. codex-acp) require an explicit authenticate call
-            # before session creation.  We auto-detect the method from
-            # the env vars that are available to the process.
-            auth_methods = init_response.auth_methods or []
-            if auth_methods:
-                method_id = _select_auth_method(auth_methods, env)
-                if method_id is not None:
-                    logger.info("Authenticating with ACP method: %s", method_id)
-                    auth_kwargs: dict[str, Any] = {}
-                    # gemini-cli: pass gateway baseUrl to route API calls
-                    # through LiteLLM proxy. claude-agent-acp and codex-acp
-                    # read their provider base URL from env vars directly.
-                    if method_id == "gemini-api-key":
-                        provider = detect_acp_provider_by_agent_name(agent_name)
-                        base_url_var = (
-                            provider.base_url_env_var if provider is not None else None
-                        )
-                        if base_url_var:
-                            base_url = env.get(base_url_var)
-                            if base_url:
-                                auth_kwargs["gateway"] = {"baseUrl": base_url}
-                    await conn.authenticate(method_id=method_id, **auth_kwargs)
-                else:
-                    logger.warning(
-                        "ACP server offers auth methods %s but no matching "
-                        "env var is set — session creation may fail",
-                        [m.id for m in auth_methods],
-                    )
 
             # Resume the prior ACP session if we have its id.  If the server
             # has forgotten it (state wiped, new host, etc.) fall through to
@@ -1592,6 +1723,123 @@ class ACPAgent(AgentBase):
             self._model_override_applied,
         ) = self._executor.run_async(_init)
         self._working_dir = working_dir
+
+    @staticmethod
+    def probe_auth(
+        command: list[str],
+        *,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout: float = _ACP_AUTH_PROBE_TIMEOUT,
+    ) -> ACPAuthProbeResult:
+        """Probe whether an ACP server is already authenticated — prompt-free.
+
+        Runs the same lightweight handshake as :meth:`_start_acp_server`
+        (spawn → ``initialize`` → best-effort ``authenticate`` → ``session/new``)
+        and then tears the subprocess down. **No prompt is sent, so no model
+        tokens are spent.** The reliable signal is the outcome of ``session/new``:
+
+        - it **succeeds** ⇒ the CLI found working credentials (a subscription
+          login *or* an API key) ⇒ ``authenticated=True``;
+        - it fails with ``auth_required`` (JSON-RPC ``-32000``) ⇒ not logged in
+          ⇒ ``authenticated=False``.
+
+        ``initialize.authMethods`` alone is *not* a reliable logged-in signal
+        (Claude omits it once authed; Gemini lists it even when authed), so it
+        is returned for display only.
+
+        This is the agent-server-side detection behind the ACP onboarding
+        "you're already logged in" banner: the browser can't read the keychain
+        or credential files, but the ACP CLI — running wherever the agent-server
+        runs — reports the truth through the protocol handshake, keeping the
+        caller OS- and topology-agnostic.
+
+        Args:
+            command: Full launch command for the ACP server, e.g. the output of
+                ``ACPAgentSettings.resolve_acp_command()``. ``command[0]`` is the
+                executable; the remainder are arguments.
+            args: Extra arguments appended after ``command[1:]`` (the ``acp_args``
+                equivalent).
+            env: Extra environment variables overlaid on the inherited process
+                environment (the ``acp_env`` equivalent — typically the provider
+                API key / base URL resolved from settings). The same
+                CLAUDECODE / auth-conflict stripping as ``_start_acp_server`` is
+                applied (see :func:`_apply_env_conflict_rules`).
+            cwd: Working directory for ``session/new``. Login state does not
+                depend on it, so a throwaway directory is fine; defaults to the
+                current process directory.
+            timeout: Hard cap in seconds for the whole probe.
+
+        Returns:
+            An :class:`ACPAuthProbeResult`.
+
+        Raises:
+            ValueError: if ``command`` is empty.
+            TimeoutError: if the probe exceeds ``timeout``.
+            Exception: any transport/protocol error other than ``auth_required``
+                (e.g. the subprocess failing to start) propagates — callers
+                should treat it as "unknown", not "not logged in".
+        """
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        if not command:
+            raise ValueError("probe_auth() requires a non-empty command")
+        executable = command[0]
+        full_args = list(command[1:]) + list(args or [])
+
+        # Mirror _start_acp_server's environment construction: inherit the
+        # process env, overlay the caller-supplied extras, then strip the
+        # CLAUDECODE / auth-conflicting vars so the probe authenticates exactly
+        # as a real conversation would.
+        full_env = default_environment()
+        full_env.update(os.environ)
+        full_env.update(env or {})
+        _apply_env_conflict_rules(full_env)
+
+        working_dir = cwd if cwd is not None else os.getcwd()
+
+        async def _handshake(conn: ClientSideConnection) -> ACPAuthProbeResult:
+            agent_name, agent_version, auth_method_ids = await _acp_initialize(
+                conn, full_env
+            )
+            authenticated = True
+            try:
+                await conn.new_session(cwd=working_dir, mcp_servers=[])
+            except ACPRequestError as e:
+                if e.code != _ACP_AUTH_REQUIRED_CODE:
+                    raise
+                authenticated = False
+                logger.info(
+                    "ACP auth probe: %s is not logged in (auth_required)",
+                    agent_name or executable,
+                )
+            return ACPAuthProbeResult(
+                authenticated=authenticated,
+                auth_methods=auth_method_ids,
+                agent_name=agent_name,
+                agent_version=agent_version,
+            )
+
+        async def _probe() -> ACPAuthProbeResult:
+            # Spawn first (fast, no hang risk), then bound the handshake with the
+            # timeout *inside* the coroutine so the teardown in ``finally`` is
+            # guaranteed to run on this same event loop before we hand control
+            # back — even on timeout — rather than leaking the subprocess.
+            client = _OpenHandsACPBridge()
+            process, conn, _reader = await _spawn_acp_connection(
+                client, executable, full_args, full_env
+            )
+            try:
+                return await asyncio.wait_for(_handshake(conn), timeout=timeout)
+            finally:
+                await _teardown_acp_connection(conn, process)
+
+        executor = AsyncExecutor()
+        try:
+            return executor.run_async(_probe)
+        finally:
+            executor.close()
 
     def _reset_client_for_turn(
         self,
