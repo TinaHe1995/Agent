@@ -6034,6 +6034,9 @@ class TestACPProbeAuth:
         mock_process = MagicMock()
         mock_process.stdin = MagicMock()
         mock_process.stdout = MagicMock()
+        # ``_teardown_acp_connection`` awaits ``process.wait()`` to reap the
+        # subprocess; give the mock an awaitable so that path runs.
+        mock_process.wait = AsyncMock(return_value=0)
 
         async def _fake_create_subprocess_exec(*_args, **_kwargs):
             return mock_process
@@ -6114,10 +6117,13 @@ class TestACPProbeAuth:
         # session/new is called with the probe cwd; no prompt is ever sent.
         _, kwargs = conn.new_session.call_args
         assert kwargs["cwd"] == str(tmp_path)
-        # Teardown always runs.
+        # Teardown always runs, and the subprocess is reaped (process.wait)
+        # so a standalone caller's event loop doesn't log a child-watcher
+        # warning at shutdown.
         conn.close.assert_awaited_once()
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
+        proc.wait.assert_awaited()
 
     def test_unauthenticated_on_auth_required(self, tmp_path):
         conn = self._make_conn(

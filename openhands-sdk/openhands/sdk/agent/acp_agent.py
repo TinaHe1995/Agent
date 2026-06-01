@@ -948,7 +948,7 @@ async def _teardown_acp_connection(conn: Any, process: Any) -> None:
     """Best-effort teardown of a probe's ACP connection and subprocess.
 
     Closes the JSON-RPC connection (bounded by :data:`_ACP_TEARDOWN_TIMEOUT` so
-    a wedged subprocess can't hang here), then terminates and kills the
+    a wedged subprocess can't hang here), then terminates, kills, and reaps the
     subprocess. Every step is guarded so a failure in one does not skip the
     others; used by :meth:`ACPAgent.probe_auth`, which owns a short-lived
     connection rather than the instance-level resources
@@ -964,6 +964,15 @@ async def _teardown_acp_connection(conn: Any, process: Any) -> None:
                 stop()
             except Exception:
                 logger.debug("Error stopping probe ACP process", exc_info=True)
+        # Reap the subprocess after signalling it. Without this, asyncio's child
+        # watcher still tracks the pid, so a standalone SDK/CLI caller (whose
+        # event loop closes right after probe_auth returns) sees a noisy
+        # "Loop ... that handles pid ... is closed" warning. The agent-server
+        # path avoids it only because its loop stays alive.
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_ACP_TEARDOWN_TIMEOUT)
+        except Exception:
+            logger.debug("Probe ACP process did not exit cleanly", exc_info=True)
 
 
 class ACPAuthProbeResult(BaseModel):
