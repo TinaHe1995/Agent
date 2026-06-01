@@ -48,9 +48,14 @@ acp_auth_router = APIRouter(prefix="/acp", tags=["ACP Auth"])
 #   - unknown         → the probe could not run/complete; fall back to key fields
 ACPAuthStatusValue = Literal["authenticated", "unauthenticated", "unknown"]
 
-# Cap how much of a probe failure we echo back; these are transport/spawn errors
-# (e.g. a missing ``npx``), not user secrets, but we truncate defensively.
+# Cap how much of a probe failure we echo back. These are transport/spawn errors
+# (e.g. a missing ``npx``), not user secrets, but we both scrub known secret
+# values out of the message and truncate it defensively before surfacing it.
 _MAX_DETAIL_CHARS = 300
+
+# Only scrub env values at least this long, so redaction can't mangle a detail
+# string by blanking out short, non-secret tokens (e.g. "1", "true").
+_MIN_SECRET_LEN = 8
 
 
 class ACPAuthStatusResponse(BaseModel):
@@ -137,8 +142,11 @@ async def get_acp_auth_status(
 
     # Build the probe environment from stored global secrets (the onboarding-
     # stored keys) overlaid with the provider-specific env derived from agent
-    # settings, so the settings take precedence — matching how a real
-    # conversation resolves its ACP subprocess environment.
+    # settings, so the settings take precedence. Note: probe_auth lets every key
+    # here override the agent-server's own process env, whereas a real run
+    # applies registry/agent_context secrets fill-missing (process env wins) — so
+    # for a key defined in *both* a stored secret and the process env, the probe
+    # can authenticate with a different value than the conversation would.
     env: dict[str, str] = {}
     stored = get_secrets_store(config).load()
     if stored is not None:
@@ -169,10 +177,16 @@ async def get_acp_auth_status(
             e,
             exc_info=True,
         )
+        # Scrub any secret/env value the error string might have echoed (e.g. a
+        # provider rejecting a bad key by quoting it back) before truncating.
+        detail = f"{type(e).__name__}: {e}"
+        for value in env.values():
+            if value and len(value) >= _MIN_SECRET_LEN:
+                detail = detail.replace(value, "***")
         return ACPAuthStatusResponse(
             server=server,
             status="unknown",
-            detail=f"{type(e).__name__}: {e}"[:_MAX_DETAIL_CHARS],
+            detail=detail[:_MAX_DETAIL_CHARS],
         )
 
     return ACPAuthStatusResponse(

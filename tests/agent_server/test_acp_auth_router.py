@@ -192,3 +192,22 @@ def test_settings_env_overrides_stored_secret(client, config):
 
     assert response.status_code == 200
     assert mock_probe.call_args.kwargs["env"]["ANTHROPIC_API_KEY"] == "sk-settings"
+
+
+def test_unknown_detail_scrubs_stored_secret(client, config):
+    # If a provider error echoes a stored secret value, the 'unknown' detail
+    # surfaced to the UI must redact it, not pass it through.
+    get_secrets_store(config).set_secret(
+        name="ANTHROPIC_API_KEY", value="sk-supersecret-123"
+    )
+    with patch(
+        PROBE_PATH,
+        side_effect=RuntimeError("rejected key sk-supersecret-123"),
+    ):
+        response = client.get("/api/acp/auth-status", params={"server": "claude-code"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "unknown"
+    assert "sk-supersecret-123" not in body["detail"]
+    assert "***" in body["detail"]

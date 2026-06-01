@@ -30,6 +30,7 @@ from openhands.sdk.agent.acp_agent import (
     _reapply_session_model_on_resume,
     _select_auth_method,
     _serialize_tool_content,
+    _teardown_acp_connection,
 )
 from openhands.sdk.agent.acp_models import ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
@@ -6117,13 +6118,14 @@ class TestACPProbeAuth:
         # session/new is called with the probe cwd; no prompt is ever sent.
         _, kwargs = conn.new_session.call_args
         assert kwargs["cwd"] == str(tmp_path)
-        # Teardown always runs, and the subprocess is reaped (process.wait)
-        # so a standalone caller's event loop doesn't log a child-watcher
-        # warning at shutdown.
+        # Teardown always runs and reaps the subprocess (process.wait) so a
+        # standalone caller's event loop doesn't log a child-watcher warning at
+        # shutdown. SIGTERM reaps the (mock) process here, so it never escalates
+        # to SIGKILL.
         conn.close.assert_awaited_once()
         proc.terminate.assert_called_once()
-        proc.kill.assert_called_once()
         proc.wait.assert_awaited()
+        proc.kill.assert_not_called()
 
     def test_unauthenticated_on_auth_required(self, tmp_path):
         conn = self._make_conn(
@@ -6186,6 +6188,26 @@ class TestACPProbeAuth:
         assert result.auth_methods == ["openai-api-key"]
         assert result.authenticated is True
 
+    def test_authenticate_failure_is_unauthenticated_not_unknown(self, tmp_path):
+        # codex-acp-style: auth_required surfaces from the explicit authenticate()
+        # call (before session/new). It must classify as unauthenticated, not
+        # propagate to the caller as "unknown".
+        conn = self._make_conn(auth_methods=[_auth_method("openai-api-key")])
+        conn.authenticate = AsyncMock(
+            side_effect=ACPRequestError(_ACP_AUTH_REQUIRED_CODE, "login required")
+        )
+        stack, _proc = self._transport_patches(conn)
+        with stack:
+            result = ACPAgent.probe_auth(
+                ["echo", "test"],
+                env={"OPENAI_API_KEY": "sk-test"},
+                cwd=str(tmp_path),
+            )
+        assert result.authenticated is False
+        # session/new is never reached once authenticate reports auth_required.
+        conn.new_session.assert_not_awaited()
+        conn.close.assert_awaited_once()
+
     def test_timeout_raises(self, tmp_path):
         # A handshake that never completes is capped by the timeout.
         conn = self._make_conn()
@@ -6198,3 +6220,50 @@ class TestACPProbeAuth:
         with stack:
             with pytest.raises(TimeoutError):
                 ACPAgent.probe_auth(["echo", "test"], cwd=str(tmp_path), timeout=0.2)
+
+
+class TestTeardownACPConnection:
+    """Unit tests for ``_teardown_acp_connection`` reaping + task cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_terminate_reaps_without_escalating_to_kill(self):
+        conn = MagicMock()
+        conn.close = AsyncMock()
+        proc = MagicMock()
+        proc.wait = AsyncMock(return_value=0)  # exits on SIGTERM
+
+        await _teardown_acp_connection(conn, proc)
+
+        proc.terminate.assert_called_once()
+        proc.wait.assert_awaited_once()
+        proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_escalates_to_kill_when_terminate_does_not_reap(self):
+        conn = MagicMock()
+        conn.close = AsyncMock()
+        proc = MagicMock()
+        # First reap (after SIGTERM) times out; second (after SIGKILL) succeeds.
+        proc.wait = AsyncMock(side_effect=[TimeoutError(), 0])
+
+        await _teardown_acp_connection(conn, proc)
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_reader_task_is_cancelled(self):
+        conn = MagicMock()
+        conn.close = AsyncMock()
+        proc = MagicMock()
+        proc.wait = AsyncMock(return_value=0)
+
+        async def _never_ends():
+            await asyncio.sleep(3600)
+
+        reader_task = asyncio.ensure_future(_never_ends())
+
+        await _teardown_acp_connection(conn, proc, reader_task)
+
+        assert reader_task.cancelled()

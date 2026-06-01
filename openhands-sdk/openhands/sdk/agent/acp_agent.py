@@ -852,14 +852,16 @@ async def _spawn_acp_connection(
     command: str,
     args: list[str],
     env: dict[str, str],
-) -> tuple[Any, ClientSideConnection, asyncio.StreamReader]:
+) -> tuple[Any, ClientSideConnection, asyncio.StreamReader, asyncio.Task[None]]:
     """Spawn the ACP subprocess and wrap it in a JSON-RPC connection.
 
     Spawns ``command`` directly (rather than via the ACP helper) so a
     filtering reader can drop the non-JSON-RPC lines some servers (e.g.
     ``claude-code-acp`` v0.1.x) write to stdout. Returns the live
-    ``(process, connection, filtered_reader)`` triple; the **caller owns
-    teardown** (see :func:`_teardown_acp_connection`).
+    ``(process, connection, filtered_reader, reader_task)`` tuple; the **caller
+    owns teardown** (see :func:`_teardown_acp_connection`), including cancelling
+    ``reader_task`` — otherwise a short-lived caller whose loop closes right
+    after (e.g. :meth:`ACPAgent.probe_auth`) leaks it as a destroyed-pending-task.
     """
     process = await asyncio.create_subprocess_exec(
         command,
@@ -876,7 +878,7 @@ async def _spawn_acp_connection(
     # Wrap subprocess stdout in a filtering reader that only forwards
     # JSON-RPC lines (see _filter_jsonrpc_lines).
     filtered_reader = asyncio.StreamReader(limit=_STREAM_READER_LIMIT)
-    asyncio.get_event_loop().create_task(
+    reader_task = asyncio.get_running_loop().create_task(
         _filter_jsonrpc_lines(process.stdout, filtered_reader)
     )
 
@@ -885,7 +887,7 @@ async def _spawn_acp_connection(
         process.stdin,  # write to subprocess
         filtered_reader,  # read filtered output
     )
-    return process, conn, filtered_reader
+    return process, conn, filtered_reader, reader_task
 
 
 async def _acp_initialize(
@@ -944,35 +946,54 @@ async def _acp_initialize(
     return agent_name, agent_version, [m.id for m in auth_methods]
 
 
-async def _teardown_acp_connection(conn: Any, process: Any) -> None:
+async def _teardown_acp_connection(
+    conn: Any, process: Any, reader_task: Any = None
+) -> None:
     """Best-effort teardown of a probe's ACP connection and subprocess.
 
-    Closes the JSON-RPC connection (bounded by :data:`_ACP_TEARDOWN_TIMEOUT` so
-    a wedged subprocess can't hang here), then terminates, kills, and reaps the
-    subprocess. Every step is guarded so a failure in one does not skip the
-    others; used by :meth:`ACPAgent.probe_auth`, which owns a short-lived
-    connection rather than the instance-level resources
+    Cancels the stdout filter task, closes the JSON-RPC connection (bounded by
+    :data:`_ACP_TEARDOWN_TIMEOUT` so a wedged subprocess can't hang here), then
+    gracefully terminates the subprocess (SIGTERM → reap → escalate to SIGKILL
+    only if it doesn't exit in time). Every step is guarded so a failure in one
+    does not skip the others; used by :meth:`ACPAgent.probe_auth`, which owns a
+    short-lived connection rather than the instance-level resources
     :meth:`ACPAgent._cleanup` manages.
     """
+    # Cancel the stdout filter task first. It only ends naturally on stdout EOF
+    # (which races with killing the subprocess); without cancelling, a caller
+    # whose event loop closes right after teardown (probe_auth) leaks it as a
+    # "Task was destroyed but it is pending" warning.
+    if reader_task is not None:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Probe ACP reader task error on teardown", exc_info=True)
     try:
         await asyncio.wait_for(conn.close(), timeout=_ACP_TEARDOWN_TIMEOUT)
     except Exception:
         logger.debug("Error closing probe ACP connection", exc_info=True)
     if process is not None:
+        # SIGTERM, then reap (process.wait); only escalate to SIGKILL if it
+        # doesn't exit within the timeout. Reaping clears asyncio's child watcher
+        # so a standalone SDK/CLI caller (whose event loop closes right after
+        # probe_auth returns) doesn't see a "Loop ... that handles pid ... is
+        # closed" warning — the agent-server path avoids it only because its loop
+        # stays alive.
         for stop in (process.terminate, process.kill):
             try:
                 stop()
             except Exception:
                 logger.debug("Error stopping probe ACP process", exc_info=True)
-        # Reap the subprocess after signalling it. Without this, asyncio's child
-        # watcher still tracks the pid, so a standalone SDK/CLI caller (whose
-        # event loop closes right after probe_auth returns) sees a noisy
-        # "Loop ... that handles pid ... is closed" warning. The agent-server
-        # path avoids it only because its loop stays alive.
-        try:
-            await asyncio.wait_for(process.wait(), timeout=_ACP_TEARDOWN_TIMEOUT)
-        except Exception:
-            logger.debug("Probe ACP process did not exit cleanly", exc_info=True)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_ACP_TEARDOWN_TIMEOUT)
+                break  # exited; no need to escalate to SIGKILL
+            except Exception:
+                logger.debug(
+                    "Probe ACP process did not exit after signal", exc_info=True
+                )
 
 
 class ACPAuthProbeResult(BaseModel):
@@ -1597,7 +1618,10 @@ class ACPAgent(AgentBase):
             # Spawn the subprocess and install a JSON-RPC filtering reader
             # (some servers, e.g. claude-code-acp v0.1.x, write non-protocol
             # lines to stdout).
-            process, conn, filtered_reader = await _spawn_acp_connection(
+            # The reader task here lives on the instance's long-lived executor
+            # loop and ends on stdout EOF when _cleanup() terminates the
+            # subprocess, so (unlike the probe) it doesn't orphan; left untracked.
+            process, conn, filtered_reader, _reader_task = await _spawn_acp_connection(
                 client, command, args, env
             )
 
@@ -1745,18 +1769,27 @@ class ACPAgent(AgentBase):
         """Probe whether an ACP server is already authenticated — prompt-free.
 
         Runs the same lightweight handshake as :meth:`_start_acp_server`
-        (spawn → ``initialize`` → best-effort ``authenticate`` → ``session/new``)
-        and then tears the subprocess down. **No prompt is sent, so no model
-        tokens are spent.** The reliable signal is the outcome of ``session/new``:
+        (spawn → ``initialize`` → ``authenticate`` if the server asks for it →
+        ``session/new``) and then tears the subprocess down. **No prompt is
+        sent, so no model tokens are spent.** The signal is an ``auth_required``
+        (JSON-RPC ``-32000``) error from *either* the ``authenticate`` call or
+        ``session/new``:
 
-        - it **succeeds** ⇒ the CLI found working credentials (a subscription
+        - neither raises it ⇒ the CLI found working credentials (a subscription
           login *or* an API key) ⇒ ``authenticated=True``;
-        - it fails with ``auth_required`` (JSON-RPC ``-32000``) ⇒ not logged in
-          ⇒ ``authenticated=False``.
+        - either raises it ⇒ not logged in ⇒ ``authenticated=False``.
 
         ``initialize.authMethods`` alone is *not* a reliable logged-in signal
         (Claude omits it once authed; Gemini lists it even when authed), so it
         is returned for display only.
+
+        Reliability caveat: this assumes every supported CLI reports missing
+        credentials via the ``-32000`` ``auth_required`` code. A provider that
+        instead uses a different error code, or lets ``session/new`` succeed and
+        only fails at first prompt, would be misreported (``unknown`` is the safe
+        outcome the router falls back on; a false ``authenticated`` is the risky
+        one). Validated against the real ``claude-code`` CLI; ``codex`` and
+        ``gemini`` auth_required paths are covered by mock-transport tests only.
 
         This is the agent-server-side detection behind the ACP onboarding
         "you're already logged in" banner: the browser can't read the keychain
@@ -1799,8 +1832,14 @@ class ACPAgent(AgentBase):
 
         # Mirror _start_acp_server's environment construction: inherit the
         # process env, overlay the caller-supplied extras, then strip the
-        # CLAUDECODE / auth-conflicting vars so the probe authenticates exactly
-        # as a real conversation would.
+        # CLAUDECODE / auth-conflicting vars so the probe authenticates as a real
+        # conversation would. Caveat: here every key in ``env`` overrides
+        # os.environ. That matches _start_acp_server for ``acp_env``, but there
+        # secret-registry / agent_context secrets are applied *fill-missing*
+        # (os.environ wins). So if the caller folds stored secrets into ``env``
+        # and one shadows a process-env var of the same name (e.g.
+        # ANTHROPIC_API_KEY), the probe may authenticate with a different value
+        # than the real run — an edge case, but a real precedence divergence.
         full_env = default_environment()
         full_env.update(os.environ)
         full_env.update(env or {})
@@ -1809,11 +1848,19 @@ class ACPAgent(AgentBase):
         working_dir = cwd if cwd is not None else os.getcwd()
 
         async def _handshake(conn: ClientSideConnection) -> ACPAuthProbeResult:
-            agent_name, agent_version, auth_method_ids = await _acp_initialize(
-                conn, full_env
-            )
             authenticated = True
+            agent_name = ""
+            agent_version = ""
+            auth_method_ids: list[str] = []
+            # A single auth_required guard around the whole handshake: some
+            # servers (e.g. codex-acp) surface "not logged in" from the explicit
+            # ``authenticate`` call inside _acp_initialize rather than from
+            # ``session/new``. Catching it in either place classifies as
+            # unauthenticated instead of letting it bubble up to "unknown".
             try:
+                agent_name, agent_version, auth_method_ids = await _acp_initialize(
+                    conn, full_env
+                )
                 await conn.new_session(cwd=working_dir, mcp_servers=[])
             except ACPRequestError as e:
                 if e.code != _ACP_AUTH_REQUIRED_CODE:
@@ -1831,18 +1878,26 @@ class ACPAgent(AgentBase):
             )
 
         async def _probe() -> ACPAuthProbeResult:
-            # Spawn first (fast, no hang risk), then bound the handshake with the
-            # timeout *inside* the coroutine so the teardown in ``finally`` is
-            # guaranteed to run on this same event loop before we hand control
-            # back — even on timeout — rather than leaking the subprocess.
+            # Bound spawn + handshake under ``timeout`` together (a hung spawn
+            # shouldn't escape the cap), while guaranteeing teardown runs on this
+            # same event loop in ``finally`` — even on timeout — so the
+            # subprocess and reader task are never leaked.
             client = _OpenHandsACPBridge()
-            process, conn, _reader = await _spawn_acp_connection(
-                client, executable, full_args, full_env
-            )
+            process: Any = None
+            conn: Any = None
+            reader_task: Any = None
+
+            async def _spawn_and_handshake() -> ACPAuthProbeResult:
+                nonlocal process, conn, reader_task
+                process, conn, _reader, reader_task = await _spawn_acp_connection(
+                    client, executable, full_args, full_env
+                )
+                return await _handshake(conn)
+
             try:
-                return await asyncio.wait_for(_handshake(conn), timeout=timeout)
+                return await asyncio.wait_for(_spawn_and_handshake(), timeout=timeout)
             finally:
-                await _teardown_acp_connection(conn, process)
+                await _teardown_acp_connection(conn, process, reader_task)
 
         executor = AsyncExecutor()
         try:
