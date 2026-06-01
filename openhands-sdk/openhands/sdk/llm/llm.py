@@ -7,6 +7,7 @@ import threading
 import warnings
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args, get_origin
 
 import httpx  # noqa: F401
@@ -164,6 +165,20 @@ LLM_SECRET_FIELDS: Final[tuple[str, ...]] = (
 )
 
 LLM_PROFILE_SCHEMA_VERSION: Final[int] = 1
+
+
+@dataclass(frozen=True)
+class LLMCallContext:
+    """Per-conversation state injected at call time.
+
+    Stored as a ``PrivateAttr`` on :class:`LLM` so it is:
+    * dropped on ``model_dump()`` / ``model_validate()`` round-trips (fork),
+    * shallow-copied by ``model_copy()`` (sub-agent inheritance),
+    * never serialised into user-visible config.
+    """
+
+    prompt_cache_key: str | None = None
+    session_id: str | None = None
 
 
 class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
@@ -477,7 +492,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
     _telemetry: Telemetry | None = PrivateAttr(default=None)
     _is_subscription: bool = PrivateAttr(default=False)
     _litellm_provider: str | None = PrivateAttr(default=None)
-    _prompt_cache_key: str | None = PrivateAttr(default=None)
+    _call_context: LLMCallContext = PrivateAttr(default_factory=LLMCallContext)
     _effective_max_input_tokens: int | None = PrivateAttr(default=None)
     _effective_max_output_tokens: int | None = PrivateAttr(default=None)
     _litellm_modify_params_lock: ClassVar[threading.RLock] = threading.RLock()

@@ -79,7 +79,15 @@ def select_responses_options(
     if llm.litellm_extra_body:
         out["extra_body"] = llm.litellm_extra_body
 
-    if llm._prompt_cache_key:
-        out["prompt_cache_key"] = llm._prompt_cache_key
+    # Inject per-conversation state from call context (#3443).
+    ctx = llm._call_context
+    if ctx.prompt_cache_key:
+        out["prompt_cache_key"] = ctx.prompt_cache_key
+    if ctx.session_id:
+        existing = out.get("extra_headers") or {}
+        out["extra_headers"] = {
+            "x-litellm-session-id": ctx.session_id,
+            **existing,
+        }
 
     return out

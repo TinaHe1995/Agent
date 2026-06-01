@@ -5,7 +5,7 @@ from openhands.sdk.llm.auth import (
     OpenAISubscriptionAuth,
 )
 from openhands.sdk.llm.fallback_strategy import FallbackStrategy
-from openhands.sdk.llm.llm import LLM, LLM_PROFILE_SCHEMA_VERSION
+from openhands.sdk.llm.llm import LLM, LLM_PROFILE_SCHEMA_VERSION, LLMCallContext
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.llm.llm_registry import LLMRegistry, RegistryEvent
 from openhands.sdk.llm.llm_response import LLMResponse
@@ -41,6 +41,7 @@ __all__ = [
     "OPENAI_CODEX_MODELS",
     # Core
     "FallbackStrategy",
+    "LLMCallContext",
     "LLMResponse",
     "LLM",
     "LLM_PROFILE_SCHEMA_VERSION",
