@@ -685,6 +685,7 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                     response_type=response_type,
                 )
 
+    @observe(name="agent.astep", ignore_inputs=["state", "on_event"])
     async def astep(
         self,
         conversation: LocalConversation,
