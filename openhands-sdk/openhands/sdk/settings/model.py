@@ -1085,6 +1085,75 @@ class ACPAgentSettings(AgentSettingsBase):
             ).model_dump(),
         },
     )
+    mcp_config: MCPConfig | None = Field(
+        default=None,
+        description=(
+            "MCP servers to make available to the ACP subprocess. Unlike the "
+            "OpenHands agent — where these become in-process MCP tools — the "
+            "servers are forwarded to the ACP server at session creation and it "
+            "owns the connection. Remote (http/sse) servers are only forwarded "
+            "when the ACP server advertises support for that transport; stdio "
+            "servers (which run inside the runtime) are always forwarded."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="MCP configuration",
+                prominence=SettingProminence.MINOR,
+                variant="acp",
+            ).model_dump(),
+        },
+    )
+
+    @field_validator("mcp_config", mode="before")
+    @classmethod
+    def _normalize_empty_mcp_config(cls, value: Any) -> Any:
+        if value in (None, {}):
+            return None
+        return value
+
+    @field_validator("mcp_config", mode="before")
+    @classmethod
+    def _decrypt_mcp_secret_values(cls, value: Any, info: ValidationInfo) -> Any:
+        """Decrypt MCP ``env`` / ``headers`` values when a cipher is in
+        context (the on-disk load path). Mirrors the OpenHands settings
+        variant; both reuse the shared module-level helpers.
+        """
+        if not isinstance(value, dict):
+            return value
+        cipher: Cipher | None = info.context.get("cipher") if info.context else None
+        if cipher is None:
+            return value
+        return _walk_mcp_secret_values(
+            value, lambda v: _decrypt_mcp_value_or_keep(cipher, v)
+        )
+
+    @field_serializer("mcp_config")
+    def _serialize_mcp_config(
+        self, value: MCPConfig | None, info: SerializationInfo
+    ) -> dict[str, Any]:
+        if value is None:
+            return {}
+        dumped = value.model_dump(exclude_none=True, exclude_defaults=True)
+        ctx = info.context or {}
+        mode = resolve_expose_mode(ctx)
+
+        if mode == "plaintext":
+            return dumped
+
+        if mode == "encrypted":
+            cipher: Cipher | None = ctx.get("cipher")
+            if cipher is None:
+                raise MissingCipherError(
+                    "Cannot encrypt MCP env/headers: no cipher configured. "
+                    "Set OH_SECRET_KEY environment variable."
+                )
+            # cipher.encrypt returns None only for None input; SecretStr(v) never is.
+            return _walk_mcp_secret_values(
+                dumped, lambda v: cast(str, cipher.encrypt(SecretStr(v)))
+            )
+
+        return sanitize_dict(dumped)
+
     llm: LLM = Field(
         default_factory=_default_llm_settings,
         description=(
@@ -1211,6 +1280,14 @@ class ACPAgentSettings(AgentSettingsBase):
         """
         from openhands.sdk.agent import ACPAgent
 
+        # Bypass ``_serialize_mcp_config``: the subprocess needs real
+        # env/headers, not the masked/encrypted on-disk form.
+        mcp_config = (
+            self.mcp_config.model_dump(exclude_none=True, exclude_defaults=True)
+            if self.mcp_config is not None
+            else {}
+        )
+
         return ACPAgent(
             llm=self.llm,
             acp_command=self.resolve_acp_command(),
@@ -1220,6 +1297,7 @@ class ACPAgentSettings(AgentSettingsBase):
             acp_session_mode=self.acp_session_mode,
             acp_prompt_timeout=self.acp_prompt_timeout,
             agent_context=self.agent_context,
+            mcp_config=mcp_config,
         )
 
 
