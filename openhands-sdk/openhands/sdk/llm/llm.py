@@ -2100,7 +2100,13 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         return self._to_chat_dicts(self._prepare_chat_messages(messages))
 
     async def aformat_messages_for_llm(self, messages: list[Message]) -> list[dict]:
-        """Async variant that runs the blocking inline/resize pass off-loop."""
+        """Async variant that runs the blocking inline/resize pass off-loop.
+
+        Keep in sync with ``_prepare_chat_messages``: any new message
+        preparation pass added there must also be added here (and in
+        ``aformat_messages_for_responses``), because ``await`` cannot be
+        used inside the synchronous helper.
+        """
         messages, vision_enabled = self._begin_chat_messages(messages)
         messages = await amaybe_inline_image_urls(
             messages,
@@ -2178,7 +2184,11 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
     async def aformat_messages_for_responses(
         self, messages: list[Message]
     ) -> tuple[str | None, list[dict[str, Any]]]:
-        """Async variant that runs the blocking inline pass off-loop."""
+        """Async variant that runs the blocking inline pass off-loop.
+
+        Keep in sync with ``format_messages_for_responses``: any new
+        message preparation pass added there must also be added here.
+        """
         msgs = self._prepare_responses_messages(messages)
         msgs = await amaybe_inline_image_urls(
             msgs,

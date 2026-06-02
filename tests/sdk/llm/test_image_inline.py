@@ -195,6 +195,23 @@ def test_non_image_content_type_falls_back_to_original_url():
     assert img.image_urls == [url]
 
 
+def test_no_extension_and_no_content_type_falls_back_to_original_url():
+    """If both the URL path extension and the server ``Content-Type`` are
+    missing, ``_derive_mime_type`` must raise so the caller falls back to
+    the original URL — otherwise a soft-404 / auth-wall response would
+    sneak past the ``_ALLOWED_IMAGE_MIMES`` guard."""
+    url = "https://example.com/path/with/no/extension"
+    msg = Message(role="user", content=[ImageContent(image_urls=[url])])
+
+    image_inline._CACHE.clear()
+    with _stub_get(url, body=b"<html>not found</html>", content_type=""):
+        out = maybe_inline_image_urls([msg], inline_required=True, vision_enabled=True)
+
+    img = out[0].content[0]
+    assert isinstance(img, ImageContent)
+    assert img.image_urls == [url]
+
+
 def test_cache_reuses_result_across_calls():
     url = "https://example.com/x.png"
     msg1 = Message(role="user", content=[ImageContent(image_urls=[url])])

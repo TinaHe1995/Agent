@@ -410,6 +410,14 @@ def _derive_mime_type(content_type_header: str | None, url: str) -> str:
 
 
 def _mime_from_url(url: str) -> str:
+    """Best-effort MIME inference from the URL path extension.
+
+    Returns ``""`` when the extension is unknown or absent so that
+    ``_derive_mime_type`` raises and the caller falls back to the original
+    URL. We deliberately do not guess ``image/png`` here: a soft-404 or
+    auth-wall that omits ``Content-Type`` would otherwise sneak past the
+    ``_ALLOWED_IMAGE_MIMES`` guard.
+    """
     path = url.split("?", 1)[0].split("#", 1)[0]
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-    return _EXT_TO_MIME.get(ext, "image/png")
+    return _EXT_TO_MIME.get(ext, "")
