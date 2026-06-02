@@ -234,7 +234,6 @@ MODELS = {
             "top_p": 0.95,
         },
     },
-    # https://www.minimax.io/models/text/m3
     "minimax-m3": {
         "id": "minimax-m3",
         "display_name": "MiniMax M3",
