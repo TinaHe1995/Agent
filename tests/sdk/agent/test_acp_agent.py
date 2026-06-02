@@ -5567,14 +5567,12 @@ class TestACPSecretRegistryEnvInjection:
     def test_registry_secret_takes_precedence_over_agent_context_secret(self, tmp_path):
         """``secret_registry`` wins over ``agent_context.secrets`` on collision.
 
-        Precedence ladder for this collision:
-        ``acp_env > existing base env > secret_registry > agent_context.secrets``.
-        The registry is the canonical conversation-secret channel
-        (``StartConversationRequest.secrets`` lands here); the
-        ``agent_context.secrets`` drain runs after it and is fill-if-absent, so on
-        a key collision the registry value is kept and a context-only key is still
-        backfilled (proving the drain coexists with the registry without
-        double-injecting).
+        Precedence: ``acp_env > secret_registry > agent_context.secrets >
+        os.environ``. The registry is the canonical conversation-secret channel
+        (``StartConversationRequest.secrets`` lands here). On a key collision the
+        registry value is used (the drain skips keys the registry will set); a
+        context-only key is still injected by the drain — proving the two
+        channels coexist without double-injecting.
         """
         from pydantic import SecretStr
 
@@ -5669,7 +5667,7 @@ class TestACPEnvConflictSuppression:
     does not support OAuth bearer tokens, breaking auth silently.
 
     _start_acp_server must strip the conflicting vars regardless of where they
-    came from: acp_env, os.environ, or secret_registry.
+    came from: acp_env, os.environ, secret_registry, or agent_context.secrets.
     """
 
     @staticmethod
