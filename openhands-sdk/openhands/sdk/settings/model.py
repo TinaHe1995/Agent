@@ -1228,7 +1228,7 @@ class ACPAgentSettings(AgentSettingsBase):
         # Wrap as StaticSecret (a SecretSource) so they validate when
         # create_request lifts agent_context.secrets into request.secrets
         # (typed dict[str, SecretSource]).
-        provider_secrets: dict[str, Any] = {
+        provider_secrets: dict[str, StaticSecret] = {
             name: StaticSecret(value=SecretStr(value))
             for name, value in self.resolve_provider_env().items()
         }
