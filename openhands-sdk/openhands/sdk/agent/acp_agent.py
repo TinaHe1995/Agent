@@ -75,6 +75,7 @@ from openhands.sdk.settings.acp_providers import (
 from openhands.sdk.tool import Tool  # noqa: TC002
 from openhands.sdk.tool.builtins.finish import FinishAction, FinishObservation
 from openhands.sdk.utils import maybe_truncate
+from openhands.sdk.utils.deprecation import warn_deprecated
 from openhands.sdk.utils.pydantic_secrets import (
     serialize_secret,
     validate_secret_dict,
@@ -831,7 +832,12 @@ class ACPAgent(AgentBase):
     )
     acp_env: dict[str, str] = Field(
         default_factory=dict,
-        description="Additional environment variables for the ACP server process",
+        description=(
+            "DEPRECATED (removed in 1.29.0): additional environment variables for "
+            "the ACP server process. Route subprocess env/credentials through "
+            "state.secret_registry (e.g. agent_context.secrets / "
+            "StartConversationRequest.secrets) instead."
+        ),
     )
 
     @field_validator("acp_env", mode="before")
@@ -1344,6 +1350,17 @@ class ACPAgent(AgentBase):
         # because LookupSecret can make an HTTP request.
         env = default_environment()
         env.update(os.environ)
+        if self.acp_env:
+            warn_deprecated(
+                "ACPAgent.acp_env",
+                deprecated_in="1.24.0",
+                removed_in="1.29.0",
+                details=(
+                    "Route ACP subprocess env/credentials through "
+                    "state.secret_registry (e.g. agent_context.secrets / "
+                    "StartConversationRequest.secrets) instead."
+                ),
+            )
         env.update(self.acp_env)
         for name in state.secret_registry.secret_sources:
             if name in env:

@@ -40,6 +40,7 @@ from openhands.sdk.plugin import PluginSource
 from openhands.sdk.subagent.schema import AgentDefinition
 from openhands.sdk.tool import Tool
 from openhands.sdk.utils.cipher import Cipher
+from openhands.sdk.utils.deprecation import warn_deprecated
 from openhands.sdk.utils.pydantic_secrets import (
     MissingCipherError,
     decrypt_str_with_cipher_or_keep,
@@ -999,7 +1000,13 @@ class ACPAgentSettings(AgentSettingsBase):
     )
     acp_env: dict[str, str] = Field(
         default_factory=dict,
-        description="Extra environment variables passed to the ACP subprocess.",
+        description=(
+            "DEPRECATED (removed in 1.29.0): extra environment variables passed "
+            "to the ACP subprocess. Provide arbitrary subprocess env vars through "
+            "the conversation secrets channel (agent_context.secrets / "
+            "StartConversationRequest.secrets, which route through "
+            "state.secret_registry) instead."
+        ),
         json_schema_extra={
             SETTINGS_METADATA_KEY: SettingsFieldMetadata(
                 label="ACP environment variables",
@@ -1177,7 +1184,24 @@ class ACPAgentSettings(AgentSettingsBase):
         ``state.secret_registry`` instead (the canonical, cipher-protected
         channel the regular agent uses). At spawn time ``ACPAgent`` injects
         ``acp_env`` and the registry secrets into the subprocess env.
+
+        .. deprecated:: 1.24.0
+            :attr:`acp_env` is deprecated and will be removed in 1.29.0. Pass
+            arbitrary subprocess env vars through the conversation secrets
+            channel instead.
         """
+        if self.acp_env:
+            warn_deprecated(
+                "ACPAgentSettings.acp_env",
+                deprecated_in="1.24.0",
+                removed_in="1.29.0",
+                details=(
+                    "Provide arbitrary ACP subprocess env vars through the "
+                    "conversation secrets channel (agent_context.secrets / "
+                    "StartConversationRequest.secrets, which route through "
+                    "state.secret_registry) instead."
+                ),
+            )
         return dict(self.acp_env)
 
     def resolve_acp_command(self) -> list[str]:

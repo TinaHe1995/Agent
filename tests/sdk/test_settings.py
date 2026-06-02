@@ -740,6 +740,24 @@ def test_acp_create_agent_no_provider_creds_keeps_context_none() -> None:
     assert agent.agent_context is None
 
 
+def test_acp_env_emits_deprecation_warning() -> None:
+    # acp_env is deprecated (removed in 1.29.0); using it warns so callers
+    # migrate to the secret_registry channel before the field is deleted.
+    settings = ACPAgentSettings(acp_server="claude-code", acp_env={"MY_VAR": "v"})
+    with pytest.warns(DeprecationWarning, match=r"ACPAgentSettings\.acp_env"):
+        assert settings.resolve_acp_env() == {"MY_VAR": "v"}
+
+
+def test_acp_env_empty_does_not_warn() -> None:
+    import warnings
+
+    settings = ACPAgentSettings(acp_server="claude-code")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        settings.resolve_acp_env()
+    assert not [w for w in caught if "acp_env" in str(w.message)]
+
+
 def test_llm_agent_settings_public_alias_removed() -> None:
     """The deprecated ``LLMAgentSettings`` public import aliases were removed in
     v1.24.0; the class itself is retained (internal-only) for the union."""

@@ -5345,8 +5345,19 @@ class TestACPSecretsEnvInjection:
     def test_acp_env_still_injected(self, tmp_path):
         """``acp_env`` (user arbitrary env vars) is still injected at spawn."""
         agent = _make_agent(acp_env={"MY_TOKEN": "acp-env-value"})
-        env = self._run_start_capturing_env(agent, tmp_path)
+        with pytest.warns(DeprecationWarning, match=r"ACPAgent\.acp_env"):
+            env = self._run_start_capturing_env(agent, tmp_path)
         assert env.get("MY_TOKEN") == "acp-env-value"
+
+    def test_empty_acp_env_does_not_warn(self, tmp_path):
+        """An empty ``acp_env`` must not emit the deprecation warning."""
+        import warnings
+
+        agent = _make_agent()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._run_start_capturing_env(agent, tmp_path)
+        assert not [w for w in caught if "acp_env" in str(w.message)]
 
 
 class TestACPSecretRegistryEnvInjection:
