@@ -2121,7 +2121,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         return self._to_chat_dicts(messages)
 
     def _prepare_responses_messages(self, messages: list[Message]) -> list[Message]:
-        """Detach, optionally strip reasoning, and inline image URLs."""
+        """Detach messages and optionally strip reasoning items."""
         msgs = copy.deepcopy(messages)
 
         # Subscription mode (store=false): strip reasoning items from prior
