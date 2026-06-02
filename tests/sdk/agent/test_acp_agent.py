@@ -5288,6 +5288,11 @@ class TestACPSecretsEnvInjection:
         agent._executor = AsyncExecutor()
 
         with ExitStack() as stack:
+            # Hermetic: exclude the runner's ambient env (e.g. a real
+            # GITHUB_TOKEN / ANTHROPIC_API_KEY) so it can't shadow the
+            # registry/drain values under test — env.update(os.environ) runs
+            # before the fill-if-absent secret tiers in _start_acp_server.
+            stack.enter_context(patch.dict("os.environ", {}, clear=True))
             stack.enter_context(
                 patch(
                     "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
@@ -5410,12 +5415,16 @@ class TestACPSecretRegistryEnvInjection:
     ``AgentContext(secrets=...)`` shim around the same data.
 
     Same-key precedence is
-    ``acp_env > existing base env > secret_registry > agent_context.secrets``.
-    Registry and context entries only fill genuine gaps in the base env.
+    ``acp_env > secret_registry > agent_context.secrets > os.environ``.
+    Conversation secrets (registry + the agent_context drain) override ambient
+    ``os.environ`` so an explicit per-conversation/provider secret wins over a
+    same-named server env var; the registry wins over the drain on collision.
     """
 
     @staticmethod
-    def _run_start_capturing_env(agent, tmp_path, *, registry_secrets=None) -> dict:
+    def _run_start_capturing_env(
+        agent, tmp_path, *, registry_secrets=None, extra_os_env=None
+    ) -> dict:
         """Re-uses the env-capture harness from TestACPSecretsEnvInjection."""
         state = _make_state(tmp_path)
         if registry_secrets:
@@ -5442,6 +5451,12 @@ class TestACPSecretRegistryEnvInjection:
         agent._executor = AsyncExecutor()
 
         with ExitStack() as stack:
+            # Hermetic: replace the runner's ambient env with extra_os_env (or
+            # nothing), so it can't shadow the registry values under test and so
+            # tests can inject a controlled ambient var to assert precedence.
+            stack.enter_context(
+                patch.dict("os.environ", extra_os_env or {}, clear=True)
+            )
             stack.enter_context(
                 patch(
                     "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
@@ -5610,6 +5625,40 @@ class TestACPSecretRegistryEnvInjection:
         )
         assert "BROKEN" not in env
 
+    def test_registry_secret_overrides_ambient_os_environ(self, tmp_path):
+        """A registry secret overrides a same-named ambient os.environ var.
+
+        Conversation/provider creds must win over the agent-server's own
+        environment (os.environ is the wrong process for a remote server).
+        Before this change the ambient value silently won.
+        """
+        agent = _make_agent()
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            registry_secrets={"ANTHROPIC_API_KEY": "from-registry"},
+            extra_os_env={"ANTHROPIC_API_KEY": "ambient-should-lose"},
+        )
+        assert env.get("ANTHROPIC_API_KEY") == "from-registry"
+
+    def test_agent_context_secret_overrides_ambient_os_environ(self, tmp_path):
+        """An agent_context.secrets drain value overrides ambient os.environ."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                secrets={"GITHUB_TOKEN": StaticSecret(value=SecretStr("from-context"))}
+            )
+        )
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            extra_os_env={"GITHUB_TOKEN": "ambient-should-lose"},
+        )
+        assert env.get("GITHUB_TOKEN") == "from-context"
+
 
 class TestACPEnvConflictSuppression:
     """CLAUDE_CONFIG_DIR OAuth auth must not coexist with API-key env vars.
@@ -5694,8 +5743,12 @@ class TestACPEnvConflictSuppression:
                     return_value=MagicMock(),
                 )
             )
-            if extra_os_env:
-                stack.enter_context(patch.dict("os.environ", extra_os_env, clear=False))
+            # Hermetic: clear the runner's ambient env so it can't shadow the
+            # values under test; extra_os_env is the only os.environ content
+            # (used by the test that injects ANTHROPIC_API_KEY via os.environ).
+            stack.enter_context(
+                patch.dict("os.environ", extra_os_env or {}, clear=True)
+            )
             agent._start_acp_server(state)
 
         return captured
