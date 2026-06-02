@@ -123,6 +123,8 @@ def _get_base_ref() -> str | None:
 
 
 def _has_package_source_changes(repo_root: str, base_ref: str) -> bool:
+    """Return True when package source changed since base_ref, or if diffing fails."""
+
     changed_files: list[str] | None = None
     for candidate in _git_ref_candidates(base_ref):
         result = subprocess.run(
