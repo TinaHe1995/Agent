@@ -116,11 +116,19 @@ class LLMConvertibleEvent(Event, ABC):
                     j += 1
 
                 # Create combined message for the response
-                _append_message(messages, _combine_action_events(batch_events))
+                msg = _combine_action_events(batch_events)
+                if messages and _can_merge_user_messages(messages[-1], msg):
+                    messages[-1].content = list(messages[-1].content) + list(msg.content)
+                else:
+                    messages.append(msg)
                 i = j
             else:
                 # Regular event - direct conversion
-                _append_message(messages, event.to_llm_message())
+                msg = event.to_llm_message()
+                if messages and _can_merge_user_messages(messages[-1], msg):
+                    messages[-1].content = list(messages[-1].content) + list(msg.content)
+                else:
+                    messages.append(msg)
                 i += 1
 
         return messages
@@ -139,20 +147,6 @@ def _is_plain_user_message(message: Message) -> bool:
 def _can_merge_user_messages(previous: Message, current: Message) -> bool:
     """Return whether two user messages can be safely sent as one LLM turn."""
     return _is_plain_user_message(previous) and _is_plain_user_message(current)
-
-
-def _append_message(messages: list[Message], message: Message) -> None:
-    """Append a message, merging adjacent user turns for strict alternation models.
-
-    Merging is done via in-place mutation of the last message's content list
-    to avoid O(N²) copy-per-merge behaviour when multiple consecutive user
-    turns are coalesced.
-    """
-    if messages and _can_merge_user_messages(messages[-1], message):
-        messages[-1].content = list(messages[-1].content) + list(message.content)
-        return
-
-    messages.append(message)
 
 
 def _combine_action_events(events: list["ActionEvent"]) -> Message:
