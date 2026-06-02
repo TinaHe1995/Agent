@@ -179,7 +179,11 @@ def test_sequential_conversations_rebind_both_fields():
 
     conv2 = Conversation(agent=agent)
     conv2_id = str(conv2.id)
-    # Both fields reflect the latest conversation
+    # PrivateAttr reflects the latest conversation — this is expected.
+    # Agent.step() builds a fresh LLMCallContext from the calling
+    # conversation and threads it explicitly, so the step path never
+    # reads llm._call_context; it exists only as a fallback for callers
+    # that don't thread context (e.g. condenser).
     assert agent.llm._call_context.prompt_cache_key == conv2_id
     assert agent.llm._call_context.session_id == conv2_id
 
