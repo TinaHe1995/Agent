@@ -6,14 +6,19 @@ import asyncio
 import json
 import threading
 import uuid
+from base64 import urlsafe_b64encode
+from concurrent.futures import Future
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
+from acp.schema import PromptResponse
+from pydantic import SecretStr
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
+    _classify_acp_init_error,
     _estimate_cost_from_tokens,
     _extract_session_models,
     _extract_token_usage,
@@ -37,9 +42,11 @@ from openhands.sdk.event import (
     MessageEvent,
     SystemPromptEvent,
 )
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.llm import ImageContent, Message, TextContent
 from openhands.sdk.skills import KeywordTrigger, Skill
 from openhands.sdk.tool.builtins.finish import FinishAction
+from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
 from openhands.sdk.workspace.local import LocalWorkspace
 
@@ -51,6 +58,11 @@ from openhands.sdk.workspace.local import LocalWorkspace
 
 def _make_agent(**kwargs) -> ACPAgent:
     return ACPAgent(acp_command=["echo", "test"], **kwargs)
+
+
+def _make_cipher() -> Cipher:
+    """Deterministic Fernet cipher for round-trip tests."""
+    return Cipher(urlsafe_b64encode(b"a" * 32).decode("ascii"))
 
 
 def _make_state(tmp_path) -> ConversationState:
@@ -239,6 +251,104 @@ class TestACPAgentSerialization:
         agent = AgentBase.model_validate(data)
         assert isinstance(agent, ACPAgent)
         assert agent.acp_command == ["echo", "test"]
+
+    def test_acp_env_decrypts_ciphertext_with_cipher_in_context(self):
+        """Round-trip Fernet-encrypted ``acp_env`` values via cipher context.
+
+        Regression for a real production bug in v1.24.0: the on-disk →
+        ACPAgentSettings → ACPAgent path could leave Fernet ciphertext as
+        the field value because only the settings-side variant had a
+        decryption ``field_validator``. The conversation-start flow
+        validates the full :class:`StoredConversation` with cipher
+        context after the agent was already constructed (without cipher)
+        from ``StartConversationRequest.agent_settings`` — and without
+        the validator here, the ciphertext survives that re-validation
+        and reaches the ACP subprocess as the env-var value. The
+        provider call then fails (e.g. Anthropic reads the Fernet token
+        as ``ANTHROPIC_BASE_URL`` and 400s on URL parsing).
+        """
+        cipher = _make_cipher()
+        encrypted_key = cipher.encrypt(SecretStr("sk-real"))
+        encrypted_url = cipher.encrypt(SecretStr("https://api.example.com"))
+        assert encrypted_key is not None
+        assert encrypted_url is not None
+
+        # Build the wire payload an agent-server would receive: an
+        # ACPAgent dict whose ``acp_env`` values are Fernet ciphertext.
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {
+                "ANTHROPIC_API_KEY": encrypted_key,
+                "ANTHROPIC_BASE_URL": encrypted_url,
+            },
+        }
+
+        restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {
+            "ANTHROPIC_API_KEY": "sk-real",
+            "ANTHROPIC_BASE_URL": "https://api.example.com",
+        }
+
+    def test_acp_env_no_cipher_in_context_leaves_ciphertext_untouched(self):
+        """The ``cipher is None`` branch of the validator is exercised on
+        every code path that round-trips an agent dict without supplying
+        a cipher (e.g. test serialization helpers, JSON-only diagnostic
+        dumps). In that mode the ciphertext must survive verbatim — both
+        because there's nothing to decrypt with, and because mutating it
+        would defeat a downstream caller that *will* validate again with
+        the cipher present (the conversation-start re-validation step).
+        """
+        cipher = _make_cipher()
+        encrypted = cipher.encrypt(SecretStr("sk-real"))
+        assert encrypted is not None
+
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {"ANTHROPIC_API_KEY": encrypted},
+        }
+        restored = AgentBase.model_validate(data)
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {"ANTHROPIC_API_KEY": encrypted}
+
+    def test_acp_env_plaintext_passes_through_with_cipher(self):
+        """First writes from clients that never went through the encryption
+        pipeline carry plaintext. They must still validate cleanly when the
+        server happens to have a cipher in context."""
+        cipher = _make_cipher()
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {"FOO": "plaintext-value"},
+        }
+        restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {"FOO": "plaintext-value"}
+
+    def test_acp_env_undecryptable_ciphertext_passes_through_with_warning(self, caplog):
+        """Cipher mismatch / corruption shouldn't crash agent construction.
+
+        Mirrors the MCP env/header pattern: a ciphertext we can't decrypt
+        is left in place with a logged warning so the operator can repair
+        it, rather than turning into a hard failure that bricks the
+        agent.
+        """
+        cipher = _make_cipher()
+        # Looks like a Fernet token (prefix matches) but isn't a valid
+        # one — try_decrypt_str returns None.
+        bogus = "gAAAAA" + ("x" * 80)
+        data = {
+            "kind": "ACPAgent",
+            "acp_command": ["echo", "test"],
+            "acp_env": {"BUSTED": bogus},
+        }
+        with caplog.at_level("WARNING"):
+            restored = AgentBase.model_validate(data, context={"cipher": cipher})
+        assert isinstance(restored, ACPAgent)
+        assert restored.acp_env == {"BUSTED": bogus}
+        assert any("could not be decrypted" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +768,120 @@ class TestACPAgentInitState:
         assert events[0].dynamic_context is not None
         assert "REGISTRY_TOKEN" in events[0].dynamic_context.text
 
+    # -- Cold-start error surfacing (issue #1024) --------------------------
+
+    def _init_state_failure(self, tmp_path, exc: BaseException):
+        """Run init_state with ``_start_acp_server`` raising ``exc``.
+
+        Returns ``(state, events, raised)`` where ``raised`` is the exception
+        that escaped init_state (asserted to be the original ``exc``).
+        """
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        events: list = []
+        with patch(
+            "openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server",
+            side_effect=exc,
+        ):
+            with pytest.raises(type(exc)) as excinfo:
+                agent.init_state(state, on_event=events.append)
+        assert excinfo.value is exc, "original exception must propagate unchanged"
+        return state, events
+
+    def test_init_state_surfaces_auth_required(self, tmp_path):
+        """An auth-required protocol error becomes a typed ACPAuthRequired event
+        with ERROR status — instead of bypassing emission and reaching the
+        client as a generic "remote conversation ended with error"."""
+        exc = ACPRequestError(-32000, "Authentication required")
+        state, events = self._init_state_failure(tmp_path, exc)
+
+        errors = [e for e in events if isinstance(e, ConversationErrorEvent)]
+        assert len(errors) == 1
+        assert errors[0].source == "agent"
+        assert errors[0].code == "ACPAuthRequired"
+        assert "Authentication required" in errors[0].detail
+        assert state.execution_status == ConversationExecutionStatus.ERROR
+
+    def test_init_state_surfaces_spawn_error(self, tmp_path):
+        """A missing/unexecutable CLI binary (FileNotFoundError /
+        PermissionError from create_subprocess_exec) becomes ACPSpawnError."""
+        for exc in (
+            FileNotFoundError("no such file: claude-agent-acp"),
+            PermissionError("permission denied"),
+        ):
+            state, events = self._init_state_failure(tmp_path, exc)
+            errors = [e for e in events if isinstance(e, ConversationErrorEvent)]
+            assert len(errors) == 1
+            assert errors[0].code == "ACPSpawnError"
+            assert state.execution_status == ConversationExecutionStatus.ERROR
+
+    def test_init_state_surfaces_generic_init_error(self, tmp_path):
+        """Any other handshake/session failure falls back to ACPInitError."""
+        exc = RuntimeError("protocol handshake timed out")
+        state, events = self._init_state_failure(tmp_path, exc)
+
+        errors = [e for e in events if isinstance(e, ConversationErrorEvent)]
+        assert len(errors) == 1
+        assert errors[0].code == "ACPInitError"
+        assert "protocol handshake timed out" in errors[0].detail
+        assert state.execution_status == ConversationExecutionStatus.ERROR
+
+    def test_init_state_truncates_long_detail(self, tmp_path):
+        """detail is capped at 500 chars, matching the run-loop error path."""
+        exc = RuntimeError("x" * 1000)
+        _state, events = self._init_state_failure(tmp_path, exc)
+        errors = [e for e in events if isinstance(e, ConversationErrorEvent)]
+        assert len(errors[0].detail) == 500
+
+    def test_init_state_reraises_even_if_emission_fails(self, tmp_path):
+        """A failure while surfacing the error must never mask the original
+        exception — the re-raise contract run()/arun() rely on is preserved."""
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        exc = RuntimeError("boom")
+
+        def _explode(_event):
+            raise ValueError("on_event is broken")
+
+        with patch(
+            "openhands.sdk.agent.acp_agent.ACPAgent._start_acp_server",
+            side_effect=exc,
+        ):
+            with pytest.raises(RuntimeError, match="boom") as excinfo:
+                agent.init_state(state, on_event=_explode)
+        assert excinfo.value is exc
+
+
+# ---------------------------------------------------------------------------
+# _classify_acp_init_error
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyACPInitError:
+    def test_auth_required_code(self):
+        exc = ACPRequestError(-32000, "Authentication required")
+        assert _classify_acp_init_error(exc) == "ACPAuthRequired"
+
+    def test_other_request_error_is_init_error(self):
+        # A protocol error that isn't auth-required (e.g. internal error) is a
+        # generic init failure, not an auth failure.
+        exc = ACPRequestError(-32603, "Internal error")
+        assert _classify_acp_init_error(exc) == "ACPInitError"
+
+    def test_file_not_found_is_spawn_error(self):
+        assert _classify_acp_init_error(FileNotFoundError()) == "ACPSpawnError"
+
+    def test_permission_error_is_spawn_error(self):
+        assert _classify_acp_init_error(PermissionError()) == "ACPSpawnError"
+
+    def test_broken_pipe_is_init_error(self):
+        # A transport drop during the handshake is an OSError subclass but not a
+        # spawn failure — it must classify as ACPInitError, not ACPSpawnError.
+        assert _classify_acp_init_error(BrokenPipeError()) == "ACPInitError"
+
+    def test_generic_exception_is_init_error(self):
+        assert _classify_acp_init_error(RuntimeError("x")) == "ACPInitError"
+
 
 # ---------------------------------------------------------------------------
 # _OpenHandsACPBridge
@@ -736,6 +960,210 @@ class TestOpenHandsACPClient:
     async def test_ext_notification_is_noop(self):
         client = _OpenHandsACPBridge()
         await client.ext_notification("test", {})  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Tool-call event emission (started + terminal, no per-progress fan-out)
+# ---------------------------------------------------------------------------
+
+
+def _mk_tool_start(
+    tool_call_id: str = "tc-1",
+    *,
+    title: str = "git status",
+    kind: str = "execute",
+    status: str = "in_progress",
+    raw_input: Any | None = None,
+    raw_output: Any | None = None,
+    content: Any | None = None,
+) -> Any:
+    from acp.schema import ToolCallStart
+
+    start = MagicMock(spec=ToolCallStart)
+    start.tool_call_id = tool_call_id
+    start.title = title
+    start.kind = kind
+    start.status = status
+    start.raw_input = raw_input
+    start.raw_output = raw_output
+    start.content = content
+    return start
+
+
+def _mk_tool_progress(
+    tool_call_id: str = "tc-1",
+    *,
+    title: str | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+    raw_input: Any | None = None,
+    raw_output: Any | None = None,
+    content: Any | None = None,
+) -> Any:
+    from acp.schema import ToolCallProgress
+
+    progress = MagicMock(spec=ToolCallProgress)
+    progress.tool_call_id = tool_call_id
+    progress.title = title
+    progress.kind = kind
+    progress.status = status
+    progress.raw_input = raw_input
+    progress.raw_output = raw_output
+    progress.content = content
+    return progress
+
+
+class TestACPToolCallProgressCollapse:
+    """The bridge persists exactly one ``started`` + one terminal event.
+
+    Each ``ToolCallProgress`` carries the *full cumulative* output, so emitting
+    one event per frame is O(n^2) storage + WebSocket relay. The bridge instead
+    streams one early ``started`` event and one terminal (``completed`` /
+    ``failed``) event per ``tool_call_id`` — the action->observation pair —
+    while silently accumulating the intermediate frames so the terminal event
+    still carries the final output.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_call_start_emits_started_event(self) -> None:
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update("s1", _mk_tool_start(status="in_progress"))
+
+        assert len(events) == 1
+        assert isinstance(events[0], ACPToolCallEvent)
+        assert events[0].tool_call_id == "tc-1"
+        assert events[0].status == "in_progress"
+        assert events[0].is_error is False
+
+    @pytest.mark.asyncio
+    async def test_intermediate_progress_frames_are_not_emitted(self) -> None:
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update("s1", _mk_tool_start(status="in_progress"))
+        # Several non-terminal progress frames with growing cumulative output.
+        for chunk in ("a", "ab", "abc"):
+            await client.session_update(
+                "s1", _mk_tool_progress(status="in_progress", raw_output=chunk)
+            )
+
+        # Only the started event was persisted — the intermediate frames are
+        # accumulated silently (this is the O(n^2)->O(1) collapse).
+        assert len(events) == 1
+        assert events[0].status == "in_progress"
+
+    @pytest.mark.asyncio
+    async def test_full_lifecycle_emits_exactly_two_events(self) -> None:
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update("s1", _mk_tool_start(status="pending"))
+        await client.session_update(
+            "s1", _mk_tool_progress(status="in_progress", raw_output="partial")
+        )
+        await client.session_update(
+            "s1", _mk_tool_progress(status="completed", raw_output="partial-final")
+        )
+
+        assert len(events) == 2
+        started, terminal = events
+        assert started.status == "pending"
+        assert terminal.status == "completed"
+        # Terminal event carries the final cumulative output.
+        assert terminal.raw_output == "partial-final"
+        assert terminal.is_error is False
+
+    @pytest.mark.asyncio
+    async def test_failed_terminal_sets_is_error(self) -> None:
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update("s1", _mk_tool_start(status="in_progress"))
+        await client.session_update(
+            "s1", _mk_tool_progress(status="failed", raw_output="boom")
+        )
+
+        assert len(events) == 2
+        assert events[-1].status == "failed"
+        assert events[-1].is_error is True
+
+    @pytest.mark.asyncio
+    async def test_single_shot_completed_start_emits_once(self) -> None:
+        """A ToolCallStart that is already terminal is the only event."""
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update(
+            "s1", _mk_tool_start(status="completed", raw_output="done")
+        )
+
+        assert len(events) == 1
+        assert events[0].status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_redundant_terminal_progress_does_not_double_emit(self) -> None:
+        """Only the first transition into a terminal status emits."""
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+
+        await client.session_update("s1", _mk_tool_start(status="in_progress"))
+        await client.session_update("s1", _mk_tool_progress(status="completed"))
+        # A trailing duplicate terminal frame must not produce a third event.
+        await client.session_update("s1", _mk_tool_progress(status="completed"))
+
+        assert len(events) == 2
+        assert [e.status for e in events] == ["in_progress", "completed"]
+
+    def test_finalize_flush_completes_orphaned_tool_calls(self) -> None:
+        """A card the server opened but never closed is flushed to completed."""
+        agent = _make_agent()
+        client = _OpenHandsACPBridge()
+        events: list[Any] = []
+        client.on_event = events.append
+        agent._client = client
+
+        # One still-running call and one already-terminal call.
+        client.accumulated_tool_calls.append(
+            {
+                "tool_call_id": "live-1",
+                "title": "long task",
+                "tool_kind": "execute",
+                "status": "in_progress",
+                "raw_input": None,
+                "raw_output": "partial output",
+                "content": None,
+            }
+        )
+        client.accumulated_tool_calls.append(
+            {
+                "tool_call_id": "done-1",
+                "title": "quick task",
+                "tool_kind": "read",
+                "status": "completed",
+                "raw_input": None,
+                "raw_output": "ok",
+                "content": None,
+            }
+        )
+
+        agent._flush_inflight_tool_calls_as_completed()
+
+        # Only the non-terminal call is flushed (the terminal one is untouched).
+        assert len(events) == 1
+        assert events[0].tool_call_id == "live-1"
+        assert events[0].status == "completed"
+        assert events[0].is_error is False
+        assert events[0].raw_output == "partial output"
+        # The accumulator entry is now terminal so it won't be flushed again.
+        assert client.accumulated_tool_calls[0]["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -1372,9 +1800,9 @@ class TestACPAgentStep:
 class TestACPAgentAstep:
     """Native ``ACPAgent.astep`` must not fall back to ``AgentBase.astep``
     (which wraps ``step`` in ``loop.run_in_executor``).  Doing so would
-    move post-prompt callbacks onto an executor worker thread,
-    deadlocking against ``LocalConversation.arun`` which holds the
-    state's reentrant ``FIFOLock`` on the loop thread.  See #3348.
+    move post-prompt callbacks and state updates onto an executor worker
+    thread, outside ``LocalConversation.arun``'s controlled event
+    serialization. See #3348.
     """
 
     def _make_conversation_with_message(self, tmp_path, text="Hello"):
@@ -1404,10 +1832,9 @@ class TestACPAgentAstep:
 
     def test_astep_runs_post_prompt_callbacks_on_caller_thread(self, tmp_path):
         """Post-prompt ``on_event`` callbacks must fire on the caller
-        thread (same thread that holds ``state.lock`` in ``arun``).
-        ``FIFOLock`` is reentrant per-thread; if astep schedules ``step``
-        on a worker thread (the buggy default), callbacks run cross-thread
-        and block on the lock owner forever — see #3348.
+        thread. If astep schedules ``step`` on a worker thread (the buggy
+        default), callbacks and final state updates run outside the async
+        run task's serialization model — see #3348.
         """
         from openhands.sdk.utils.async_executor import AsyncExecutor
 
@@ -1518,6 +1945,82 @@ class TestACPAgentAstep:
         )
         assert conversation.state.execution_status == ConversationExecutionStatus.ERROR
 
+    def test_astep_times_out_while_tool_call_is_inflight(self, tmp_path):
+        """A hard ACP prompt timeout still fires during an active tool call.
+
+        Mirroring OpenHands command handling, active output/heartbeats keep the
+        runtime alive but do not let a never-ending command suppress the hard
+        turn deadline. The timeout path must cancel the ACP session and close
+        any streamed tool cards as failed.
+        """
+        from concurrent.futures import Future
+
+        agent = _make_agent(acp_prompt_timeout=0.02)
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+        cancel_called = threading.Event()
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+        agent._session_id = "test-session"
+
+        class _FakePortal:
+            def __init__(self) -> None:
+                self.prompt_future: Future = Future()
+
+            def start_task_soon(self, fn, *args):  # noqa: ANN001, ANN202
+                if args:
+                    entry = {
+                        "tool_call_id": "git-1",
+                        "title": "git status",
+                        "tool_kind": "execute",
+                        "status": "in_progress",
+                        "raw_input": None,
+                        "raw_output": None,
+                        "content": None,
+                    }
+                    mock_client.accumulated_tool_calls.append(entry)
+                    mock_client._emit_tool_call_event(entry)
+                    return self.prompt_future
+
+                cancel_called.set()
+                cancel_future: Future = Future()
+                cancel_future.set_result(None)
+                return cancel_future
+
+        mock_executor = MagicMock()
+        mock_executor.portal = _FakePortal()
+        agent._executor = mock_executor
+
+        with patch("openhands.sdk.agent.acp_agent._ACP_CANCEL_DRAIN_TIMEOUT", 0.01):
+            asyncio.run(agent.astep(conversation, on_event=emitted.append))
+
+        assert cancel_called.is_set()
+        assert conversation.state.execution_status == ConversationExecutionStatus.ERROR
+        assert any(
+            isinstance(e, ACPToolCallEvent)
+            and e.tool_call_id == "git-1"
+            and e.status == "failed"
+            and e.is_error
+            for e in emitted
+        )
+
+        def _message_text(ev: MessageEvent) -> str:
+            first = ev.llm_message.content[0]
+            return first.text if isinstance(first, TextContent) else ""
+
+        assert any(
+            isinstance(e, MessageEvent)
+            and "ACP prompt timed out after" in _message_text(e)
+            for e in emitted
+        )
+        assert not any(
+            isinstance(e, ActionEvent) and isinstance(e.action, FinishAction)
+            for e in emitted
+        )
+
     def test_astep_emits_failed_tool_calls_on_cancellation(self, tmp_path):
         """``asyncio.CancelledError`` during astep must close in-flight
         ``ACPToolCallEvent``s as ``failed`` and re-raise.
@@ -1546,6 +2049,8 @@ class TestACPAgentAstep:
 
         async def _run_with_cancel() -> None:
             prompt_entered = asyncio.Event()
+            cancel_called = asyncio.Event()
+            prompt_released = threading.Event()
             caller_loop = asyncio.get_running_loop()
 
             async def _fake_prompt(prompt_blocks, session_id):
@@ -1568,11 +2073,19 @@ class TestACPAgentAstep:
                 # Signal caller loop that we're holding inside the prompt
                 # so the cancel races deterministically.
                 caller_loop.call_soon_threadsafe(prompt_entered.set)
-                # Block long enough for the cancel to land.
-                await asyncio.sleep(60)
+                # Block beyond the cancel-drain timeout so this test exercises
+                # the non-quiesced cancellation path that must synthesize
+                # failed ACP tool-call events.
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
                 return None
 
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+                caller_loop.call_soon_threadsafe(cancel_called.set)
+
             agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
             agent._session_id = "test-session"
 
             task = asyncio.create_task(
@@ -1580,8 +2093,16 @@ class TestACPAgentAstep:
             )
             await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    with patch(
+                        "openhands.sdk.agent.acp_agent._ACP_CANCEL_DRAIN_TIMEOUT",
+                        0.01,
+                    ):
+                        await task
+                await asyncio.wait_for(cancel_called.wait(), timeout=5.0)
+            finally:
+                prompt_released.set()
 
         try:
             agent._executor = executor
@@ -1601,6 +2122,290 @@ class TestACPAgentAstep:
             f"got: {[(type(e).__name__, getattr(e, 'status', None)) for e in emitted]}"
         )
         assert failed_tool_events[0].is_error is True
+
+    def test_astep_finalizes_and_reraises_completed_cancelled_prompt(self, tmp_path):
+        """If a cancelled ACP prompt drains successfully, keep the completed turn.
+
+        The ACP server may finish the prompt while ``session/cancel`` is being
+        delivered. In that case the remote session has accepted the assistant
+        turn, so OpenHands must finalize the same turn locally instead of
+        discarding the response and later resuming from diverged session history.
+        The original cancellation still propagates so explicit user stop intent
+        wins at the conversation layer.
+        """
+        from acp.schema import AgentMessageChunk, TextContentBlock
+
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            cancel_called = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                await mock_client.session_update(
+                    session_id,
+                    AgentMessageChunk(
+                        session_update="agent_message_chunk",
+                        content=TextContentBlock(type="text", text="done"),
+                    ),
+                )
+                return None
+
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+                caller_loop.call_soon_threadsafe(cancel_called.set)
+                prompt_released.set()
+
+            agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
+            agent._session_id = "test-session"
+
+            task = asyncio.create_task(
+                agent.astep(conversation, on_event=emitted.append)
+            )
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(cancel_called.wait(), timeout=5.0)
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancel())
+        finally:
+            executor.close()
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+        assert any(
+            isinstance(e, ActionEvent)
+            and isinstance(e.action, FinishAction)
+            and e.action.message == "done"
+            for e in emitted
+        )
+
+    def test_astep_cancelled_prompt_error_pauses_without_turn_error(self, tmp_path):
+        """Explicit cancellation should not emit stale prompt errors."""
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            cancel_called = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                raise RuntimeError("late prompt failure")
+
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+                caller_loop.call_soon_threadsafe(cancel_called.set)
+                prompt_released.set()
+
+            agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
+            agent._session_id = "test-session"
+
+            task = asyncio.create_task(
+                agent.astep(conversation, on_event=emitted.append)
+            )
+            await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(cancel_called.wait(), timeout=5.0)
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancel())
+        finally:
+            executor.close()
+
+        assert not any(
+            isinstance(e, MessageEvent)
+            and e.source == "agent"
+            and any(
+                isinstance(c, TextContent) and c.text.startswith("ACP error:")
+                for c in e.llm_message.content
+            )
+            for e in emitted
+        )
+        assert not any(isinstance(e, ConversationErrorEvent) for e in emitted)
+        assert agent._restart_session_on_next_turn is True
+
+    def test_astep_double_cancel_during_drain_restarts_next_turn(self, tmp_path):
+        """A second cancellation during drain should quarantine the live prompt."""
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_double_cancel() -> None:
+            prompt_entered = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                return None
+
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+
+            async def _raise_during_drain(self, future):  # noqa: ARG001
+                assert future is not None
+                assert not future.done()
+                raise asyncio.CancelledError
+
+            agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
+            agent._session_id = "test-session"
+
+            with patch.object(
+                ACPAgent,
+                "_drain_cancelled_prompt",
+                new=_raise_during_drain,
+            ):
+                task = asyncio.create_task(
+                    agent.astep(conversation, on_event=lambda _: None)
+                )
+                await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+                task.cancel()
+                try:
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                finally:
+                    prompt_released.set()
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_double_cancel())
+        finally:
+            executor.close()
+
+        assert agent._restart_session_on_next_turn is True
+
+    def test_astep_double_cancel_during_cancel_send_restarts_next_turn(self, tmp_path):
+        """A second cancellation during session/cancel should quarantine prompt."""
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+
+        executor = AsyncExecutor()
+
+        async def _run_with_cancelled_cancel_send() -> None:
+            prompt_entered = asyncio.Event()
+            prompt_released = threading.Event()
+            caller_loop = asyncio.get_running_loop()
+
+            async def _fake_prompt(prompt_blocks, session_id):  # noqa: ARG001
+                caller_loop.call_soon_threadsafe(prompt_entered.set)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
+                return None
+
+            async def _raise_during_cancel_send(self):  # noqa: ARG001
+                raise asyncio.CancelledError
+
+            agent._conn.prompt = _fake_prompt
+            agent._session_id = "test-session"
+
+            with patch.object(
+                ACPAgent,
+                "_arequest_session_cancel",
+                new=_raise_during_cancel_send,
+            ):
+                task = asyncio.create_task(
+                    agent.astep(conversation, on_event=lambda _: None)
+                )
+                await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
+                task.cancel()
+                try:
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                finally:
+                    prompt_released.set()
+
+        try:
+            agent._executor = executor
+            asyncio.run(_run_with_cancelled_cancel_send())
+        finally:
+            executor.close()
+
+        assert agent._restart_session_on_next_turn is True
+
+    def test_cleanup_interruption_finalizes_completed_prompt(self, tmp_path):
+        """A completed prompt should be finalized if cleanup is cancelled."""
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._session_id = "test-session"
+
+        prompt_future: Future[PromptResponse | None] = Future()
+        prompt_future.set_result(None)
+        emitted = []
+
+        with conversation.state as state:
+            agent._handle_cancelled_cleanup_interruption(
+                prompt_future,
+                0.1,
+                state,
+                emitted.append,
+            )
+
+        assert (
+            conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        )
+        assert agent._restart_session_on_next_turn is False
+        assert any(isinstance(event, ActionEvent) for event in emitted)
 
     def test_astep_cancellation_does_not_mark_suffix_installed(self, tmp_path):
         """Cancellation before a turn completes must leave
@@ -1633,14 +2438,20 @@ class TestACPAgentAstep:
 
         async def _run_with_cancel() -> None:
             prompt_entered = asyncio.Event()
+            prompt_released = threading.Event()
             caller_loop = asyncio.get_running_loop()
 
             async def _fake_prompt(prompt_blocks, session_id):
                 caller_loop.call_soon_threadsafe(prompt_entered.set)
-                await asyncio.sleep(60)
+                released = await asyncio.to_thread(prompt_released.wait, 10.0)
+                assert released
                 return None
 
+            async def _fake_cancel(session_id):
+                assert session_id == "test-session"
+
             agent._conn.prompt = _fake_prompt
+            agent._conn.cancel = _fake_cancel
             agent._session_id = "test-session"
 
             task = asyncio.create_task(
@@ -1648,8 +2459,15 @@ class TestACPAgentAstep:
             )
             await asyncio.wait_for(prompt_entered.wait(), timeout=5.0)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    with patch(
+                        "openhands.sdk.agent.acp_agent._ACP_CANCEL_DRAIN_TIMEOUT",
+                        0.01,
+                    ):
+                        await task
+            finally:
+                prompt_released.set()
 
         try:
             agent._executor = executor
@@ -1676,12 +2494,11 @@ class TestACPAgentAstep:
     def test_astep_does_not_deadlock_under_reentrant_state_lock(self, tmp_path):
         """End-to-end shape of the #3348 bug.
 
-        Mirrors ``LocalConversation.arun``: holds ``state.lock`` on the
-        loop thread across ``await astep(...)``, while a post-prompt
-        callback re-acquires it (same shape as ``stats_callback``'s
-        ``with state:``).  With astep overridden, the callback runs on
-        the same thread as the lock owner — FIFOLock's reentrancy lets
-        it through.  Without the override, this hangs.
+        Covers direct callers that hold ``state.lock`` on the loop thread
+        across ``await astep(...)`` while a post-prompt callback
+        re-acquires it. With astep overridden, the callback runs on the
+        same thread as the lock owner — FIFOLock's reentrancy lets it
+        through. Without the override, this hangs.
         """
         from openhands.sdk.utils.async_executor import AsyncExecutor
 
@@ -4017,6 +4834,20 @@ class TestACPSessionIdPersistence:
         conn.load_session.assert_not_awaited()
         assert agent._session_id == "fresh-sess"
 
+    def test_cancel_drain_restart_keeps_retry_flag_when_init_fails(self, tmp_path):
+        """A failed replacement session should leave the deferred restart armed."""
+        agent = _make_agent()
+        state = _make_state(tmp_path)
+        agent._restart_session_on_next_turn = True
+
+        with patch.object(ACPAgent, "init_state", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                agent._restart_session_after_drain_timeout(
+                    state, on_event=lambda _: None
+                )
+
+        assert agent._restart_session_on_next_turn is True
+
     def test_init_state_writes_session_id_into_agent_state(self, tmp_path):
         """init_state lands the session id in state.agent_state so
         ConversationState's base_state.json persistence carries it forward.
@@ -4053,6 +4884,34 @@ class TestACPSessionIdPersistence:
         assert kwargs["cwd"] == str(tmp_path)
         conn.new_session.assert_not_awaited()
         assert agent._session_id == "stored-sess"
+
+    def test_cancel_drain_restart_preserves_session_id_for_resume(self, tmp_path):
+        """A cancelled-prompt drain timeout restarts the subprocess, but should
+        still load the persisted ACP session so the server keeps conversation
+        memory.
+        """
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules.")
+        )
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "stored-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_suffix_installed": True,
+        }
+        conn = self._make_conn()
+
+        with self._transport_patches(conn):
+            agent._restart_session_after_drain_timeout(state, on_event=lambda _: None)
+
+        conn.load_session.assert_awaited_once()
+        conn.new_session.assert_not_awaited()
+        assert agent._session_id == "stored-sess"
+        assert state.agent_state["acp_session_id"] == "stored-sess"
+        assert state.agent_state["acp_session_cwd"] == str(tmp_path)
+        assert state.agent_state["acp_suffix_installed"] is True
+        assert agent._suffix_install_state == "installed"
 
     def test_load_session_failure_falls_back_to_new_session(self, tmp_path):
         """ACPRequestError on load_session → new_session is called."""
@@ -4473,6 +5332,35 @@ class TestACPSessionIdPersistence:
         assert state.agent_state["acp_session_id"] == "replacement-sess"
         assert state.agent_state["acp_session_cwd"] == str(tmp_path)
 
+    def test_fallback_replacement_clears_suffix_marker(self, tmp_path):
+        """If load_session fails, the replacement session has not seen any
+        suffix yet, even if the stale session had persisted the marker.
+        """
+        agent = _make_agent(
+            agent_context=AgentContext(system_message_suffix="Team rules.")
+        )
+        state = _make_state(tmp_path)
+        state.agent_state = {
+            **state.agent_state,
+            "acp_session_id": "stale-sess",
+            "acp_session_cwd": str(tmp_path),
+            "acp_suffix_installed": True,
+        }
+        conn = self._make_conn(
+            new_session_id="replacement-sess",
+            load_exc=ACPRequestError(-32602, "unknown session"),
+        )
+
+        with self._transport_patches(conn):
+            agent.init_state(state, on_event=lambda _: None)
+
+        conn.load_session.assert_awaited_once()
+        conn.new_session.assert_awaited_once()
+        assert state.agent_state["acp_session_id"] == "replacement-sess"
+        assert state.agent_state["acp_session_cwd"] == str(tmp_path)
+        assert state.agent_state.get("acp_suffix_installed") is not True
+        assert agent._suffix_install_state == "pending_first_prompt"
+
     def test_resume_path_still_applies_session_mode_and_model(self, tmp_path):
         """load_session must be followed by the same set_session_model and
         set_session_mode calls as new_session, so a resumed session honours
@@ -4667,7 +5555,11 @@ class TestACPSecretsEnvInjection:
     """Tests for secret injection into the ACP subprocess environment.
 
     Secrets passed via ``agent_context.secrets`` must land in the subprocess
-    env so the ACP server (Claude Code, Codex CLI, etc.) can use them.
+    env so the ACP server (Claude Code, Codex CLI, etc.) can use them. This
+    drain is the only thing that delivers ``agent_context.secrets`` to the CLI
+    on paths that don't call ``create_request`` (e.g. canvas-local, which folds
+    ``llm.api_key`` into ``agent_context.secrets`` server-side via
+    ``create_agent`` but never lifts it into ``state.secret_registry``).
     ``acp_env`` entries take precedence over agent_context secrets.
     """
 
@@ -4715,6 +5607,11 @@ class TestACPSecretsEnvInjection:
         agent._executor = AsyncExecutor()
 
         with ExitStack() as stack:
+            # Hermetic: exclude the runner's ambient env (e.g. a real
+            # GITHUB_TOKEN / ANTHROPIC_API_KEY) so it can't shadow the
+            # registry/drain values under test — env.update(os.environ) runs
+            # before the fill-if-absent secret tiers in _start_acp_server.
+            stack.enter_context(patch.dict("os.environ", {}, clear=True))
             stack.enter_context(
                 patch(
                     "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
@@ -4744,7 +5641,12 @@ class TestACPSecretsEnvInjection:
         return captured
 
     def test_static_secret_injected_into_subprocess_env(self, tmp_path):
-        """A StaticSecret in agent_context.secrets lands in the subprocess env."""
+        """A StaticSecret in agent_context.secrets lands in the subprocess env.
+
+        This drain is what delivers ``agent_context.secrets`` to the CLI on
+        paths that don't lift them into ``state.secret_registry`` via
+        ``create_request`` (e.g. canvas-local).
+        """
         from pydantic import SecretStr
 
         from openhands.sdk.secret import StaticSecret
@@ -4774,7 +5676,8 @@ class TestACPSecretsEnvInjection:
                 secrets={"MY_TOKEN": StaticSecret(value=SecretStr("secret-panel"))}
             ),
         )
-        env = self._run_start_capturing_env(agent, tmp_path)
+        with pytest.warns(DeprecationWarning, match=r"ACPAgent\.acp_env"):
+            env = self._run_start_capturing_env(agent, tmp_path)
         assert env.get("MY_TOKEN") == "acp-env-wins"
 
     def test_none_value_secret_not_injected(self, tmp_path):
@@ -4803,6 +5706,23 @@ class TestACPSecretsEnvInjection:
         env = self._run_start_capturing_env(agent, tmp_path)
         assert "EMPTY_SECRET" not in env
 
+    def test_acp_env_still_injected(self, tmp_path):
+        """``acp_env`` (user arbitrary env vars) is still injected at spawn."""
+        agent = _make_agent(acp_env={"MY_TOKEN": "acp-env-value"})
+        with pytest.warns(DeprecationWarning, match=r"ACPAgent\.acp_env"):
+            env = self._run_start_capturing_env(agent, tmp_path)
+        assert env.get("MY_TOKEN") == "acp-env-value"
+
+    def test_empty_acp_env_does_not_warn(self, tmp_path):
+        """An empty ``acp_env`` must not emit the deprecation warning."""
+        import warnings
+
+        agent = _make_agent()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._run_start_capturing_env(agent, tmp_path)
+        assert not [w for w in caught if "acp_env" in str(w.message)]
+
 
 class TestACPSecretRegistryEnvInjection:
     """Tests for secret injection from the conversation's secret_registry.
@@ -4814,12 +5734,16 @@ class TestACPSecretRegistryEnvInjection:
     ``AgentContext(secrets=...)`` shim around the same data.
 
     Same-key precedence is
-    ``acp_env > existing base env > secret_registry > agent_context.secrets``.
-    Registry and context entries only fill genuine gaps in the base env.
+    ``acp_env > secret_registry > agent_context.secrets > os.environ``.
+    Conversation secrets (registry + the agent_context drain) override ambient
+    ``os.environ`` so an explicit per-conversation/provider secret wins over a
+    same-named server env var; the registry wins over the drain on collision.
     """
 
     @staticmethod
-    def _run_start_capturing_env(agent, tmp_path, *, registry_secrets=None) -> dict:
+    def _run_start_capturing_env(
+        agent, tmp_path, *, registry_secrets=None, extra_os_env=None
+    ) -> dict:
         """Re-uses the env-capture harness from TestACPSecretsEnvInjection."""
         state = _make_state(tmp_path)
         if registry_secrets:
@@ -4846,6 +5770,12 @@ class TestACPSecretRegistryEnvInjection:
         agent._executor = AsyncExecutor()
 
         with ExitStack() as stack:
+            # Hermetic: replace the runner's ambient env with extra_os_env (or
+            # nothing), so it can't shadow the registry values under test and so
+            # tests can inject a controlled ambient var to assert precedence.
+            stack.enter_context(
+                patch.dict("os.environ", extra_os_env or {}, clear=True)
+            )
             stack.enter_context(
                 patch(
                     "openhands.sdk.agent.acp_agent.asyncio.create_subprocess_exec",
@@ -4956,15 +5886,12 @@ class TestACPSecretRegistryEnvInjection:
     def test_registry_secret_takes_precedence_over_agent_context_secret(self, tmp_path):
         """``secret_registry`` wins over ``agent_context.secrets`` on collision.
 
-        Precedence ladder for this collision:
-        ``acp_env > existing base env > secret_registry > agent_context.secrets``.
-        The registry is the canonical conversation-secret channel
-        (``StartConversationRequest.secrets`` lands here); ``agent_context.
-        secrets`` is the legacy direct-attach path. When both carry the same
-        key the canonical channel wins — that's also what lets OpenHands
-        eventually drop its ``AgentContext(secrets=...)`` shim without a
-        behaviour break for clients that still attach via both paths
-        during the migration.
+        Precedence: ``acp_env > secret_registry > agent_context.secrets >
+        os.environ``. The registry is the canonical conversation-secret channel
+        (``StartConversationRequest.secrets`` lands here). On a key collision the
+        registry value is used (the drain skips keys the registry will set); a
+        context-only key is still injected by the drain — proving the two
+        channels coexist without double-injecting.
         """
         from pydantic import SecretStr
 
@@ -4972,7 +5899,10 @@ class TestACPSecretRegistryEnvInjection:
 
         agent = _make_agent(
             agent_context=AgentContext(
-                secrets={"GITHUB_TOKEN": StaticSecret(value=SecretStr("from-context"))}
+                secrets={
+                    "GITHUB_TOKEN": StaticSecret(value=SecretStr("from-context")),
+                    "CONTEXT_ONLY": StaticSecret(value=SecretStr("ctx-value")),
+                }
             )
         )
         env = self._run_start_capturing_env(
@@ -4981,6 +5911,7 @@ class TestACPSecretRegistryEnvInjection:
             registry_secrets={"GITHUB_TOKEN": "from-registry"},
         )
         assert env.get("GITHUB_TOKEN") == "from-registry"
+        assert env.get("CONTEXT_ONLY") == "ctx-value"
 
     def test_empty_registry_does_not_change_behaviour(self, tmp_path):
         """An empty secret_registry must not raise or alter the spawn env."""
@@ -5010,6 +5941,40 @@ class TestACPSecretRegistryEnvInjection:
             registry_secrets={"BROKEN": _BrokenSecret()},
         )
         assert "BROKEN" not in env
+
+    def test_registry_secret_overrides_ambient_os_environ(self, tmp_path):
+        """A registry secret overrides a same-named ambient os.environ var.
+
+        Conversation/provider creds must win over the agent-server's own
+        environment (os.environ is the wrong process for a remote server).
+        Before this change the ambient value silently won.
+        """
+        agent = _make_agent()
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            registry_secrets={"ANTHROPIC_API_KEY": "from-registry"},
+            extra_os_env={"ANTHROPIC_API_KEY": "ambient-should-lose"},
+        )
+        assert env.get("ANTHROPIC_API_KEY") == "from-registry"
+
+    def test_agent_context_secret_overrides_ambient_os_environ(self, tmp_path):
+        """An agent_context.secrets drain value overrides ambient os.environ."""
+        from pydantic import SecretStr
+
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent(
+            agent_context=AgentContext(
+                secrets={"GITHUB_TOKEN": StaticSecret(value=SecretStr("from-context"))}
+            )
+        )
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            extra_os_env={"GITHUB_TOKEN": "ambient-should-lose"},
+        )
+        assert env.get("GITHUB_TOKEN") == "from-context"
 
 
 class TestACPEnvConflictSuppression:
@@ -5044,7 +6009,9 @@ class TestACPEnvConflictSuppression:
         return conn
 
     @staticmethod
-    def _run_start_capturing_env(agent, tmp_path, *, extra_os_env=None) -> dict:
+    def _run_start_capturing_env(
+        agent, tmp_path, *, extra_os_env=None, registry_secrets=None
+    ) -> dict:
         from contextlib import ExitStack
 
         from openhands.sdk.utils.async_executor import AsyncExecutor
@@ -5064,6 +6031,8 @@ class TestACPEnvConflictSuppression:
             return None
 
         state = _make_state(tmp_path)
+        if registry_secrets:
+            state.secret_registry.update_secrets(registry_secrets)
         agent._executor = AsyncExecutor()
 
         with ExitStack() as stack:
@@ -5091,8 +6060,12 @@ class TestACPEnvConflictSuppression:
                     return_value=MagicMock(),
                 )
             )
-            if extra_os_env:
-                stack.enter_context(patch.dict("os.environ", extra_os_env, clear=False))
+            # Hermetic: clear the runner's ambient env so it can't shadow the
+            # values under test; extra_os_env is the only os.environ content
+            # (used by the test that injects ANTHROPIC_API_KEY via os.environ).
+            stack.enter_context(
+                patch.dict("os.environ", extra_os_env or {}, clear=True)
+            )
             agent._start_acp_server(state)
 
         return captured
@@ -5130,8 +6103,36 @@ class TestACPEnvConflictSuppression:
         assert "ANTHROPIC_API_KEY" not in env
         assert "ANTHROPIC_BASE_URL" not in env
 
+    def test_claude_config_dir_suppresses_api_key_from_registry(self, tmp_path):
+        """ANTHROPIC_API_KEY injected via secret_registry is stripped too.
+
+        This is the channel provider creds now travel on (folded into
+        ``agent_context.secrets`` by ``create_agent`` → lifted into the
+        registry by ``create_request``).
+        """
+        agent = _make_agent(
+            acp_env={"CLAUDE_CONFIG_DIR": "/tmp/claude-creds"},
+        )
+        env = self._run_start_capturing_env(
+            agent,
+            tmp_path,
+            registry_secrets={
+                "ANTHROPIC_API_KEY": "sk-from-registry",
+                "ANTHROPIC_BASE_URL": "https://proxy.example.com",
+            },
+        )
+
+        assert "CLAUDE_CONFIG_DIR" in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+
     def test_claude_config_dir_suppresses_api_key_from_secrets(self, tmp_path):
-        """ANTHROPIC_API_KEY injected via agent_context.secrets is stripped too."""
+        """ANTHROPIC_API_KEY drained from agent_context.secrets is stripped too.
+
+        Covers the canvas-local channel: provider creds folded into
+        ``agent_context.secrets`` reach env via the drain, and must still be
+        stripped when CLAUDE_CONFIG_DIR is active.
+        """
         from pydantic import SecretStr
 
         from openhands.sdk.secret import StaticSecret
@@ -5149,7 +6150,8 @@ class TestACPEnvConflictSuppression:
                 }
             ),
         )
-        env = self._run_start_capturing_env(agent, tmp_path)
+        with pytest.warns(DeprecationWarning, match=r"ACPAgent\.acp_env"):
+            env = self._run_start_capturing_env(agent, tmp_path)
 
         assert "CLAUDE_CONFIG_DIR" in env
         assert "ANTHROPIC_API_KEY" not in env
