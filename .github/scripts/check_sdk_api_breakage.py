@@ -123,14 +123,20 @@ def _get_base_ref() -> str | None:
 
 
 def _has_package_source_changes(repo_root: str, base_ref: str) -> bool:
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    changed_files: list[str] | None = None
+    for candidate in _git_ref_candidates(base_ref):
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{candidate}...HEAD"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            changed_files = result.stdout.splitlines()
+            break
+
+    if changed_files is None:
         print(
             f"::warning title=API breakage::Unable to diff against {base_ref}; "
             "running breakage checks"
@@ -139,10 +145,9 @@ def _has_package_source_changes(repo_root: str, base_ref: str) -> bool:
 
     package_prefixes = tuple(f"{cfg.source_dir}/" for cfg in PACKAGES)
     package_pyprojects = {f"{cfg.source_dir}/pyproject.toml" for cfg in PACKAGES}
-    for changed_file in result.stdout.splitlines():
-        if (
-            changed_file in package_pyprojects
-            or changed_file.startswith(package_prefixes)
+    for changed_file in changed_files:
+        if changed_file in package_pyprojects or changed_file.startswith(
+            package_prefixes
         ):
             return True
     return False
