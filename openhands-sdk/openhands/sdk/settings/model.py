@@ -1275,7 +1275,12 @@ class ACPAgentSettings(AgentSettingsBase):
             llm=self.llm,
             acp_command=self.resolve_acp_command(),
             acp_args=list(self.acp_args),
-            acp_env=self.resolve_acp_env(),
+            # Pass acp_env directly rather than via resolve_acp_env() so the
+            # deprecation warning is not emitted twice on the create_agent path:
+            # _start_acp_server already warns (ACPAgent.acp_env) at spawn, and
+            # resolve_acp_env()'s warning (ACPAgentSettings.acp_env) is reserved
+            # for explicit callers of that public method.
+            acp_env=dict(self.acp_env),
             acp_model=self.acp_model,
             acp_session_mode=self.acp_session_mode,
             acp_prompt_timeout=self.acp_prompt_timeout,
