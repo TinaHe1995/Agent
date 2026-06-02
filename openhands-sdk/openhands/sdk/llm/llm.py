@@ -1236,6 +1236,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 removed_in="1.29.0",
                 details=_RETURN_METRICS_DETAILS,
             )
+        _caller_kwargs = kwargs.copy()
         enable_streaming = bool(kwargs.get("stream", False)) or self.stream
         if enable_streaming:
             if on_token is None:
@@ -1275,6 +1276,22 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         try:
             return self._build_completion_result(await _one_attempt())
         except Exception as e:
+            # If the prompt cache content is too small for the provider's
+            # minimum token threshold (e.g., Vertex AI requires ≥4096 tokens),
+            # retry without prompt caching markers.
+            if is_prompt_cache_too_small(e) and self.is_caching_prompt_active():
+                logger.warning(
+                    "Prompt cache content too small for provider minimum, "
+                    "retrying without prompt caching"
+                )
+                no_cache_llm = self.model_copy(update={"caching_prompt": False})
+                return await no_cache_llm.acompletion(
+                    messages,
+                    tools,
+                    add_security_risk_prediction=add_security_risk_prediction,
+                    on_token=on_token,
+                    **_caller_kwargs,
+                )
             # Fallback is synchronous; cast the token callback since the
             # fallback LLM's sync path accepts TokenCallbackType.
             _fb_token = cast("TokenCallbackType | None", on_token)
@@ -1464,6 +1481,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 removed_in="1.29.0",
                 details=_RETURN_METRICS_DETAILS,
             )
+        _caller_kwargs = kwargs.copy()
         user_enable_streaming = bool(kwargs.get("stream", False)) or self.stream
         if user_enable_streaming:
             # We allow on_token to be None for subscription mode
@@ -1545,6 +1563,24 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         try:
             return self._build_responses_result(await _one_attempt())
         except Exception as e:
+            # If the prompt cache content is too small for the provider's
+            # minimum token threshold (e.g., Vertex AI requires ≥4096 tokens),
+            # retry without prompt caching markers.
+            if is_prompt_cache_too_small(e) and self.is_caching_prompt_active():
+                logger.warning(
+                    "Prompt cache content too small for provider minimum, "
+                    "retrying without prompt caching"
+                )
+                no_cache_llm = self.model_copy(update={"caching_prompt": False})
+                return await no_cache_llm.aresponses(
+                    messages,
+                    tools,
+                    include,
+                    store,
+                    add_security_risk_prediction=add_security_risk_prediction,
+                    on_token=on_token,
+                    **_caller_kwargs,
+                )
             _fb_token = cast("TokenCallbackType | None", on_token)
             return await self._ahandle_error(
                 e,

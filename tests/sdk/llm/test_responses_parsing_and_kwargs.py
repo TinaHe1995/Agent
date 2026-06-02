@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from litellm.types.llms.openai import (
@@ -343,5 +343,77 @@ def test_responses_retries_without_caching_on_prompt_cache_too_small(mock_respon
     # Caller kwargs preserved on the retry — without ``_caller_kwargs`` the
     # retry would silently drop them.
     second_kwargs = mock_responses.call_args_list[1].kwargs
+    assert second_kwargs.get("store") is False
+    assert second_kwargs.get("metadata") == {"trace_id": "abc-123"}
+
+
+@pytest.mark.asyncio
+@patch("openhands.sdk.llm.llm.litellm_aresponses", new_callable=AsyncMock)
+async def test_aresponses_retries_without_caching_on_prompt_cache_too_small(
+    mock_aresponses,
+):
+    """Async version of the sync responses prompt-cache-too-small retry test.
+
+    Ensures aresponses() also retries without prompt caching when Vertex AI
+    rejects the request due to cache content below the minimum token
+    threshold, and preserves caller kwargs (positional ``store`` and
+    ``**kwargs`` metadata). Mirrors
+    test_responses_retries_without_caching_on_prompt_cache_too_small.
+    """
+    from litellm.exceptions import BadRequestError
+
+    cache_error = BadRequestError(
+        (
+            "Vertex_aiException BadRequestError - "
+            '{"error":{"code":400,'
+            '"message":"The cached content is of 1171 tokens. '
+            'The minimum token count to start caching is 4096.",'
+            '"status":"INVALID_ARGUMENT"}}'
+        ),
+        model="gemini-3-flash",
+        llm_provider="vertex_ai",
+    )
+
+    msg = build_responses_message_output(["Retry succeeded"])
+    usage = ResponseAPIUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    success_resp = ResponsesAPIResponse(
+        id="r1",
+        created_at=0,
+        output=[msg],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        top_p=None,
+        tools=[],
+        usage=usage,
+        instructions="",
+        status="completed",
+    )
+    mock_aresponses.side_effect = [cache_error, success_resp]
+
+    llm = LLM(
+        model="gemini-3-flash",
+        api_key=SecretStr("test_key"),
+        usage_id="test-llm",
+        caching_prompt=True,
+        num_retries=2,
+        retry_min_wait=1,
+        retry_max_wait=2,
+    )
+
+    messages = [
+        Message(role="system", content=[TextContent(text="sys")]),
+        Message(role="user", content=[TextContent(text="Hello")]),
+    ]
+
+    response = await llm.aresponses(
+        messages,
+        store=False,
+        metadata={"trace_id": "abc-123"},
+    )
+
+    assert mock_aresponses.call_count == 2
+    assert response.raw_response is success_resp
+
+    second_kwargs = mock_aresponses.call_args_list[1].kwargs
     assert second_kwargs.get("store") is False
     assert second_kwargs.get("metadata") == {"trace_id": "abc-123"}
