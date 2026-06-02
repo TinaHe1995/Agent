@@ -708,6 +708,8 @@ class LocalConversation(BaseConversation):
                 if llm.usage_id not in registered:
                     self.llm_registry.add(llm)
                     registered.add(llm.usage_id)
+                # Rebinds the primary LLM (harmless, same values) and
+                # binds any additional LLMs (e.g. condenser).
                 self._bind_conversation_context(llm)
 
             self._agent_ready = True

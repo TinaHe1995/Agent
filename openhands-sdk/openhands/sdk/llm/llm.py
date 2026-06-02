@@ -185,7 +185,7 @@ class LLMCallContext:
 
     prompt_cache_key: str | None = None
     session_id: str | None = None
-    source_llm_id: int | None = None
+    source_llm_id: int | None = None  # internal: set by _bind_conversation_context only
 
 
 class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
