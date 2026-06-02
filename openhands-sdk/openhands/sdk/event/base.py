@@ -116,14 +116,39 @@ class LLMConvertibleEvent(Event, ABC):
                     j += 1
 
                 # Create combined message for the response
-                messages.append(_combine_action_events(batch_events))
+                _append_message(messages, _combine_action_events(batch_events))
                 i = j
             else:
                 # Regular event - direct conversion
-                messages.append(event.to_llm_message())
+                _append_message(messages, event.to_llm_message())
                 i += 1
 
         return messages
+
+
+def _append_message(messages: list[Message], message: Message) -> None:
+    """Append a message, merging adjacent user turns for strict alternation models."""
+    if messages and _can_merge_user_messages(messages[-1], message):
+        previous = messages[-1]
+        messages[-1] = previous.model_copy(
+            update={"content": list(previous.content) + list(message.content)}
+        )
+        return
+
+    messages.append(message)
+
+
+def _can_merge_user_messages(previous: Message, current: Message) -> bool:
+    """Return whether two user messages can be safely sent as one LLM turn."""
+    return (
+        previous.role == current.role == "user"
+        and previous.tool_calls is None
+        and current.tool_calls is None
+        and previous.tool_call_id is None
+        and current.tool_call_id is None
+        and previous.name is None
+        and current.name is None
+    )
 
 
 def _combine_action_events(events: list["ActionEvent"]) -> Message:
