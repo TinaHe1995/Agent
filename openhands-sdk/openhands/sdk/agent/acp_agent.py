@@ -68,7 +68,6 @@ from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.llm import LLM, ImageContent, Message, MessageToolCall, TextContent
 from openhands.sdk.logger import get_logger
 from openhands.sdk.observability.laminar import maybe_init_laminar, observe
-from openhands.sdk.secret import SecretSource
 from openhands.sdk.settings.acp_providers import (
     build_session_model_meta,
     detect_acp_provider_by_agent_name,
@@ -1329,11 +1328,18 @@ class ACPAgent(AgentBase):
         self._client = client
 
         # Build the subprocess environment top-down, highest precedence first:
-        #   acp_env > os.environ > default_environment >
-        #   state.secret_registry > agent_context.secrets
+        #   acp_env > os.environ > default_environment > state.secret_registry
         #
-        # Secret tiers fill-if-absent. The ``name in env`` guard does double
-        # duty: it preserves higher-precedence values and avoids calling
+        # All conversation credentials (provider api_key/base_url, git tokens,
+        # …) arrive via state.secret_registry — the single, cipher-protected
+        # channel the regular agent uses. agent_context.secrets is NOT drained
+        # into env here: it stays prompt-only (names/descriptions advertised in
+        # the system suffix), matching the regular agent. It still reaches the
+        # registry on the conversation-start path because create_request lifts
+        # agent_context.secrets → request.secrets → state.secret_registry.
+        #
+        # The registry tier fills-if-absent. The ``name in env`` guard does
+        # double duty: it preserves higher-precedence values and avoids calling
         # SecretSource.get_value() for keys already satisfied — important
         # because LookupSecret can make an HTTP request.
         env = default_environment()
@@ -1345,17 +1351,6 @@ class ACPAgent(AgentBase):
             value = state.secret_registry.get_secret_value(name)
             if value:
                 env[name] = value
-        if self.agent_context and self.agent_context.secrets:
-            for name, secret in self.agent_context.secrets.items():
-                if name in env:
-                    continue
-                value = (
-                    secret.get_value()
-                    if isinstance(secret, SecretSource)
-                    else str(secret)
-                )
-                if value:
-                    env[name] = value
         # Strip CLAUDECODE so nested Claude Code instances don't refuse to start
         env.pop("CLAUDECODE", None)
 
