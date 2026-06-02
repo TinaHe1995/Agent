@@ -68,6 +68,7 @@ from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.llm import LLM, ImageContent, Message, MessageToolCall, TextContent
 from openhands.sdk.logger import get_logger
 from openhands.sdk.observability.laminar import maybe_init_laminar, observe
+from openhands.sdk.secret import SecretSource
 from openhands.sdk.settings.acp_providers import (
     build_session_model_meta,
     detect_acp_provider_by_agent_name,
@@ -1334,20 +1335,30 @@ class ACPAgent(AgentBase):
         self._client = client
 
         # Build the subprocess environment top-down, highest precedence first:
-        #   acp_env > os.environ > default_environment > state.secret_registry
+        #   acp_env > os.environ > default_environment >
+        #   state.secret_registry > agent_context.secrets
         #
-        # All conversation credentials (provider api_key/base_url, git tokens,
-        # …) arrive via state.secret_registry — the single, cipher-protected
-        # channel the regular agent uses. agent_context.secrets is NOT drained
-        # into env here: it stays prompt-only (names/descriptions advertised in
-        # the system suffix), matching the regular agent. It still reaches the
-        # registry on the conversation-start path because create_request lifts
-        # agent_context.secrets → request.secrets → state.secret_registry.
+        # An ACP subprocess is a black box we cannot name-scan per command (unlike
+        # the regular agent's bash tool, which injects secrets lazily by matching
+        # names in each command), so ALL credentials must be injected upfront.
+        # They arrive through two complementary channels:
+        #   - state.secret_registry: the canonical conversation-secret channel
+        #     (StartConversationRequest.secrets); also where create_request lifts
+        #     agent_context.secrets on the Python-caller path (OpenHands cloud).
+        #   - agent_context.secrets drain (below): the ONLY thing that delivers
+        #     agent_context.secrets to the subprocess on paths that do NOT call
+        #     create_request — notably canvas-local, which builds the request in
+        #     TypeScript and relies on the server's create_agent() to fold
+        #     llm.api_key into agent_context.secrets. There is no server-side
+        #     agent_context.secrets → registry lift, so without this drain the
+        #     provider key never reaches the CLI there (auth failure). Keep it
+        #     until such a server-side lift exists.
         #
-        # The registry tier fills-if-absent. The ``name in env`` guard does
-        # double duty: it preserves higher-precedence values and avoids calling
-        # SecretSource.get_value() for keys already satisfied — important
-        # because LookupSecret can make an HTTP request.
+        # Both secret tiers fill-if-absent. The ``name in env`` guard preserves
+        # higher-precedence values (so the registry wins over the drain, and
+        # neither double-injects) and avoids calling SecretSource.get_value() for
+        # keys already satisfied — important because LookupSecret can make an
+        # HTTP request.
         env = default_environment()
         env.update(os.environ)
         if self.acp_env:
@@ -1368,6 +1379,17 @@ class ACPAgent(AgentBase):
             value = state.secret_registry.get_secret_value(name)
             if value:
                 env[name] = value
+        if self.agent_context and self.agent_context.secrets:
+            for name, secret in self.agent_context.secrets.items():
+                if name in env:
+                    continue
+                value = (
+                    secret.get_value()
+                    if isinstance(secret, SecretSource)
+                    else str(secret)
+                )
+                if value:
+                    env[name] = value
         # Strip CLAUDECODE so nested Claude Code instances don't refuse to start
         env.pop("CLAUDECODE", None)
 
