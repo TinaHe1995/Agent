@@ -187,8 +187,20 @@ class PersistedSettings(BaseModel):
                 is_kind_switch = new_kind is not None and new_kind != old_kind
 
                 if is_kind_switch:
-                    # Variant replacement: validate the diff as-is without merging
-                    # with old variant's fields (which may be incompatible)
+                    # Variant replacement: validate the diff as-is rather than
+                    # deep-merging it onto the old variant. A kind switch picks a
+                    # different member of the AgentSettingsConfig union, and the
+                    # old variant's serialized fields are not a valid base for the
+                    # new one (e.g. ACP's acp_command has no place in
+                    # OpenHandsAgentSettings and would fail validation).
+                    #
+                    # Consequence (intentional): fields the two variants happen to
+                    # share (e.g. ``llm``) are NOT carried over — they fall back to
+                    # the new variant's defaults unless the caller restates them in
+                    # this same diff. Switching kinds is a fresh start on the new
+                    # variant, mirroring the frontend's "fresh base on kind switch"
+                    # behaviour. Callers that want to preserve a shared field must
+                    # include it in the switch payload.
                     agent_merged = agent_update
                 else:
                     # Same-kind update: deep-merge for incremental field edits

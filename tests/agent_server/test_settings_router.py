@@ -759,6 +759,72 @@ def test_patch_settings_switch_agent_kind_from_openhands_to_acp(client_with_sett
     assert body["agent_settings"]["acp_command"] == ["echo", "hello"]
 
 
+def test_patch_settings_same_kind_restated_still_deep_merges(client_with_settings):
+    """Re-stating the current ``agent_kind`` is NOT a variant switch: the diff
+    must still deep-merge so unrelated fields survive.
+
+    ``new_kind != old_kind`` is False when the kind is restated, so the
+    deep-merge branch runs. This pins that a client which echoes back the
+    current ``agent_kind`` alongside an incremental edit does not accidentally
+    trigger a full variant replacement (which would reset sibling fields)."""
+    # Establish a model on the default OpenHands variant.
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"agent_settings_diff": {"llm": {"model": "gpt-4o"}}},
+    )
+    assert response.status_code == 200
+
+    # Restate agent_kind=openhands while setting only the api_key. Because the
+    # kind is unchanged, this deep-merges and the model must be preserved.
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "agent_kind": "openhands",
+                "llm": {"api_key": "sk-test-key"},
+            }
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_settings"]["agent_kind"] == "openhands"
+    # The model set in the first PATCH survives — proving deep-merge ran.
+    assert body["agent_settings"]["llm"]["model"] == "gpt-4o"
+    assert body["llm_api_key_is_set"] is True
+
+
+def test_patch_settings_same_kind_merge_after_a_switch(client_with_settings):
+    """After a variant switch, subsequent same-kind PATCHes resume deep-merge.
+
+    The switch itself is a replacement, but the newly active variant must
+    behave like any other for incremental edits afterwards — a follow-up
+    field edit must not wipe the fields set during the switch."""
+    # Switch from default OpenHands to ACP, setting two ACP fields.
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_command": ["my-cli"],
+                "acp_env": {"FOO": "bar"},
+            }
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["agent_settings"]["acp_command"] == ["my-cli"]
+
+    # Same-kind follow-up: add an env var. Deep-merge must preserve acp_command
+    # and the pre-existing env entry.
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"agent_settings_diff": {"acp_env": {"BAZ": "qux"}}},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_settings"]["acp_command"] == ["my-cli"]
+    assert set(body["agent_settings"]["acp_env"]) == {"FOO", "BAZ"}
+
+
 # ── Secrets CRUD tests ──────────────────────────────────────────────────
 
 
