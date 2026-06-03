@@ -16,6 +16,7 @@ from openhands.sdk import (
     Agent,
     Message,
     TextContent,
+    get_logger,
 )
 from openhands.sdk.context.condenser import CondenserBase
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
@@ -26,6 +27,9 @@ from openhands.sdk.event.llm_convertible import (
 )
 from openhands.sdk.tool import Tool
 from tests.integration.early_stopper import EarlyStopperBase, EarlyStopResult
+
+
+logger = get_logger(__name__)
 
 
 # Tool preset type for selecting which file editing toolset to use
@@ -134,6 +138,15 @@ class BaseIntegrationTest(ABC):
         }
 
         self.llm: LLM = LLM(**llm_kwargs, usage_id="test-llm")
+        # TEMPORARY DIAGNOSTIC for PR #3477 (step-3.7-flash) — to be reverted
+        # once we confirm whether _model_info is populated from the eval proxy.
+        # Track: https://github.com/OpenHands/software-agent-sdk/pull/3477
+        logger.info(
+            "[diagnostic PR #3477] model=%s model_info=%s vision_is_active=%s",
+            self.llm.model,
+            self.llm._model_info,
+            self.llm.vision_is_active(),
+        )
         self.agent: Agent = Agent(
             llm=self.llm, tools=self.tools, condenser=self.condenser
         )
