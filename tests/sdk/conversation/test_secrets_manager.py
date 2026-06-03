@@ -6,6 +6,31 @@ from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.secret import SecretSource, StaticSecret
 
 
+# NOTE: these ``SecretSource`` subclasses are defined at *module* level. As a
+# ``DiscriminatedUnionMixin``, every subclass auto-registers globally and is
+# never GC'd (pydantic caches its schema); a subclass defined inside a function
+# has ``<locals>`` in its qualname, which the registry rejects with "Local
+# classes not supported!" the next time any discriminated-union model is
+# validated in the same (xdist) worker — breaking unrelated tests such as
+# ConversationState (de)serialization. Defining them once at module level also
+# avoids the "Duplicate class definition" guard that two same-named function-
+# local classes would trip. See
+# openhands.sdk.utils.models._get_checked_concrete_subclasses.
+class MyTokenSource(SecretSource):
+    def get_value(self):
+        return "dynamic-token-456"
+
+
+class MyFailingTokenSource(SecretSource):
+    def get_value(self):
+        raise ValueError("Secret retrieval failed")
+
+
+class MyWorkingTokenSource(SecretSource):
+    def get_value(self):
+        return "working-value"
+
+
 def test_update_secrets_with_static_values():
     """Test updating secrets with static string values."""
     secret_registry = SecretRegistry()
@@ -109,10 +134,6 @@ def test_get_secrets_as_env_vars_callable_values():
     """Test get_secrets_as_env_vars with callable values."""
     secret_registry = SecretRegistry()
 
-    class MyTokenSource(SecretSource):
-        def get_value(self):
-            return "dynamic-token-456"
-
     secret_registry.update_secrets(
         {
             "STATIC_KEY": "static-value",
@@ -129,14 +150,6 @@ def test_get_secrets_as_env_vars_callable_values():
 def test_get_secrets_as_env_vars_handles_callable_exceptions():
     """Test that get_secrets_as_env_vars handles exceptions from callables."""
     secret_registry = SecretRegistry()
-
-    class MyFailingTokenSource(SecretSource):
-        def get_value(self):
-            raise ValueError("Secret retrieval failed")
-
-    class MyWorkingTokenSource(SecretSource):
-        def get_value(self):
-            return "working-value"
 
     secret_registry.update_secrets(
         {
@@ -176,10 +189,6 @@ def test_get_secret_value_callable():
     """Test get_secret_value with callable values."""
     secret_registry = SecretRegistry()
 
-    class MyTokenSource(SecretSource):
-        def get_value(self):
-            return "dynamic-token-456"
-
     secret_registry.update_secrets(
         {
             "STATIC_KEY": "static-value",
@@ -194,14 +203,6 @@ def test_get_secret_value_callable():
 def test_get_secret_value_handles_exceptions():
     """Test that get_secret_value handles exceptions from callables gracefully."""
     secret_registry = SecretRegistry()
-
-    class MyFailingTokenSource(SecretSource):
-        def get_value(self):
-            raise ValueError("Secret retrieval failed")
-
-    class MyWorkingTokenSource(SecretSource):
-        def get_value(self):
-            return "working-value"
 
     secret_registry.update_secrets(
         {

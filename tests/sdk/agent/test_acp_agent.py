@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
 from acp.schema import PromptResponse
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
@@ -47,6 +47,7 @@ from openhands.sdk.event import (
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.llm import ImageContent, Message, TextContent
+from openhands.sdk.secret import SecretSource
 from openhands.sdk.skills import KeywordTrigger, Skill
 from openhands.sdk.tool.builtins.finish import FinishAction
 from openhands.sdk.utils.cipher import Cipher
@@ -5812,6 +5813,45 @@ class TestACPSecretsEnvInjection:
         assert not [w for w in caught if "acp_env" in str(w.message)]
 
 
+# NOTE: these ``SecretSource`` subclasses are defined at *module* level, not
+# inside the test methods that use them. ``SecretSource`` is a
+# ``DiscriminatedUnionMixin``: every subclass auto-registers in a global
+# registry, and pydantic caches its core schema (so a once-defined subclass is
+# never GC'd). A subclass defined inside a function has ``<locals>`` in its
+# qualname, which the registry rejects with "Local classes not supported!" the
+# next time *any* discriminated-union model is validated in that worker — e.g.
+# an unrelated ``ConversationState.create()`` in another test file sharing the
+# xdist worker. Module-level (importable) subclasses avoid that cross-test
+# pollution. See openhands.sdk.utils.models._get_checked_concrete_subclasses.
+class _FakeLookupSecret(SecretSource):
+    """A ``LookupSecret``-shaped source whose ``get_value()`` returns a literal."""
+
+    stored_value: str
+
+    def get_value(self) -> str | None:
+        return self.stored_value
+
+
+class _CountingLookupSecret(SecretSource):
+    """A lookup source that records each ``get_value()`` call (to assert it is
+    *not* invoked when ``acp_env`` shadows the key)."""
+
+    stored_value: str
+    calls: list[int] = Field(default_factory=list)
+
+    def get_value(self) -> str | None:
+        self.calls.append(1)
+        return self.stored_value
+
+
+class _BrokenSecret(SecretSource):
+    """A source whose ``get_value()`` raises, to verify a failing lookup is
+    treated as "skip" rather than taking the subprocess down."""
+
+    def get_value(self) -> str | None:
+        raise OSError("network down")
+
+
 class TestACPSecretRegistryEnvInjection:
     """Tests for secret injection from the conversation's secret_registry.
 
@@ -5913,15 +5953,10 @@ class TestACPSecretRegistryEnvInjection:
         This is the wire shape canvas actually sends: a ``LookupSecret``
         whose ``get_value()`` fetches over HTTP from the agent-server's
         ``/api/settings/secrets/{name}`` endpoint.
+
+        ``_FakeLookupSecret`` is module-level (see the note above the test
+        class) so it does not pollute the global discriminated-union registry.
         """
-        from openhands.sdk.secret import SecretSource
-
-        class _FakeLookupSecret(SecretSource):
-            stored_value: str
-
-            def get_value(self) -> str | None:
-                return self.stored_value
-
         agent = _make_agent()
         env = self._run_start_capturing_env(
             agent,
@@ -5948,19 +5983,10 @@ class TestACPSecretRegistryEnvInjection:
         LookupSecret performs an HTTP request in production; calling it for
         a key that ``acp_env`` is about to override wastes a round-trip and
         can emit spurious lookup-failure warnings.
+
+        ``_CountingLookupSecret`` is module-level (see the note above the test
+        class) so it does not pollute the global discriminated-union registry.
         """
-        from pydantic import Field
-
-        from openhands.sdk.secret import SecretSource
-
-        class _CountingLookupSecret(SecretSource):
-            stored_value: str
-            calls: list[int] = Field(default_factory=list)
-
-            def get_value(self) -> str | None:
-                self.calls.append(1)
-                return self.stored_value
-
         secret = _CountingLookupSecret(stored_value="from-registry")
         agent = _make_agent(acp_env={"GITHUB_TOKEN": "from-acp-env"})
         env = self._run_start_capturing_env(
@@ -6015,13 +6041,10 @@ class TestACPSecretRegistryEnvInjection:
         that ``None`` as "skip", so a transient secret-source failure
         (network blip, expired token) doesn't take the whole ACP
         subprocess down.
+
+        ``_BrokenSecret`` is module-level (see the note above the test class)
+        so it does not pollute the global discriminated-union registry.
         """
-        from openhands.sdk.secret import SecretSource
-
-        class _BrokenSecret(SecretSource):
-            def get_value(self) -> str | None:
-                raise OSError("network down")
-
         agent = _make_agent()
         env = self._run_start_capturing_env(
             agent,

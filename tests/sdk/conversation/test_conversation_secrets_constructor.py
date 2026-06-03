@@ -17,6 +17,22 @@ from openhands.sdk.workspace import RemoteWorkspace
 from .conftest import create_mock_http_client
 
 
+# NOTE: module-level (not function-local) on purpose. ``SecretSource`` is a
+# ``DiscriminatedUnionMixin``; a subclass defined inside a function has
+# ``<locals>`` in its qualname and, once registered, makes the global registry
+# raise "Local classes not supported!" for any later discriminated-union
+# validation in the same xdist worker (e.g. an unrelated ConversationState
+# deserialization). See openhands.sdk.utils.models._get_checked_concrete_subclasses.
+class _DynamicTokenSource(SecretSource):
+    def get_value(self):
+        return "dynamic-token-789"
+
+
+class _CallableApiKeySource(SecretSource):
+    def get_value(self):
+        return "callable-api-key"
+
+
 def create_test_agent() -> Agent:
     """Create a test agent."""
     llm = LLM(model="gpt-4o-mini", api_key=SecretStr("test-key"), usage_id="test-llm")
@@ -67,18 +83,10 @@ def test_local_conversation_constructor_with_callable_secrets():
     """Test LocalConversation constructor with callable secrets."""
     agent = create_test_agent()
 
-    class MyLocalConversationConstructorDynamicTokenSource(SecretSource):
-        def get_value(self):
-            return "dynamic-token-789"
-
-    class MyLocalConversationConstructorApiKeySource(SecretSource):
-        def get_value(self):
-            return "callable-api-key"
-
     test_secrets = {
         "STATIC_KEY": "static-value",
-        "DYNAMIC_TOKEN": MyLocalConversationConstructorDynamicTokenSource(),
-        "API_KEY": MyLocalConversationConstructorApiKeySource(),
+        "DYNAMIC_TOKEN": _DynamicTokenSource(),
+        "API_KEY": _CallableApiKeySource(),
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
