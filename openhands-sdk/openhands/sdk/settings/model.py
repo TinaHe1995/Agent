@@ -1097,6 +1097,10 @@ class ACPAgentSettings(AgentSettingsBase):
             ).model_dump(),
         },
     )
+    # Programmatic / downstream-facing knob, deliberately NOT surfaced in the
+    # settings-form UI (no SETTINGS_METADATA_KEY): it's a list of structured
+    # specs a downstream application supplies in code to support other ACP CLIs,
+    # not an end-user field. The built-in providers work via the default.
     acp_file_secrets: list[ACPFileSecretSpec] = Field(
         default_factory=lambda: list(default_acp_file_secrets()),
         description=(
@@ -1106,17 +1110,6 @@ class ACPAgentSettings(AgentSettingsBase):
             "providers; override to support other ACP servers with different "
             "file-auth schemes."
         ),
-        json_schema_extra={
-            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
-                label="ACP file-content credential secrets",
-                prominence=SettingProminence.MINOR,
-            ).model_dump(),
-            SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
-                key="acp",
-                label="ACP (Agent Client Protocol)",
-                variant="acp",
-            ).model_dump(),
-        },
     )
     llm: LLM = Field(
         default_factory=_default_llm_settings,
