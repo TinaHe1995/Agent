@@ -574,7 +574,7 @@ def test_malformed_tool_name_bash_xml_tag(tmp_path):
     assert "hello" in observation_event.observation.text
 
 
-def test_malformed_tool_name_no_fix_when_no_match(tmp_path):
+def test_malformed_tool_name_no_fix_when_no_match():
     """Test that truly malformed names that don't match any alias return original."""
     from openhands.sdk.agent.utils import normalize_tool_call
 
@@ -591,7 +591,7 @@ def test_malformed_tool_name_no_fix_when_no_match(tmp_path):
     )
 
 
-def test_malformed_tool_name_alias_precedence(tmp_path):
+def test_malformed_tool_name_alias_precedence():
     """Test that aliases are correctly resolved from malformed names.
 
     When a malformed name like 'str_replace </parameter' is fixed to 'str_replace',

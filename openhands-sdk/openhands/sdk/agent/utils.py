@@ -344,9 +344,13 @@ def normalize_tool_call(
         # First, try to fix malformed tool names (e.g., "str_replace </parameter")
         fixed_name = _try_fix_malformed_tool_name(tool_name, available_tools)
         if fixed_name != tool_name:
-            # Successfully fixed - use the result (already includes alias resolution)
+            # The base identifier matched a tool or alias - use the resolved name.
             normalized_tool_name = fixed_name
         else:
+            # Defensive fallback: handle the rare case where the original name
+            # doesn't start with a valid identifier character (so the malformed
+            # name fixer couldn't extract a base) but still happens to be a
+            # registered alias key.
             alias_target = TOOL_NAME_ALIASES.get(tool_name)
             if alias_target and alias_target in available_tools:
                 normalized_tool_name = alias_target
