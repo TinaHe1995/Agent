@@ -684,6 +684,81 @@ def test_patch_settings_null_on_scalar_field_fails_loudly(client_with_settings):
     assert response.status_code == 422
 
 
+def test_patch_settings_switch_agent_kind_from_acp_to_openhands(
+    client_with_settings, temp_persistence_dir
+):
+    """PATCH /api/settings can switch from ACP to OpenHands.
+
+    When ``agent_kind`` changes, incompatible fields from the old variant
+    (like ``acp_command``) must not be merged into the new variant.
+    This is a variant replacement, not a field merge."""
+    # Seed with ACP settings
+    acp = ACPAgentSettings(
+        acp_command=["echo", "test"],
+        acp_env={"KEY": "value"},
+    )
+    persisted = PersistedSettings(agent_settings=acp)
+    payload = persisted.model_dump(mode="json", context={"expose_secrets": "plaintext"})
+    _write_settings_file(temp_persistence_dir, payload)
+
+    # Verify it starts as ACP
+    get_response = client_with_settings.get("/api/settings")
+    assert get_response.json()["agent_settings"]["agent_kind"] == "acp"
+
+    # Switch to OpenHands — provide only the required fields for OpenHands variant
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "agent_kind": "openhands",
+                "llm": {"model": "claude-3-5-sonnet-20241022"},
+            }
+        },
+    )
+
+    # Should succeed — no validation error about leftover ACP-specific fields
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_settings"]["agent_kind"] == "openhands"
+    # ACP-specific fields should not appear in the response
+    assert "acp_command" not in body["agent_settings"]
+    assert "acp_env" not in body["agent_settings"]
+
+
+def test_patch_settings_switch_agent_kind_from_openhands_to_acp(client_with_settings):
+    """PATCH /api/settings can switch from OpenHands to ACP.
+
+    When switching to ACP, the new variant's required fields should be set
+    without interference from the old variant's fields."""
+    # Seed with OpenHands settings (default)
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "llm": {"model": "claude-3-5-sonnet-20241022"},
+            }
+        },
+    )
+    assert response.status_code == 200
+
+    # Switch to ACP
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_command": ["echo", "hello"],
+            }
+        },
+    )
+
+    # Should succeed — no validation error about leftover OpenHands-specific fields
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_settings"]["agent_kind"] == "acp"
+    assert body["agent_settings"]["acp_command"] == ["echo", "hello"]
+
+
 # ── Secrets CRUD tests ──────────────────────────────────────────────────
 
 

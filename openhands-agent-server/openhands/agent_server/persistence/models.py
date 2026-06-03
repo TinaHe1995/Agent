@@ -146,6 +146,11 @@ class PersistedSettings(BaseModel):
         apply any schema migrations if the incoming diff contains an older
         schema version.
 
+        When ``agent_kind`` changes in the diff, the update is treated as a
+        variant replacement: the incoming diff is validated as-is rather than
+        merged with the old variant's fields. Same-kind updates retain deep-merge
+        behavior for incremental field edits.
+
         Thread Safety:
             This method is NOT thread-safe for concurrent in-memory updates.
             The assignments to ``agent_settings`` and ``conversation_settings``
@@ -176,12 +181,23 @@ class PersistedSettings(BaseModel):
 
         try:
             if isinstance(agent_update, dict):
-                agent_merged = _deep_merge(
-                    self.agent_settings.model_dump(
-                        mode="json", context={"expose_secrets": "plaintext"}
-                    ),
-                    agent_update,
-                )
+                # Check if this is a variant (agent_kind) switch
+                old_kind = self.agent_settings.agent_kind
+                new_kind = agent_update.get("agent_kind")
+                is_kind_switch = new_kind is not None and new_kind != old_kind
+
+                if is_kind_switch:
+                    # Variant replacement: validate the diff as-is without merging
+                    # with old variant's fields (which may be incompatible)
+                    agent_merged = agent_update
+                else:
+                    # Same-kind update: deep-merge for incremental field edits
+                    agent_merged = _deep_merge(
+                        self.agent_settings.model_dump(
+                            mode="json", context={"expose_secrets": "plaintext"}
+                        ),
+                        agent_update,
+                    )
                 try:
                     new_agent = validate_agent_settings(agent_merged)
                 except Exception as e:
