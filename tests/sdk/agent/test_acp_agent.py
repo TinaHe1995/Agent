@@ -47,6 +47,7 @@ from openhands.sdk.event import (
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.llm import ImageContent, Message, TextContent
+from openhands.sdk.secret import SecretSource
 from openhands.sdk.skills import KeywordTrigger, Skill
 from openhands.sdk.tool.builtins.finish import FinishAction
 from openhands.sdk.utils.cipher import Cipher
@@ -57,6 +58,23 @@ from openhands.sdk.workspace.local import LocalWorkspace
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _FakeLookupSecret(SecretSource):
+    """Module-level stand-in for ``LookupSecret`` used by registry tests.
+
+    Defined at module scope (not inside a test method) so its ``__qualname__``
+    does not contain ``<locals>``. ``DiscriminatedUnionMixin`` rejects
+    subclasses whose qualname contains ``<locals>`` during ``SecretSource``
+    union validation, and any such local subclass leaks into the global
+    ``__subclasses__`` registry — breaking unrelated serialization tests
+    that run later on the same xdist worker.
+    """
+
+    stored_value: str
+
+    def get_value(self) -> str | None:
+        return self.stored_value
 
 
 def _make_agent(**kwargs) -> ACPAgent:
@@ -5914,14 +5932,6 @@ class TestACPSecretRegistryEnvInjection:
         whose ``get_value()`` fetches over HTTP from the agent-server's
         ``/api/settings/secrets/{name}`` endpoint.
         """
-        from openhands.sdk.secret import SecretSource
-
-        class _FakeLookupSecret(SecretSource):
-            stored_value: str
-
-            def get_value(self) -> str | None:
-                return self.stored_value
-
         agent = _make_agent()
         env = self._run_start_capturing_env(
             agent,
