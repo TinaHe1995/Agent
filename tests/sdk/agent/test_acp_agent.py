@@ -19,6 +19,7 @@ from pydantic import SecretStr
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
     _classify_acp_init_error,
+    _classify_acp_prompt_error,
     _estimate_cost_from_tokens,
     _extract_session_models,
     _extract_token_usage,
@@ -881,6 +882,67 @@ class TestClassifyACPInitError:
 
     def test_generic_exception_is_init_error(self):
         assert _classify_acp_init_error(RuntimeError("x")) == "ACPInitError"
+
+
+# ---------------------------------------------------------------------------
+# _classify_acp_prompt_error
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyACPPromptError:
+    """Cover the error-classifier used by ``ACPAgent._emit_turn_error``.
+
+    Stable codes drive downstream behaviour (RemoteConversation surfacing,
+    benchmark retry logic, telemetry dashboards), so each branch needs a
+    direct regression test.
+    """
+
+    def test_usage_policy_lower_case(self):
+        code, detail = _classify_acp_prompt_error("Request blocked by usage policy")
+        assert code == "UsagePolicyRefusal"
+        assert detail == "Request blocked by usage policy"
+
+    def test_content_policy_mixed_case(self):
+        code, _ = _classify_acp_prompt_error("Content Policy violation: harmful")
+        assert code == "UsagePolicyRefusal"
+
+    def test_upstream_sse_bytes_repr_pattern(self):
+        # Exact signature seen in GAIA eval run 26869531096 (gemini-cli 0.38.0
+        # streaming through a LiteLLM proxy alias for gemini-3-flash-preview).
+        raw = "Unexpected token 'b', \"b'data: {\"\"... is not valid JSON"
+        code, detail = _classify_acp_prompt_error(raw)
+        assert code == "UpstreamGatewaySSEError"
+        # Detail must explain the upstream root cause and include the
+        # original text so operators can grep logs.
+        assert "bytes-repr" in detail
+        assert "gateway" in detail.lower()
+        assert "Original error:" in detail
+        assert "b'data:" in detail or "b'data:" in detail.lower()
+
+    def test_upstream_sse_double_quote_variant(self):
+        # Some Node runtimes wrap the offending token in double quotes.
+        raw = 'Unexpected token "b", "b\'data: {""... is not valid JSON'
+        code, _ = _classify_acp_prompt_error(raw)
+        assert code == "UpstreamGatewaySSEError"
+
+    def test_upstream_sse_does_not_match_generic_json_error(self):
+        # A regular JSON.parse failure (no bytes-repr leading the data field)
+        # must remain a generic ACPPromptError so we do not falsely promise
+        # the user that fixing the gateway will help.
+        raw = "Unexpected token } in JSON at position 42"
+        code, _ = _classify_acp_prompt_error(raw)
+        assert code == "ACPPromptError"
+
+    def test_fallback_returns_acp_prompt_error(self):
+        code, detail = _classify_acp_prompt_error("transport reset by peer")
+        assert code == "ACPPromptError"
+        assert detail == "transport reset by peer"
+
+    def test_detail_is_truncated_to_500_chars(self):
+        # Long upstream tracebacks must not bypass the 500-char detail cap.
+        long_error = "x" * 5_000
+        _, detail = _classify_acp_prompt_error(long_error)
+        assert len(detail) <= 500
 
 
 # ---------------------------------------------------------------------------
@@ -1944,6 +2006,58 @@ class TestACPAgentAstep:
             f"expected one ConversationErrorEvent, got {emitted}"
         )
         assert conversation.state.execution_status == ConversationExecutionStatus.ERROR
+
+    def test_astep_classifies_upstream_sse_bytes_repr_failure(self, tmp_path):
+        """End-to-end: an upstream-gateway SSE corruption surfaces as
+        ``UpstreamGatewaySSEError``, not the generic ``ACPPromptError``.
+
+        Regression coverage for GAIA eval run 26869531096, where 165/165
+        gemini-cli ACP instances failed with the JS JSON.parse signature
+        ``Unexpected token 'b', "b'data: {""... is not valid JSON`` produced
+        by a misbehaving LiteLLM proxy alias. The distinct code lets the
+        eval harness skip retries that can never succeed.
+        """
+        from openhands.sdk.event.conversation_error import ConversationErrorEvent
+        from openhands.sdk.utils.async_executor import AsyncExecutor
+
+        agent = _make_agent()
+        conversation = self._make_conversation_with_message(tmp_path)
+        emitted: list = []
+
+        mock_client = _OpenHandsACPBridge()
+        mock_client.get_turn_usage_update = MagicMock(return_value=object())
+        agent._client = mock_client
+        agent._conn = MagicMock()
+        agent._session_id = "test-session"
+
+        # Reproduce the exact error string surfaced by gemini-cli 0.38.0.
+        upstream_error = "Unexpected token 'b', \"b'data: {\"\"... is not valid JSON"
+
+        async def _failing_prompt(prompt_blocks, session_id):
+            raise RuntimeError(upstream_error)
+
+        agent._conn.prompt = _failing_prompt
+
+        executor = AsyncExecutor()
+        try:
+            agent._executor = executor
+            with pytest.raises(RuntimeError):
+                asyncio.run(agent.astep(conversation, on_event=emitted.append))
+        finally:
+            executor.close()
+
+        typed_errors = [e for e in emitted if isinstance(e, ConversationErrorEvent)]
+        assert len(typed_errors) == 1, (
+            f"expected one ConversationErrorEvent, got {emitted}"
+        )
+        err = typed_errors[0]
+        assert err.code == "UpstreamGatewaySSEError", (
+            f"expected UpstreamGatewaySSEError, got {err.code!r} "
+            f"with detail={err.detail!r}"
+        )
+        # Detail must keep the operator-actionable remediation hint.
+        assert "gateway" in err.detail.lower()
+        assert "bytes-repr" in err.detail
 
     def test_astep_times_out_while_tool_call_is_inflight(self, tmp_path):
         """A hard ACP prompt timeout still fires during an active tool call.

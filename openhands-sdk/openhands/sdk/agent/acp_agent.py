@@ -20,6 +20,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -166,6 +167,59 @@ _ACTIVITY_SIGNAL_INTERVAL: float = 30.0
 # and, if the turn aborts before it reaches a terminal state, the live-
 # emitted event on state.events will otherwise be orphaned forever.
 _TERMINAL_TOOL_CALL_STATUSES: frozenset[str] = frozenset({"completed", "failed"})
+
+
+# Pattern for a JSON-parse error whose payload is a Python ``bytes`` __repr__
+# leaking into an SSE stream (chunk starts with ``b'data:`` or ``b"data:``).
+# Observed end-to-end with @google/gemini-cli when the upstream LLM gateway
+# (e.g. a LiteLLM proxy alias) forwards ``str(bytes)``/``repr(bytes)`` instead
+# of decoded UTF-8 chunks. The ACP server's JSON.parse then chokes on the
+# leading ``b'`` byte and the error text propagates back via ACP as
+# "Unexpected token 'b', \"b'data: {\"... is not valid JSON".
+#
+# Retrying does not help — the gateway has to be fixed — so we classify this
+# distinctly to (a) give operators a clear remediation hint and (b) let
+# eval/harness code short-circuit retries that cannot possibly succeed.
+_UPSTREAM_SSE_BYTES_REPR_PATTERN: re.Pattern[str] = re.compile(
+    r"Unexpected\s+token\s+['\"]b['\"].*b['\"]data\s*:",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _classify_acp_prompt_error(error_str: str) -> tuple[str, str]:
+    """Classify an exception raised out of ``conn.prompt`` into ``(code, detail)``.
+
+    Returns:
+        A tuple of ``(ConversationErrorEvent.code, ConversationErrorEvent.detail)``.
+
+        * ``UsagePolicyRefusal`` — the upstream provider refused the prompt
+          on policy grounds (the agent did nothing wrong, the model declined).
+        * ``UpstreamGatewaySSEError`` — the ACP server received a corrupted
+          SSE response from its configured LLM gateway (chunk text contains
+          a Python bytes-repr like ``b'data: {...}'``). This is deterministic;
+          retrying the same gateway will fail the same way.
+        * ``ACPPromptError`` — fallback for everything else.
+
+    The first element is the stable error code used by downstream consumers
+    (RemoteConversation surfaces it as the failure reason; benchmark eval
+    harnesses can branch on it to skip pointless retries).
+    """
+    lower = error_str.lower()
+    if "usage policy" in lower or "content policy" in lower:
+        return "UsagePolicyRefusal", error_str[:500]
+    if _UPSTREAM_SSE_BYTES_REPR_PATTERN.search(error_str):
+        remediation = (
+            "ACP server failed to parse a streaming response from its "
+            "configured LLM gateway: the SSE payload begins with a Python "
+            "bytes-repr (e.g. b'data: {...}'), which indicates the gateway "
+            "is forwarding str(bytes) instead of decoded UTF-8 chunks. "
+            "This is deterministic — retries will not help. Check the "
+            "*_BASE_URL the ACP subprocess is pointed at (LiteLLM proxy "
+            "alias, etc.) and the upstream model's streaming handler. "
+            f"Original error: {error_str[:300]}"
+        )
+        return "UpstreamGatewaySSEError", remediation[:500]
+    return "ACPPromptError", error_str[:500]
 
 
 class _PromptDrainResult(NamedTuple):
@@ -2129,15 +2183,16 @@ class ACPAgent(AgentBase):
         )
         # Emit typed ConversationErrorEvent so RemoteConversation surfaces
         # the actual detail instead of falling back to
-        # "Remote conversation ended with error".
-        is_aup = (
-            "usage policy" in error_str.lower() or "content policy" in error_str.lower()
-        )
+        # "Remote conversation ended with error".  ``_classify_acp_prompt_error``
+        # maps known signatures (policy refusals, corrupted SSE from the
+        # LLM gateway, …) to stable error codes so downstream consumers can
+        # branch on them without re-parsing the human-readable detail.
+        code, detail = _classify_acp_prompt_error(error_str)
         on_event(
             ConversationErrorEvent(
                 source="agent",
-                code="UsagePolicyRefusal" if is_aup else "ACPPromptError",
-                detail=error_str[:500],
+                code=code,
+                detail=detail,
             )
         )
         state.execution_status = ConversationExecutionStatus.ERROR
