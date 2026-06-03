@@ -1,7 +1,9 @@
 """Dynamic workflow tool definitions."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import Field
 
@@ -49,7 +51,9 @@ class WorkflowObservation(Observation):
     )
 
 
-_WORKFLOW_DESCRIPTION = """Run a dynamic workflow written as Python orchestration code.
+_WORKFLOW_DESCRIPTION: Final[
+    str
+] = """Run a dynamic workflow written as Python orchestration code.
 
 Use this tool for large tasks that benefit from parallel sub-agents, such as
 codebase-wide audits, independent plan reviews, security sweeps, or discovery
@@ -135,10 +139,10 @@ class WorkflowTool(ToolDefinition[WorkflowAction, WorkflowObservation]):
     @classmethod
     def create(
         cls,
-        conv_state: "ConversationState | None" = None,  # noqa: ARG003
-        executor: "WorkflowExecutor | None" = None,
+        conv_state: ConversationState | None = None,  # noqa: ARG003
+        executor: WorkflowExecutor | None = None,
         description: str = _WORKFLOW_DESCRIPTION,
-    ) -> Sequence["WorkflowTool"]:
+    ) -> Sequence[WorkflowTool]:
         from openhands.tools.workflow.impl import WorkflowExecutor
 
         return [
@@ -164,14 +168,12 @@ class WorkflowToolSet(ToolDefinition[WorkflowAction, WorkflowObservation]):
     @classmethod
     def create(
         cls,
-        conv_state: "ConversationState",  # noqa: ARG003
+        conv_state: ConversationState,  # noqa: ARG003
     ) -> Sequence[WorkflowTool]:
         from openhands.tools.workflow.impl import WorkflowExecutor
 
         return WorkflowTool.create(executor=WorkflowExecutor())
 
 
-# WorkflowToolSet is for standard SDK auto-create usage.
-# WorkflowTool is for explicit executor injection in tests/extensions.
 register_tool(WorkflowToolSet.name, WorkflowToolSet)
 register_tool(WorkflowTool.name, WorkflowTool)

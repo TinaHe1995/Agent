@@ -290,15 +290,14 @@ def validate_workflow_script(script: str) -> None:
             "Workflow script must define exactly one async main(wf)"
         )
 
-    main_def = main_defs[0]
+    main_args = main_defs[0].args
     if (
-        len(main_def.args.args) != 1
-        or main_def.args.args[0].arg != "wf"
-        or main_def.args.kwonlyargs
-        or main_def.args.vararg
-        or main_def.args.kwarg
-        or main_def.args.defaults
-        or main_def.args.posonlyargs
+        [a.arg for a in main_args.args] != ["wf"]
+        or main_args.kwonlyargs
+        or main_args.vararg
+        or main_args.kwarg
+        or main_args.defaults
+        or main_args.posonlyargs
     ):
         raise WorkflowScriptError("Workflow entry point must be `async def main(wf):`")
 
@@ -325,20 +324,19 @@ def validate_workflow_script(script: str) -> None:
             and _attribute_root_name(node) in _UNSAFE_ATTRIBUTE_ROOTS
         ):
             raise WorkflowScriptError("Workflow scripts may not access unsafe modules")
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in _UNSAFE_CALLS:
-                raise WorkflowScriptError(
-                    f"Workflow scripts may not call `{node.func.id}`"
-                )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _UNSAFE_CALLS
+        ):
+            raise WorkflowScriptError(f"Workflow scripts may not call `{node.func.id}`")
 
 
 def _attribute_root_name(node: ast.Attribute) -> str | None:
     value = node.value
     while isinstance(value, ast.Attribute):
         value = value.value
-    if isinstance(value, ast.Name):
-        return value.id
-    return None
+    return value.id if isinstance(value, ast.Name) else None
 
 
 def execute_workflow_script(script: str, context: WorkflowContext) -> Any:
