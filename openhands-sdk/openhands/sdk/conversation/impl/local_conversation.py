@@ -108,6 +108,10 @@ class LocalConversation(BaseConversation):
     delete_on_close: bool = True
     _arun_task: asyncio.Task[None] | None
     _cancel_token: CancellationToken | None
+    # True while run()/arun() executes an agent step while holding the state
+    # lock. Tools run on worker threads, so a tool that mutates state (e.g.
+    # switch_llm) must reuse that lock instead of re-acquiring it (#3485).
+    _step_holds_state_lock: bool
     # Plugin lazy loading state
     _plugin_specs: list[PluginSource] | None
     _resolved_plugins: list[ResolvedPluginSource] | None
@@ -185,6 +189,7 @@ class LocalConversation(BaseConversation):
         self._cleanup_initiated = False
         self._arun_task = None
         self._cancel_token = None
+        self._step_holds_state_lock = False
 
         # Store plugin specs for lazy loading (no IO in constructor)
         # Plugins will be loaded on first run() or send_message() call
@@ -759,7 +764,12 @@ class LocalConversation(BaseConversation):
         except KeyError:
             new_llm = llm
             self.llm_registry.add(new_llm)
-        with self._state:
+        # When this runs as a tool inside an in-progress agent step, the run
+        # loop already holds the state lock on another thread and is blocked
+        # awaiting this tool call; re-acquiring it here (on the tool worker
+        # thread) would deadlock. Reuse the lock the step already holds (#3485).
+        lock = contextlib.nullcontext() if self._step_holds_state_lock else self._state
+        with lock:
             self.agent = self.agent.model_copy(update={"llm": new_llm})
             self._state.agent = self.agent
             self._pin_prompt_cache_key()
@@ -1013,9 +1023,16 @@ class LocalConversation(BaseConversation):
                             ConversationExecutionStatus.RUNNING
                         )
 
-                    self.agent.step(
-                        self, on_event=self._on_event, on_token=self._on_token
-                    )
+                    # Mark the step as holding the state lock so state-mutating
+                    # tools (e.g. switch_llm) running on worker threads reuse it
+                    # instead of deadlocking on a re-acquire (#3485).
+                    self._step_holds_state_lock = True
+                    try:
+                        self.agent.step(
+                            self, on_event=self._on_event, on_token=self._on_token
+                        )
+                    finally:
+                        self._step_holds_state_lock = False
                     iteration += 1
 
                     # Check for non-finished terminal conditions
@@ -1241,11 +1258,19 @@ class LocalConversation(BaseConversation):
                         # silently re-enter the lock and corrupt history. Such
                         # unrelated mutators must be dispatched via
                         # run_in_executor onto a worker thread.
-                        await self.agent.astep(
-                            self,
-                            on_event=self._on_event,
-                            on_token=self._on_token,
-                        )
+                        # Mark the step as holding the state lock so
+                        # state-mutating tools (e.g. switch_llm) running on
+                        # worker threads reuse it instead of deadlocking on a
+                        # re-acquire while this await holds it (#3485).
+                        self._step_holds_state_lock = True
+                        try:
+                            await self.agent.astep(
+                                self,
+                                on_event=self._on_event,
+                                on_token=self._on_token,
+                            )
+                        finally:
+                            self._step_holds_state_lock = False
                         iteration += 1
 
                         if (
