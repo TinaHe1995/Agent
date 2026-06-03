@@ -6654,11 +6654,12 @@ class TestACPFileSecretMaterialisation:
         state = self._state(tmp_path)
         persist = state.persistence_dir
         assert persist is not None
-        # Pre-seed a "refreshed" auth.json at the target path.
+        # Pre-seed a "refreshed" auth.json with deliberately wide (0644) perms.
         codex_home = Path(persist) / "acp" / "codex"
         codex_home.mkdir(parents=True)
         refreshed = codex_home / "auth.json"
         refreshed.write_text('{"refreshed": true}', encoding="utf-8")
+        refreshed.chmod(0o644)
 
         state.secret_registry.update_secrets(
             {"CODEX_AUTH_JSON": StaticSecret(value=SecretStr('{"stale": true}'))}
@@ -6666,7 +6667,11 @@ class TestACPFileSecretMaterialisation:
         env = self._run_start(agent, state, conn=self._make_conn())
 
         assert Path(env["CODEX_HOME"]) == codex_home
+        # Contents preserved (not clobbered by the stale paste)...
         assert refreshed.read_text(encoding="utf-8") == '{"refreshed": true}'
+        # ...but perms are still clamped to 0600 (regression: QA found a
+        # preserved 0644 file staying world-readable).
+        assert refreshed.stat().st_mode & 0o777 == 0o600
 
     def test_reads_from_agent_context_secrets_drain(self, tmp_path):
         """The reserved secret can arrive via agent_context.secrets (canvas-local
@@ -6692,6 +6697,9 @@ class TestACPFileSecretMaterialisation:
         from openhands.sdk.secret import StaticSecret
 
         pinned = tmp_path / "pinned_codex"
+        # Pre-create the pinned dir with deliberately wide (0755) perms.
+        pinned.mkdir()
+        pinned.chmod(0o755)
         agent = _make_agent(acp_env={"CODEX_HOME": str(pinned)})
         state = self._state(tmp_path)
         state.secret_registry.update_secrets(
@@ -6702,6 +6710,10 @@ class TestACPFileSecretMaterialisation:
         assert env["CODEX_HOME"] == str(pinned)
         # The credential lands under the pinned dir, not the conversation root.
         assert (pinned / "auth.json").read_text(encoding="utf-8") == '{"k": 1}'
+        # The pinned dir's user-chosen perms are NOT silently narrowed...
+        assert pinned.stat().st_mode & 0o777 == 0o755
+        # ...but the credential file itself is still 0600.
+        assert (pinned / "auth.json").stat().st_mode & 0o777 == 0o600
 
     def test_fallback_root_when_not_persisted(self, tmp_path):
         """With no persistence_dir, the file lands under the workspace tree —

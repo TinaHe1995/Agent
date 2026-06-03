@@ -261,7 +261,9 @@ class TestACPFileSecrets:
             "CODEX_AUTH_JSON",
             "GOOGLE_APPLICATION_CREDENTIALS_JSON",
         }
-        # The union is exactly the providers' file_secrets concatenated.
+        # Deterministic concatenation in ACP_PROVIDERS registration order
+        # (codex before gemini-cli) — downstream callers can rely on a stable
+        # ordering of the built-in specs.
         assert specs == (
             ACP_PROVIDERS["codex"].file_secrets
             + ACP_PROVIDERS["gemini-cli"].file_secrets

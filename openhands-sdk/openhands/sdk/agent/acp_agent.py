@@ -268,13 +268,16 @@ def _select_auth_method(
 def _write_secret_file(path: Path, value: str) -> None:
     """Write ``value`` to ``path`` as a ``0600`` file.
 
-    Opens with mode ``0600`` so the bytes never exist with wider permissions,
-    then re-chmods defensively in case the file pre-existed with looser perms.
+    ``os.open`` creates a *new* file at ``0600``, but ``O_CREAT`` does not
+    narrow an existing file's mode. So ``fchmod`` the raw fd to ``0600`` before
+    any bytes land — clamping the mode while we still hold the fd guarantees the
+    secret content never exists with wider permissions even when the file
+    pre-existed (e.g. a ``0644`` empty file from another tool).
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(value)
-    path.chmod(0o600)
 
 
 def _extract_session_models(
@@ -1572,9 +1575,18 @@ class ACPAgent(AgentBase):
                 target = directory / spec.filename
             try:
                 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-                # Tighten in case the dir pre-existed or umask widened the mode.
-                directory.chmod(0o700)
+                # Tighten the SDK-owned per-conversation dir in case it
+                # pre-existed or umask widened mkdir's mode. Skip for an
+                # externally-pinned acp_env dir (e.g. a deliberately
+                # group-readable shared mount) so we don't silently narrow
+                # permissions the user chose.
+                if not pinned:
+                    directory.chmod(0o700)
                 if target.is_file() and target.stat().st_size > 0:
+                    # Seed-if-absent: keep the (possibly CLI-refreshed) contents,
+                    # but still clamp perms — a pre-existing credential file may
+                    # be world-readable (e.g. 0644 from another tool/restore).
+                    target.chmod(0o600)
                     logger.info(
                         "ACP file-secret %r already present at %s; preserving "
                         "(seed-if-absent)",
