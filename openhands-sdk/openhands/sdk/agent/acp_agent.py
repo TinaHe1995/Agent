@@ -1597,12 +1597,18 @@ class ACPAgent(AgentBase):
                     _write_secret_file(target, value)
                     logger.info("Materialised ACP file-secret %r -> %s", name, target)
             except OSError:
+                # Fail fast rather than swallowing: if the credential the caller
+                # supplied can't be written (read-only/full workspace mount, etc.)
+                # its data-dir env var would never be set and the subprocess would
+                # fail at auth time with a cryptic CLI error and no SDK breadcrumb.
+                # Re-raising lets init_state surface a typed ConversationErrorEvent
+                # (ACPInitError) that names the materialisation failure.
                 logger.exception(
                     "Failed to materialise ACP file-secret %r under %s",
                     name,
                     directory,
                 )
-                continue
+                raise
             # acp_env (applied last in _start_acp_server) keeps precedence; only
             # set the env var here when the caller did not pin it.
             if spec.env_var not in self.acp_env:

@@ -6741,6 +6741,25 @@ class TestACPFileSecretMaterialisation:
         env = self._run_start(agent, state, conn=self._make_conn())
         assert "CODEX_HOME" not in env
 
+    def test_materialisation_oserror_fails_fast(self, tmp_path):
+        """If the credential can't be written (e.g. read-only mount), the error
+        propagates out of _start_acp_server (so init_state surfaces a typed
+        ConversationErrorEvent) instead of being swallowed and leaving the CLI
+        to fail at auth time with no SDK breadcrumb."""
+        from openhands.sdk.secret import StaticSecret
+
+        agent = _make_agent()
+        state = self._state(tmp_path)
+        state.secret_registry.update_secrets(
+            {"CODEX_AUTH_JSON": StaticSecret(value=SecretStr("{}"))}
+        )
+        with patch(
+            "openhands.sdk.agent.acp_agent._write_secret_file",
+            side_effect=OSError("[Errno 30] Read-only file system"),
+        ):
+            with pytest.raises(OSError, match="Read-only file system"):
+                self._run_start(agent, state, conn=self._make_conn())
+
     def test_vertex_warns_when_project_unset(self, tmp_path, caplog):
         from openhands.sdk.secret import StaticSecret
 

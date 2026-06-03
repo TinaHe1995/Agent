@@ -116,10 +116,14 @@ class ACPFileSecretSpec(BaseModel):
     @field_validator("subdir")
     @classmethod
     def _validate_subdir(cls, value: str) -> str:
-        """``subdir`` must be a relative path with no traversal or root escape."""
+        """``subdir`` must be a real relative folder (no traversal, root escape,
+        or the ``.`` identity path that would drop the credential straight into
+        the shared ``acp/`` root where two specs could collide)."""
         path = PurePosixPath(value)
-        if path.is_absolute() or ".." in path.parts:
-            raise ValueError("subdir must be a relative path without '..' segments")
+        if path.is_absolute() or ".." in path.parts or value.strip() in ("", "."):
+            raise ValueError(
+                "subdir must be a non-empty relative path without '.'/'..' segments"
+            )
         return value
 
 

@@ -303,3 +303,9 @@ class TestACPFileSecrets:
             ACPFileSecretSpec(
                 secret_name="X", filename="x.json", env_var="X", subdir="/abs"
             )
+        # "." / whitespace would drop the file straight into the shared acp/ root.
+        for bad in (".", "  ", " . "):
+            with pytest.raises(ValidationError):
+                ACPFileSecretSpec(
+                    secret_name="X", filename="x.json", env_var="X", subdir=bad
+                )
