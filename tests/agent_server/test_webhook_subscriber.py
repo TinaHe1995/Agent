@@ -427,7 +427,7 @@ class TestWebhookSubscriberPostEvents:
             spec=webhook_spec,
         )
         subscriber.queue = [
-            _EventWithTrickyTypes(tags={"a", "b"}, secret=SecretStr("shh"))
+            _EventWithTrickyTypes(tags={"a", "b"}, secret=SecretStr("shh"))  # type: ignore[assignment]
         ]
 
         await subscriber._post_events()
