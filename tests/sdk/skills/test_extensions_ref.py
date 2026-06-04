@@ -121,23 +121,21 @@ assert PUBLIC_SKILLS_REF == "", (
 # ---------------------------------------------------------------------------
 
 
-def _seed_pinned_cache(
+def _seed_cache(
     cache: dict,
     lock: threading.Lock,
     cache_key: tuple,
     skills: list,
     *,
-    ttl: float,
-    is_pinned: bool,
+    timestamp: float,
 ) -> None:
     """Seed the public-skills cache with a synthetic entry."""
-    timestamp = time.monotonic() - ttl - 1  # guarantee TTL is already expired
     with lock:
-        cache[cache_key] = (timestamp, skills, is_pinned)
+        cache[cache_key] = (timestamp, skills)
 
 
 def test_pinned_cache_entry_never_expires():
-    """A cached entry with is_pinned=True is returned even after the TTL expires.
+    """A pinned entry (timestamp=inf) is returned even after the TTL would have elapsed.
 
     This verifies that immutable refs (tags, commit SHAs) do not trigger
     remote polling once their skills have been loaded once.
@@ -145,7 +143,6 @@ def test_pinned_cache_entry_never_expires():
     from openhands.sdk.skills.skill import (
         _PUBLIC_SKILLS_CACHE,
         _PUBLIC_SKILLS_CACHE_LOCK,
-        _PUBLIC_SKILLS_CACHE_TTL_SECONDS,
         Skill,
         _invalidate_public_skills_cache,
         load_public_skills,
@@ -155,13 +152,12 @@ def test_pinned_cache_entry_never_expires():
     cache_key = ("https://github.com/OpenHands/extensions", "v1.0.0", None)
 
     _invalidate_public_skills_cache()
-    _seed_pinned_cache(
+    _seed_cache(
         _PUBLIC_SKILLS_CACHE,
         _PUBLIC_SKILLS_CACHE_LOCK,
         cache_key,
         [fake_skill],
-        ttl=_PUBLIC_SKILLS_CACHE_TTL_SECONDS,
-        is_pinned=True,
+        timestamp=float("inf"),
     )
 
     with patch("openhands.sdk.skills.skill.update_skills_repository") as mock_update:
@@ -173,7 +169,7 @@ def test_pinned_cache_entry_never_expires():
 
 
 def test_mutable_cache_entry_expires_after_ttl():
-    """A non-pinned cache entry IS re-fetched once the TTL has passed."""
+    """A branch entry (finite timestamp) IS re-fetched once the TTL has passed."""
     from openhands.sdk.skills.skill import (
         _PUBLIC_SKILLS_CACHE,
         _PUBLIC_SKILLS_CACHE_LOCK,
@@ -187,13 +183,12 @@ def test_mutable_cache_entry_expires_after_ttl():
     cache_key = ("https://github.com/OpenHands/extensions", "main", None)
 
     _invalidate_public_skills_cache()
-    _seed_pinned_cache(
+    _seed_cache(
         _PUBLIC_SKILLS_CACHE,
         _PUBLIC_SKILLS_CACHE_LOCK,
         cache_key,
         [fake_skill],
-        ttl=_PUBLIC_SKILLS_CACHE_TTL_SECONDS,
-        is_pinned=False,
+        timestamp=time.monotonic() - _PUBLIC_SKILLS_CACHE_TTL_SECONDS - 1,
     )
 
     with patch("openhands.sdk.skills.skill.update_skills_repository") as mock_update:

@@ -940,11 +940,13 @@ DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
 # (git fetch + parse ~40 md files ≈ 1s). The cache short-circuits repeated calls
 # within the TTL while still picking up new skills within a minute.
 #
-# Cache value: (timestamp, skills, is_pinned)
-# When is_pinned is True (repo is at a tag or commit SHA), the entry never
-# expires — immutable refs never change so there is no reason to re-fetch.
+# Cache value: (timestamp, skills)
+# For mutable refs (branches), timestamp is time.monotonic() at write time and
+# the entry expires after _PUBLIC_SKILLS_CACHE_TTL_SECONDS.
+# For immutable refs (tags, commit SHAs), timestamp is float("inf") so the
+# TTL check is never satisfied and the entry lives for the process lifetime.
 _PUBLIC_SKILLS_CACHE: dict[
-    tuple[str, str, str | None], tuple[float, list["Skill"], bool]
+    tuple[str, str, str | None], tuple[float, list["Skill"]]
 ] = {}
 _PUBLIC_SKILLS_CACHE_TTL_SECONDS = 60.0
 _PUBLIC_SKILLS_CACHE_LOCK = threading.Lock()
@@ -1060,13 +1062,11 @@ def load_public_skills(
     cache_key = (repo_url, ref, marketplace_path)
     with _PUBLIC_SKILLS_CACHE_LOCK:
         cached = _PUBLIC_SKILLS_CACHE.get(cache_key)
-        if cached is not None:
-            _, cached_skills, is_pinned = cached
-            if (
-                is_pinned
-                or time.monotonic() - cached[0] < _PUBLIC_SKILLS_CACHE_TTL_SECONDS
-            ):
-                return list(cached_skills)
+        if (
+            cached is not None
+            and time.monotonic() - cached[0] < _PUBLIC_SKILLS_CACHE_TTL_SECONDS
+        ):
+            return list(cached[1])
 
     all_skills: list[Skill] = []
     is_pinned = False
@@ -1158,12 +1158,9 @@ def load_public_skills(
     # Only cache non-empty results so transient errors don't poison the cache
     # for the full TTL window.
     if all_skills:
+        timestamp = float("inf") if is_pinned else time.monotonic()
         with _PUBLIC_SKILLS_CACHE_LOCK:
-            _PUBLIC_SKILLS_CACHE[cache_key] = (
-                time.monotonic(),
-                list(all_skills),
-                is_pinned,
-            )
+            _PUBLIC_SKILLS_CACHE[cache_key] = (timestamp, list(all_skills))
 
     return all_skills
 
