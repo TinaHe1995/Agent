@@ -411,6 +411,9 @@ class TestWebhookSubscriberPostEvents:
         """
         import json as _json
 
+        # Test event with types that model_dump() leaves non-JSON-serializable.
+        # Note: deliberately not a ConversationEvent; we only care about serialization
+        # of pydantic models with tricky field types for the webhook POST payload.
         class _EventWithTrickyTypes(BaseModel):
             tags: set[str]
             secret: SecretStr
@@ -426,6 +429,7 @@ class TestWebhookSubscriberPostEvents:
             service=mock_event_service,
             spec=webhook_spec,
         )
+        # Deliberately assign non-ConversationEvent for regression test.
         subscriber.queue = [
             _EventWithTrickyTypes(tags={"a", "b"}, secret=SecretStr("shh"))  # type: ignore[assignment]
         ]
