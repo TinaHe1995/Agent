@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
 
 from acp.client.connection import ClientSideConnection
 from acp.exceptions import RequestError as ACPRequestError
@@ -158,7 +158,7 @@ _ENV_CONFLICT_MAP: dict[str, frozenset[str]] = {
 # same redaction applies there.  Eight trailing characters give enough
 # entropy to correlate across log lines for one conversation but not enough
 # to brute-force the full id.
-_SESSION_ID_LOG_SUFFIX_LEN: int = 8
+_SESSION_ID_LOG_SUFFIX_LEN: Final[int] = 8
 
 
 def _fingerprint_session_id(session_id: str | None) -> str:
