@@ -375,6 +375,18 @@ MODELS = {
             "top_p": 0.95,
         },
     },
+    # Alternative route via OpenRouter (free tier):
+    # https://openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b:free
+    # Backed by the `nemotron-3-ultra-550b-a55b-or` model on the LiteLLM proxy.
+    "nemotron-3-ultra-550b-a55b-or": {
+        "id": "nemotron-3-ultra-550b-a55b-or",
+        "display_name": "NVIDIA Nemotron-3 Ultra 550B (OpenRouter)",
+        "llm_config": {
+            "model": "litellm_proxy/nemotron-3-ultra-550b-a55b-or",
+            "temperature": 1.0,
+            "top_p": 0.95,
+        },
+    },
     "converse-nemotron-super-3-120b": {
         "id": "converse-nemotron-super-3-120b",
         "display_name": "NVIDIA Converse Nemotron Super 3 120B",
