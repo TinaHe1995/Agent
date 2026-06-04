@@ -1234,11 +1234,9 @@ class ACPAgentSettings(AgentSettingsBase):
         Raises ``ValueError`` when :attr:`acp_server` is ``'custom'`` but
         no explicit command is set (there is no sensible default to fall back to).
 
-        The resolved command is then routed through
-        :meth:`_prefer_pinned_binary`, which rewrites an ``npx``-based launch
-        command to the pinned, pre-installed CLI binary when one is available on
-        ``PATH`` (the agent-server image case). It is a no-op for local dev,
-        custom servers, and already-resolved binary commands.
+        The result is routed through :meth:`_prefer_pinned_binary`, which swaps
+        an ``npx`` command for the pinned binary when it is on ``PATH`` (a no-op
+        otherwise).
         """
         if self.acp_command:
             command = list(self.acp_command)
@@ -1275,24 +1273,15 @@ class ACPAgentSettings(AgentSettingsBase):
         return command[idx], list(command[idx + 1 :])
 
     def _prefer_pinned_binary(self, command: list[str]) -> list[str]:
-        """Rewrite an ``npx`` launch command to the pinned, pre-installed binary.
+        """Swap an ``npx -y <pkg>`` command for the provider's pinned binary.
 
-        The agent-server image pre-installs each ACP CLI at a fixed version and
-        exposes a wrapper on ``PATH`` (``claude-agent-acp``, ``codex-acp``,
-        ``gemini``). Both the registry default and the explicit ``acp_command``
-        canvas sends are of the form ``npx -y <pkg>``, which downloads
-        npm-latest at spawn time — non-reproducible, requires outbound npm, and
-        drifts from the image pin. When *command* is an ``npx`` invocation of
-        this provider's known package **and** the provider's
-        :attr:`~openhands.sdk.settings.acp_providers.ACPProviderInfo.binary_name`
-        resolves via :func:`shutil.which`, rewrite it to ``[binary_name, *extra]``
-        (preserving trailing args such as gemini's ``--acp``).
-
-        Returns *command* unchanged when there is no pinned binary for the
-        provider (custom servers, forward-compat entries), when *command* is not
-        an ``npx`` invocation of the provider's package (a user-supplied custom
-        binary or a different package), or when the binary is not on ``PATH``
-        (local dev) — so ``npx`` still works everywhere the binary is absent.
+        When *command* is an ``npx`` invocation of this provider's package and
+        the provider's ``binary_name`` resolves via :func:`shutil.which`, return
+        ``[binary_name, *extra]`` (preserving trailing args like gemini's
+        ``--acp``) — running the agent-server image's pinned wrapper instead of
+        downloading npm-latest. Returned unchanged otherwise: no pinned binary
+        (custom server), a non-matching/non-npx command, or the binary not on
+        ``PATH`` (local dev).
         """
         info = get_acp_provider(self.acp_server)
         if info is None or info.binary_name is None:

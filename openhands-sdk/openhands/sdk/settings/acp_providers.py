@@ -253,21 +253,15 @@ class ACPProviderInfo:
     """
 
     binary_name: str | None = field(default=None, compare=False)
-    """Name of the pinned, pre-installed CLI binary for this provider, if any.
+    """Pinned, pre-installed CLI binary for this provider (e.g. ``codex-acp``).
 
-    The agent-server Docker image pre-installs the ACP CLIs at a fixed version
-    and exposes thin wrappers on ``PATH`` (``claude-agent-acp``, ``codex-acp``,
-    ``gemini``). When this binary resolves via :func:`shutil.which`,
+    The agent-server image installs the ACP CLIs at a fixed version as ``PATH``
+    wrappers. When this binary resolves via :func:`shutil.which`,
     :meth:`~openhands.sdk.settings.model.ACPAgentSettings.resolve_acp_command`
-    rewrites the provider's ``npx -y <pkg>`` launch command to run the pinned
-    binary directly — reproducible, and free of a runtime npm download — while
-    preserving any trailing args (e.g. gemini's ``--acp``). When the binary is
-    absent (local dev), the ``npx`` command is used unchanged.
-
-    ``None`` for providers without a known pre-installed binary (and implicitly
-    for ``'custom'`` servers, which have no registry entry). Defaults to
-    ``None`` so external callers constructing this dataclass positionally keep
-    working.
+    rewrites the ``npx -y <pkg>`` launch command to run it directly (preserving
+    trailing args like gemini's ``--acp``); otherwise the ``npx`` command is
+    used unchanged. ``None`` for providers with no pinned binary (and ``custom``
+    servers); defaulted so positional construction keeps working.
     """
 
     data_dir_env_var: str | None = None

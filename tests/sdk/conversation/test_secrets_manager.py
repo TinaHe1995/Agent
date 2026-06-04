@@ -6,16 +6,12 @@ from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.secret import SecretSource, StaticSecret
 
 
-# NOTE: these ``SecretSource`` subclasses are defined at *module* level. As a
-# ``DiscriminatedUnionMixin``, every subclass auto-registers globally and is
-# never GC'd (pydantic caches its schema); a subclass defined inside a function
-# has ``<locals>`` in its qualname, which the registry rejects with "Local
-# classes not supported!" the next time any discriminated-union model is
-# validated in the same (xdist) worker — breaking unrelated tests such as
-# ConversationState (de)serialization. Defining them once at module level also
-# avoids the "Duplicate class definition" guard that two same-named function-
-# local classes would trip. See
-# openhands.sdk.utils.models._get_checked_concrete_subclasses.
+# NOTE: module-level on purpose. A function-local ``SecretSource``
+# (DiscriminatedUnionMixin) subclass auto-registers globally and makes the
+# registry raise "Local classes not supported!" on any later discriminated-union
+# validation in the same xdist worker (breaking unrelated ConversationState
+# (de)serialization). Defining each once here also avoids the "Duplicate class
+# definition" guard that two same-named function-local classes would trip.
 class MyTokenSource(SecretSource):
     def get_value(self):
         return "dynamic-token-456"

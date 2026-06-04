@@ -17,12 +17,11 @@ from openhands.sdk.workspace import RemoteWorkspace
 from .conftest import create_mock_http_client
 
 
-# NOTE: module-level (not function-local) on purpose. ``SecretSource`` is a
-# ``DiscriminatedUnionMixin``; a subclass defined inside a function has
-# ``<locals>`` in its qualname and, once registered, makes the global registry
-# raise "Local classes not supported!" for any later discriminated-union
-# validation in the same xdist worker (e.g. an unrelated ConversationState
-# deserialization). See openhands.sdk.utils.models._get_checked_concrete_subclasses.
+# NOTE: module-level on purpose. A function-local ``SecretSource``
+# (DiscriminatedUnionMixin) subclass auto-registers globally and makes the
+# registry raise "Local classes not supported!" on any later discriminated-union
+# validation in the same xdist worker (e.g. unrelated ConversationState
+# deserialization).
 class _DynamicTokenSource(SecretSource):
     def get_value(self):
         return "dynamic-token-789"

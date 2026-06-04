@@ -5813,16 +5813,12 @@ class TestACPSecretsEnvInjection:
         assert not [w for w in caught if "acp_env" in str(w.message)]
 
 
-# NOTE: these ``SecretSource`` subclasses are defined at *module* level, not
-# inside the test methods that use them. ``SecretSource`` is a
-# ``DiscriminatedUnionMixin``: every subclass auto-registers in a global
-# registry, and pydantic caches its core schema (so a once-defined subclass is
-# never GC'd). A subclass defined inside a function has ``<locals>`` in its
-# qualname, which the registry rejects with "Local classes not supported!" the
-# next time *any* discriminated-union model is validated in that worker — e.g.
-# an unrelated ``ConversationState.create()`` in another test file sharing the
-# xdist worker. Module-level (importable) subclasses avoid that cross-test
-# pollution. See openhands.sdk.utils.models._get_checked_concrete_subclasses.
+# NOTE: module-level on purpose. A ``SecretSource`` (DiscriminatedUnionMixin)
+# subclass defined inside a function auto-registers globally and, having
+# ``<locals>`` in its qualname, makes the registry raise "Local classes not
+# supported!" for any later discriminated-union validation in the same xdist
+# worker (e.g. an unrelated ConversationState deserialization). Module-level
+# (importable) subclasses avoid that pollution.
 class _FakeLookupSecret(SecretSource):
     """A ``LookupSecret``-shaped source whose ``get_value()`` returns a literal."""
 
@@ -5953,9 +5949,6 @@ class TestACPSecretRegistryEnvInjection:
         This is the wire shape canvas actually sends: a ``LookupSecret``
         whose ``get_value()`` fetches over HTTP from the agent-server's
         ``/api/settings/secrets/{name}`` endpoint.
-
-        ``_FakeLookupSecret`` is module-level (see the note above the test
-        class) so it does not pollute the global discriminated-union registry.
         """
         agent = _make_agent()
         env = self._run_start_capturing_env(
@@ -5983,9 +5976,6 @@ class TestACPSecretRegistryEnvInjection:
         LookupSecret performs an HTTP request in production; calling it for
         a key that ``acp_env`` is about to override wastes a round-trip and
         can emit spurious lookup-failure warnings.
-
-        ``_CountingLookupSecret`` is module-level (see the note above the test
-        class) so it does not pollute the global discriminated-union registry.
         """
         secret = _CountingLookupSecret(stored_value="from-registry")
         agent = _make_agent(acp_env={"GITHUB_TOKEN": "from-acp-env"})
@@ -6041,9 +6031,6 @@ class TestACPSecretRegistryEnvInjection:
         that ``None`` as "skip", so a transient secret-source failure
         (network blip, expired token) doesn't take the whole ACP
         subprocess down.
-
-        ``_BrokenSecret`` is module-level (see the note above the test class)
-        so it does not pollute the global discriminated-union registry.
         """
         agent = _make_agent()
         env = self._run_start_capturing_env(
