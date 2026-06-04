@@ -7492,4 +7492,3 @@ class TestACPStepMasksPersistedTurn:
         )
         assert "supersecret" not in finish.action.message
         assert finish.action.message == "the value is <secret-hidden> now"
-
