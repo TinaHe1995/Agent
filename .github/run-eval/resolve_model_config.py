@@ -388,7 +388,6 @@ MODELS = {
             "top_p": 0.95,
         },
     },
-
     "step-3.7-flash": {
         "id": "step-3.7-flash",
         "display_name": "Step 3.7 Flash",
