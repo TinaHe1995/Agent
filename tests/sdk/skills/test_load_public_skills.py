@@ -964,3 +964,53 @@ def test_load_public_skills_does_not_cache_empty_results(mock_repo_dir, tmp_path
     assert first == []
     assert {s.name for s in second} == {"git", "docker", "testing"}
     assert update_mock.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC_SKILLS_PATH tests
+# ---------------------------------------------------------------------------
+
+
+def test_update_skills_repository_bundled_path_skips_git(tmp_path, monkeypatch):
+    """When PUBLIC_SKILLS_PATH points at an existing dir, git is never touched."""
+    bundled = tmp_path / "bundled-skills"
+    bundled.mkdir()
+    monkeypatch.setenv("PUBLIC_SKILLS_PATH", str(bundled))
+
+    with patch("openhands.sdk.skills.utils.try_cached_clone_or_update") as mock_git:
+        result = update_skills_repository("https://example.com/repo", "main", tmp_path)
+
+    assert result == bundled
+    mock_git.assert_not_called()
+
+
+def test_update_skills_repository_bundled_path_missing_returns_none(
+    tmp_path, monkeypatch
+):
+    """When PUBLIC_SKILLS_PATH points at a non-existent dir, returns None."""
+    monkeypatch.setenv("PUBLIC_SKILLS_PATH", str(tmp_path / "does-not-exist"))
+
+    with patch("openhands.sdk.skills.utils.try_cached_clone_or_update") as mock_git:
+        result = update_skills_repository("https://example.com/repo", "main", tmp_path)
+
+    assert result is None
+    mock_git.assert_not_called()
+
+
+def test_load_public_skills_with_public_skills_path(
+    mock_repo_dir, tmp_path, monkeypatch
+):
+    """PUBLIC_SKILLS_PATH loads skills from the local dir with no git calls."""
+    monkeypatch.setenv("PUBLIC_SKILLS_PATH", str(mock_repo_dir))
+
+    with (
+        patch("openhands.sdk.skills.utils.try_cached_clone_or_update") as mock_git,
+        patch(
+            "openhands.sdk.skills.skill.get_skills_cache_dir",
+            return_value=tmp_path,
+        ),
+    ):
+        skills = load_public_skills()
+
+    assert {s.name for s in skills} == {"git", "docker", "testing"}
+    mock_git.assert_not_called()

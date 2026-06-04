@@ -401,6 +401,11 @@ def update_skills_repository(
     Uses the shared git caching infrastructure from openhands.sdk.git.cached_repo.
     When updating, performs: fetch -> checkout ref -> reset --hard to origin/ref.
 
+    When ``PUBLIC_SKILLS_PATH`` is set in the environment, git is skipped entirely
+    and that directory is returned directly. This allows pre-bundled skill
+    distributions (e.g. Docker images, offline deployments) to avoid network
+    access at startup.
+
     Args:
         repo_url: URL of the skills repository.
         branch: Branch name to checkout and track.
@@ -409,6 +414,17 @@ def update_skills_repository(
     Returns:
         Path to the local repository if successful, None otherwise.
     """
+    bundled_path = os.environ.get("PUBLIC_SKILLS_PATH")
+    if bundled_path:
+        path = Path(bundled_path)
+        if path.exists():
+            return path
+        logger.warning(
+            f"PUBLIC_SKILLS_PATH='{bundled_path}' does not exist; "
+            "no public skills will be loaded"
+        )
+        return None
+
     repo_path = cache_dir / "public-skills"
     return try_cached_clone_or_update(repo_url, repo_path, ref=branch, update=True)
 

@@ -928,9 +928,10 @@ def load_project_skills(work_dir: str | Path) -> list[Skill]:
 
 
 # Public skills repository configuration
+# EXTENSIONS_REF: override the branch (default: "main"); used by eval workflows.
+# PUBLIC_SKILLS_PATH: point at a pre-populated local directory and skip git
+#   entirely — useful for Docker images and offline/air-gapped deployments.
 PUBLIC_SKILLS_REPO = "https://github.com/OpenHands/extensions"
-# Allow overriding the branch via EXTENSIONS_REF environment variable
-# (used by evaluation/benchmarks workflows to test feature branches)
 PUBLIC_SKILLS_BRANCH = os.environ.get("EXTENSIONS_REF", "main")
 DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
 
