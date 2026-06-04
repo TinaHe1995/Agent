@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
@@ -1263,14 +1264,14 @@ class ACPAgentSettings(AgentSettingsBase):
         ``None`` when *command* is not an ``npx`` invocation (e.g. an
         already-resolved binary path), so callers leave it untouched.
         """
-        if len(command) < 2 or command[0] != "npx":
+        if not command or command[0] != "npx":
             return None
-        idx = 1
-        while idx < len(command) and command[idx].startswith("-"):
-            idx += 1
-        if idx >= len(command):
+        # Drop leading npx flags (-y, --yes, ...) to find the package name.
+        rest = list(itertools.dropwhile(lambda arg: arg.startswith("-"), command[1:]))
+        if not rest:
             return None
-        return command[idx], list(command[idx + 1 :])
+        package, *extra_args = rest
+        return package, extra_args
 
     def _prefer_pinned_binary(self, command: list[str]) -> list[str]:
         """Swap an ``npx -y <pkg>`` command for the provider's pinned binary.
@@ -1286,16 +1287,17 @@ class ACPAgentSettings(AgentSettingsBase):
         info = get_acp_provider(self.acp_server)
         if info is None or info.binary_name is None:
             return command
+
         default_parsed = self._parse_npx_invocation(info.default_command)
         actual_parsed = self._parse_npx_invocation(command)
         if default_parsed is None or actual_parsed is None:
             return command
+
         default_pkg, _ = default_parsed
         actual_pkg, extra = actual_parsed
-        if actual_pkg != default_pkg:
+        if actual_pkg != default_pkg or shutil.which(info.binary_name) is None:
             return command
-        if shutil.which(info.binary_name) is None:
-            return command
+
         return [info.binary_name, *extra]
 
     def create_agent(self) -> ACPAgent:
