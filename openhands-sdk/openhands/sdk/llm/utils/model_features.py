@@ -54,6 +54,9 @@ class ModelFeatures:
 
 LITELLM_PROXY_PREFIX = "litellm_proxy/"
 
+# Common deployment path prefixes used in LiteLLM proxy configurations
+DEPLOYMENT_PREFIXES = ("prod/", "dev/", "staging/", "test/")
+
 
 @cache
 def _normalized_supported_openai_params(model: str | None) -> frozenset[str]:
@@ -64,6 +67,12 @@ def _normalized_supported_openai_params(model: str | None) -> frozenset[str]:
     normalized = model.strip().lower()
     if normalized.startswith(LITELLM_PROXY_PREFIX):
         normalized = normalized.removeprefix(LITELLM_PROXY_PREFIX)
+
+    # Strip deployment prefixes (e.g., "prod/", "dev/", "staging/", "test/")
+    for prefix in DEPLOYMENT_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized.removeprefix(prefix)
+            break
 
     params = get_supported_openai_params(
         model=normalized,
@@ -101,7 +110,13 @@ PROMPT_CACHE_MODELS: list[str] = [
     "claude-sonnet-4-6",
     "claude-opus-4-5",
     "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
+    # Gemini uses the same cache_control marker format. LiteLLM handles
+    # Vertex/Gemini context-cache creation when these markers are present.
+    "gemini-2.5",
+    "gemini-3",
 ]
 
 # Models that support a top-level prompt_cache_retention parameter
@@ -169,8 +184,11 @@ FORCE_STRING_SERIALIZER_MODELS: list[str] = [
 SEND_REASONING_CONTENT_MODELS: list[str] = [
     "kimi-k2-thinking",
     "kimi-k2.5",
+    "kimi-k2.6",
     "openrouter/minimax-m2",  # MiniMax-M2 via OpenRouter (interleaved thinking)
     "deepseek/deepseek-reasoner",
+    "deepseek/deepseek-v4-pro",  # Dual-mode (Thinking/Non-Thinking)
+    "deepseek/deepseek-v4-flash",  # Dual-mode (Thinking/Non-Thinking)
 ]
 
 

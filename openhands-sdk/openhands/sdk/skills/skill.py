@@ -2,6 +2,9 @@ import io
 import json
 import os
 import re
+import threading
+import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal, Union
 from xml.sax.saxutils import escape as xml_escape
@@ -32,6 +35,7 @@ from openhands.sdk.skills.utils import (
     validate_skill_name,
 )
 from openhands.sdk.utils import DEFAULT_TRUNCATE_NOTICE, maybe_truncate
+from openhands.sdk.utils.path import to_posix_path
 
 
 logger = get_logger(__name__)
@@ -51,6 +55,7 @@ class SkillInfo(BaseModel):
     source: str | None = None
     description: str | None = None
     is_agentskills_format: bool = False
+    disable_model_invocation: bool = False
 
 
 class SkillResources(BaseModel):
@@ -167,6 +172,10 @@ class Skill(BaseModel):
     MAX_DESCRIPTION_LENGTH: ClassVar[int] = 1024
 
     # AgentSkills standard fields (https://agentskills.io/specification)
+    version: str = Field(
+        default="1.0.0",
+        description="Skill version (AgentSkills standard field).",
+    )
     description: str | None = Field(
         default=None,
         description=(
@@ -201,6 +210,13 @@ class Skill(BaseModel):
         description=(
             "List of pre-approved tools for this skill. "
             "AgentSkills standard field (parsed from space-delimited string)."
+        ),
+    )
+    disable_model_invocation: bool = Field(
+        default=False,
+        description=(
+            "Whether this skill can only be activated by trigger matching and "
+            "should not be advertised to the model for direct invocation."
         ),
     )
     resources: SkillResources | None = Field(
@@ -283,7 +299,7 @@ class Skill(BaseModel):
         """
         path = Path(path) if isinstance(path, str) else path
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             file_content = f.read()
 
         if path.name.lower() == "skill.md":
@@ -364,7 +380,7 @@ class Skill(BaseModel):
         if skill_base_dir is not None:
             skill_name = cls.PATH_TO_THIRD_PARTY_SKILL_NAME.get(
                 path.name.lower()
-            ) or str(path.relative_to(skill_base_dir).with_suffix(""))
+            ) or to_posix_path(path.relative_to(skill_base_dir).with_suffix(""))
         else:
             skill_name = path.stem
 
@@ -412,12 +428,17 @@ class Skill(BaseModel):
         allowed_tools_value = metadata_dict.get(
             "allowed-tools", metadata_dict.get("allowed_tools")
         )
+        disable_model_invocation_value = metadata_dict.get(
+            "disable-model-invocation",
+            metadata_dict.get("disable_model_invocation"),
+        )
         agentskills_fields = {
             "description": metadata_dict.get("description"),
             "license": metadata_dict.get("license"),
             "compatibility": metadata_dict.get("compatibility"),
             "metadata": metadata_dict.get("metadata"),
             "allowed_tools": allowed_tools_value,
+            "disable_model_invocation": disable_model_invocation_value,
         }
         # Remove None values to avoid passing unnecessary kwargs
         agentskills_fields = {
@@ -447,7 +468,7 @@ class Skill(BaseModel):
             return Skill(
                 name=agent_name,
                 content=content,
-                source=str(path),
+                source=to_posix_path(path),
                 trigger=TaskTrigger(triggers=keywords),
                 inputs=inputs,
                 mcp_tools=mcp_tools,
@@ -460,7 +481,7 @@ class Skill(BaseModel):
             return Skill(
                 name=agent_name,
                 content=content,
-                source=str(path),
+                source=to_posix_path(path),
                 trigger=KeywordTrigger(keywords=keywords),
                 mcp_tools=mcp_tools,
                 resources=resources,
@@ -472,7 +493,7 @@ class Skill(BaseModel):
             return Skill(
                 name=agent_name,
                 content=content,
-                source=str(path),
+                source=to_posix_path(path),
                 trigger=None,
                 mcp_tools=mcp_tools,
                 resources=resources,
@@ -493,7 +514,7 @@ class Skill(BaseModel):
             return Skill(
                 name=skill_name,
                 content=file_content,
-                source=str(path),
+                source=to_posix_path(path),
                 trigger=None,
             )
 
@@ -626,6 +647,7 @@ class Skill(BaseModel):
             source=self.source,
             description=self.description,
             is_agentskills_format=self.is_agentskills_format,
+            disable_model_invocation=self.disable_model_invocation,
         )
 
     def render_content(
@@ -729,6 +751,10 @@ def load_user_skills() -> list[Skill]:
     with earlier entries in USER_SKILLS_DIRS taking precedence for duplicate
     names.
 
+    Also loads enabled installed skills from ~/.openhands/skills/installed/
+    (managed via install_skill/uninstall_skill). Installed skills have lower
+    precedence than user skills from the directories above.
+
     Returns:
         List of Skill objects loaded from user directories.
         Returns empty list if no skills found or loading fails.
@@ -737,6 +763,17 @@ def load_user_skills() -> list[Skill]:
     seen_names: set[str] = set()
 
     _load_and_merge_from_dirs(USER_SKILLS_DIRS, seen_names, all_skills, "user skills")
+
+    # Load enabled installed skills (lower precedence than user skills)
+    try:
+        from openhands.sdk.skills.installed import load_installed_skills
+
+        for skill in load_installed_skills():
+            if skill.name not in seen_names:
+                seen_names.add(skill.name)
+                all_skills.append(skill)
+    except Exception as e:
+        logger.warning(f"Failed to load installed skills: {e}")
 
     logger.debug(
         f"Loaded {len(all_skills)} user skills: {[s.name for s in all_skills]}"
@@ -897,6 +934,26 @@ PUBLIC_SKILLS_REPO = "https://github.com/OpenHands/extensions"
 PUBLIC_SKILLS_BRANCH = os.environ.get("EXTENSIONS_REF", "main")
 DEFAULT_MARKETPLACE_PATH = "marketplaces/default.json"
 
+# Process-level cache for load_public_skills. Conversation creation re-validates
+# AgentContext several times and each validation re-runs load_public_skills
+# (git fetch + parse ~40 md files ≈ 1s). The cache short-circuits repeated calls
+# within the TTL while still picking up new skills within a minute.
+_PUBLIC_SKILLS_CACHE: dict[
+    tuple[str, str, str | None], tuple[float, list["Skill"]]
+] = {}
+_PUBLIC_SKILLS_CACHE_TTL_SECONDS = 60.0
+_PUBLIC_SKILLS_CACHE_LOCK = threading.Lock()
+
+
+def _invalidate_public_skills_cache() -> None:
+    """Clear the in-memory public-skills cache.
+
+    Called by ``sync_public_skills`` so a forced refresh re-parses immediately
+    instead of waiting for the TTL.
+    """
+    with _PUBLIC_SKILLS_CACHE_LOCK:
+        _PUBLIC_SKILLS_CACHE.clear()
+
 
 def load_marketplace_skill_names(
     repo_path: Path, marketplace_path: str
@@ -921,11 +978,13 @@ def load_marketplace_skill_names(
         return None
 
     try:
-        with open(marketplace_file) as f:
+        with open(marketplace_file, encoding="utf-8") as f:
             data = json.load(f)
 
         # Use Marketplace model for validation and parsing
-        marketplace = Marketplace.model_validate({**data, "path": str(repo_path)})
+        marketplace = Marketplace.model_validate(
+            {**data, "path": to_posix_path(repo_path)}
+        )
 
         skill_names = {plugin.name for plugin in marketplace.plugins}
 
@@ -989,6 +1048,15 @@ def load_public_skills(
         >>> # Use with AgentContext
         >>> context = AgentContext(skills=public_skills)
     """
+    cache_key = (repo_url, branch, marketplace_path)
+    with _PUBLIC_SKILLS_CACHE_LOCK:
+        cached = _PUBLIC_SKILLS_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and time.monotonic() - cached[0] < _PUBLIC_SKILLS_CACHE_TTL_SECONDS
+        ):
+            return list(cached[1])
+
     all_skills = []
 
     try:
@@ -1069,9 +1137,14 @@ def load_public_skills(
     except Exception as e:
         logger.warning(f"Failed to load public skills from {repo_url}: {str(e)}")
 
-    logger.info(
-        f"Loaded {len(all_skills)} public skills: {[s.name for s in all_skills]}"
-    )
+    logger.info("Loaded %d public skills", len(all_skills))
+
+    # Only cache non-empty results so transient errors don't poison the cache
+    # for the full TTL window.
+    if all_skills:
+        with _PUBLIC_SKILLS_CACHE_LOCK:
+            _PUBLIC_SKILLS_CACHE[cache_key] = (time.monotonic(), list(all_skills))
+
     return all_skills
 
 
@@ -1131,6 +1204,24 @@ def load_available_skills(
     return available
 
 
+def merge_skills_by_name(
+    primary: Iterable[Skill], secondary: Iterable[Skill]
+) -> list[Skill]:
+    """Merge two skill collections by name.
+
+    ``primary`` skills are authoritative: they take precedence on name conflicts
+    and keep their order. Each ``secondary`` skill is appended only when its name
+    is not already provided by ``primary``.
+    """
+    merged = list(primary)
+    seen = {skill.name for skill in merged}
+    for skill in secondary:
+        if skill.name not in seen:
+            seen.add(skill.name)
+            merged.append(skill)
+    return merged
+
+
 def to_prompt(skills: list[Skill], max_description_length: int = 1024) -> str:
     """Generate XML prompt block for available skills.
 
@@ -1142,7 +1233,9 @@ def to_prompt(skills: list[Skill], max_description_length: int = 1024) -> str:
         max_description_length: Maximum length for descriptions (default 1024)
 
     Returns:
-        XML string in AgentSkills format with name, description, and location
+        XML string in AgentSkills format with name and description. The
+        `<location>` field is intentionally omitted so the agent cannot
+        bypass the `invoke_skill` tool by reading the file directly.
 
     Example:
         >>> skills = [Skill(name="pdf-tools", content="...",
@@ -1153,7 +1246,6 @@ def to_prompt(skills: list[Skill], max_description_length: int = 1024) -> str:
           <skill>
             <name>pdf-tools</name>
             <description>Extract text from PDF files.</description>
-            <location>/path/to/skill</location>
           </skill>
         </available_skills>
     """
@@ -1191,23 +1283,22 @@ def to_prompt(skills: list[Skill], max_description_length: int = 1024) -> str:
             description = description[:max_description_length]
 
         if total_truncated > 0:
-            truncation_msg = f"... [{total_truncated} characters truncated"
-            if skill.source:
-                truncation_msg += f". View {skill.source} for complete information"
-            truncation_msg += "]"
+            truncation_msg = (
+                f"... [{total_truncated} characters truncated. "
+                f'Call invoke_skill(name="{skill.name}") to load the full skill]'
+            )
             description = description + truncation_msg
 
         # Escape XML special characters using standard library
         description = xml_escape(description.strip())
         name = xml_escape(skill.name.strip())
 
-        # Build skill element following AgentSkills format from skills-ref
+        # Build skill element. Note: <location> is intentionally omitted so
+        # the agent cannot bypass `invoke_skill` by reading the file directly;
+        # `invoke_skill` is the only supported invocation path.
         lines.append("  <skill>")
         lines.append(f"    <name>{name}</name>")
         lines.append(f"    <description>{description}</description>")
-        if skill.source:
-            source = xml_escape(skill.source.strip())
-            lines.append(f"    <location>{source}</location>")
         lines.append("  </skill>")
 
     lines.append("</available_skills>")
