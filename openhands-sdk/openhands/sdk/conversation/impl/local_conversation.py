@@ -318,6 +318,11 @@ class LocalConversation(BaseConversation):
                 fill_secrets: dict[str, SecretValue] = {}
                 for name, secret in ctx_secrets.items():
                     existing = existing_sources.get(name)
+                    # Refill only when absent, or when a StaticSecret lost its
+                    # value to redacted/no-cipher serialization (value is None).
+                    # Other SecretSource types (e.g. LookupSecret) are left as-is
+                    # even with a None value — that is their resolved state, not
+                    # a stale placeholder to overwrite.
                     if existing is None or (
                         isinstance(existing, StaticSecret) and existing.value is None
                     ):
