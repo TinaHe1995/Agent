@@ -1766,25 +1766,18 @@ class ACPAgent(AgentBase):
         advertisement: their values are written to disk, not injected as env
         vars, so advertising them as available env vars would mislead the agent.
         """
-        secret_infos = state.secret_registry.get_secret_infos()
-        agent_context = self.agent_context
+        # Advertise from state.secret_registry alone — it now holds
+        # agent_context.secrets too (seeded at conversation init, with their
+        # descriptions), so it is the single source for the <CUSTOM_SECRETS>
+        # block. Reserved file-content secrets are written to disk, not injected
+        # as env vars, so drop them from the advertisement.
         file_secret_names = self._present_file_secret_names(state)
-        if file_secret_names:
-            secret_infos = [
-                info
-                for info in secret_infos
-                if info.get("name") not in file_secret_names
-            ]
-            if agent_context is not None and agent_context.secrets:
-                agent_context = agent_context.model_copy(
-                    update={
-                        "secrets": {
-                            name: secret
-                            for name, secret in agent_context.secrets.items()
-                            if name not in file_secret_names
-                        }
-                    }
-                )
+        secret_infos = [
+            info
+            for info in state.secret_registry.get_secret_infos()
+            if info.get("name") not in file_secret_names
+        ]
+        agent_context = self.agent_context
         if agent_context is None:
             # No caller-supplied context. Only synthesize an empty one for the
             # renderer if we actually have a registry-secret advertisement to
@@ -1794,9 +1787,12 @@ class ACPAgent(AgentBase):
             # suppress.
             if not secret_infos:
                 return None
-            return AgentContext(current_datetime=None).to_acp_prompt_context(
-                additional_secret_infos=secret_infos
-            )
+            agent_context = AgentContext(current_datetime=None)
+        elif agent_context.secrets:
+            # The registry already carries these (and their descriptions), so
+            # clear the agent_context copy to advertise from the registry alone
+            # rather than re-merging a redundant second source.
+            agent_context = agent_context.model_copy(update={"secrets": {}})
         return agent_context.to_acp_prompt_context(additional_secret_infos=secret_infos)
 
     def _present_file_secret_names(self, state: ConversationState) -> set[str]:
