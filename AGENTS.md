@@ -242,7 +242,7 @@ mkdir -p .pr
 # Human-only PR description fields
 
 The `HUMAN:` section and the `A human has tested these changes.` checkbox in
-PR descriptions are reserved for human maintainers/contributors only. AI agents
+PR descriptions are reserved for human contributors only. AI agents
 MUST NOT add to, edit, move, remove, or check these fields. If the PR description
 CI fails because these fields are missing, empty, or unchecked, stop and ask the
 human user to update them in their own words.
