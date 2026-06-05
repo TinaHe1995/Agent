@@ -628,28 +628,48 @@ def _extract_effective_model(response: Any) -> str | None:
     return None
 
 
-# Vertex/Gemini surfaces an unserved model as e.g.
-#   Publisher Model `projects/<p>/locations/<l>/publishers/google/models/<m>`
-#   was not found or your project does not have access to it.
-# The requested ``acp_model`` and the failing ``<m>`` often differ because
-# gemini-cli resolves ``*-flash`` ids to the account's default flash, so the
-# raw 404 is opaque about why the chosen model was never used.
-_MODEL_ACCESS_ERROR_MARKER = "was not found or your project does not have access"
-_VERTEX_MODEL_RE = re.compile(r"models/([^`'\"\s)]+)")
+# A model gemini-cli resolved on its own surfaces as an unserved-model error
+# whose wording depends on the auth path:
+#   * Vertex/Google direct (vertex-ai auth):
+#       Publisher Model `projects/<p>/.../models/<m>` was not found or your
+#       project does not have access to it.
+#   * LiteLLM proxy (gateway auth, the containerized path):
+#       litellm.BadRequestError: You passed in model=<m>. There are no healthy
+#       deployments for this model ...
+# In both, the failing ``<m>`` is often NOT the requested ``acp_model`` because
+# gemini-cli upgrades ``*-flash`` ids to the account's default flash, so the raw
+# error is opaque about why the chosen model was never used.
+_MODEL_ACCESS_ERROR_MARKERS = (
+    "was not found or your project does not have access",  # Vertex/Google direct
+    "no healthy deployments for this model",  # LiteLLM proxy/gateway
+)
+# Model id the runtime actually sent: Vertex publisher path, then LiteLLM
+# ``model=``. The ``model=`` capture keeps internal dots (``gemini-2.5-flash``);
+# a trailing sentence ``.``/``,`` is stripped by the caller.
+_TRIED_MODEL_RES = (
+    re.compile(r"models/([^`'\"\s)]+)"),
+    re.compile(r"\bmodel=([^\s'\")]+)"),
+)
 
 
 def _maybe_model_access_hint(error_str: str, requested_model: str | None) -> str | None:
-    """Return an actionable hint for a Gemini/Vertex "model not served" error.
+    """Return an actionable hint for a Gemini "model not served" error.
 
     ``None`` when the error isn't that case, so callers can append it only when
-    it adds signal. The hint names the model the runtime actually tried (parsed
-    from the publisher-model path) and, when it differs from ``requested_model``,
-    explains the silent substitution and points at a remedy.
+    it adds signal. Covers both the direct-Vertex 404 and the LiteLLM-proxy
+    "no healthy deployments" error. The hint names the model the runtime
+    actually tried and, when it differs from ``requested_model``, explains the
+    silent substitution and points at a remedy.
     """
-    if _MODEL_ACCESS_ERROR_MARKER not in error_str.lower():
+    low = error_str.lower()
+    if not any(marker in low for marker in _MODEL_ACCESS_ERROR_MARKERS):
         return None
-    match = _VERTEX_MODEL_RE.search(error_str)
-    tried = match.group(1) if match else None
+    tried = None
+    for pattern in _TRIED_MODEL_RES:
+        match = pattern.search(error_str)
+        if match:
+            tried = match.group(1).rstrip(".,")
+            break
     parts = []
     if tried and requested_model and tried != requested_model:
         parts.append(

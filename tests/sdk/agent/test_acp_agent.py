@@ -4897,6 +4897,13 @@ _VERTEX_404 = (
     "access to it."
 )
 
+# LiteLLM proxy (gateway auth, the containerized path) — observed verbatim
+# driving real gemini-cli 0.45.1 through the eval proxy.
+_LITELLM_NO_DEPLOYMENT = (
+    "litellm.BadRequestError: You passed in model=gemini-3-flash. There are no "
+    "healthy deployments for this model"
+)
+
 
 class TestMaybeModelAccessHint:
     def test_names_substitution_when_requested_differs(self):
@@ -4911,6 +4918,24 @@ class TestMaybeModelAccessHint:
         assert hint is not None
         assert "gemini-3-flash" in hint
         assert "not served" in hint
+
+    def test_litellm_no_healthy_deployments_is_covered(self):
+        """The proxy/gateway path surfaces LiteLLM's wording, not Vertex's."""
+        hint = _maybe_model_access_hint(_LITELLM_NO_DEPLOYMENT, "gemini-2.5-flash")
+        assert hint is not None
+        assert "gemini-3-flash" in hint  # parsed from ``model=``
+        assert "gemini-2.5-flash" in hint
+        assert "not the requested" in hint
+
+    def test_litellm_model_id_keeps_internal_dots(self):
+        """``model=gemini-2.5-flash.`` must parse to the full dotted id."""
+        err = (
+            "litellm.BadRequestError: You passed in model=gemini-2.5-flash. "
+            "There are no healthy deployments for this model"
+        )
+        hint = _maybe_model_access_hint(err, "gemini-2.5-flash-lite")
+        assert hint is not None
+        assert "'gemini-2.5-flash'" in hint  # not truncated to 'gemini-2'
 
     def test_returns_none_for_unrelated_error(self):
         assert _maybe_model_access_hint("connection reset by peer", "x") is None
