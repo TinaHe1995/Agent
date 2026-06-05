@@ -1803,13 +1803,14 @@ class ACPAgent(AgentBase):
     def _read_conversation_secret(
         self, state: ConversationState, name: str
     ) -> str | None:
-        """Read a secret value from the canonical channel, then the drain.
+        """Read a secret value, preferring the registry over a direct read.
 
         Prefers ``state.secret_registry`` — the canonical channel, where
-        ``create_request`` lifts ``agent_context.secrets`` on the Python /
-        OpenHands-cloud path and where ``StartConversationRequest.secrets``
-        land — and falls back to ``agent_context.secrets`` for topologies that
-        do not call ``create_request`` (notably canvas-local). See #1022.
+        ``StartConversationRequest.secrets`` land and where ``LocalConversation``
+        seeds ``agent_context.secrets`` at conversation init (covering the
+        canvas-local path that does not call ``create_request``). Falls back to
+        a direct ``agent_context.secrets`` read as a safety net for states not
+        built via ``LocalConversation``. See #1022 / agent-canvas#1039.
         """
         if name in state.secret_registry.secret_sources:
             value = state.secret_registry.get_secret_value(name)
@@ -1900,8 +1901,8 @@ class ACPAgent(AgentBase):
         need a narrower scope can pin ``HOME`` via ``acp_env`` (honoured below)
         or leave isolation off for Gemini.
 
-        Ordering contract: this runs *after* the secret_registry / agent_context
-        drain and the ``acp_env`` update in :meth:`_start_acp_server`, so the
+        Ordering contract: this runs *after* the ``secret_registry`` injection
+        and the ``acp_env`` update in :meth:`_start_acp_server`, so the
         credential vars it inspects (``ANTHROPIC_API_KEY`` /
         ``CLAUDE_CODE_OAUTH_TOKEN``) are already hydrated into ``env``. Calling it
         earlier would misread the active credential and wrongly relocate Claude.
