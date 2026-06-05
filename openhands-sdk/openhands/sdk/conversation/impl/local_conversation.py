@@ -56,6 +56,7 @@ from openhands.sdk.plugin import (
     ResolvedPluginSource,
     fetch_plugin_with_resolution,
 )
+from openhands.sdk.secret import StaticSecret
 from openhands.sdk.security.analyzer import SecurityAnalyzerBase
 from openhands.sdk.security.confirmation_policy import (
     ConfirmationPolicyBase,
@@ -305,11 +306,22 @@ class LocalConversation(BaseConversation):
         self._cipher = cipher
 
         # Lower priority: agent_context.secrets (covers callers that don't go
-        # through create_request(), e.g. canvas / TypeScript).
+        # through create_request(), e.g. canvas / TypeScript). On resume, keep
+        # any already-persisted registry value; only fill missing entries or
+        # values lost to redacted/no-cipher serialization.
         if (ctx := getattr(self.agent, "agent_context", None)) is not None:
             ctx_secrets = getattr(ctx, "secrets", None)
             if ctx_secrets:
-                self.update_secrets(ctx_secrets)
+                existing_sources = self._state.secret_registry.secret_sources
+                fill_secrets: dict[str, SecretValue] = {}
+                for name, secret in ctx_secrets.items():
+                    existing = existing_sources.get(name)
+                    if existing is None or (
+                        isinstance(existing, StaticSecret) and existing.value is None
+                    ):
+                        fill_secrets[name] = secret
+                if fill_secrets:
+                    self.update_secrets(fill_secrets)
 
         # Higher priority: request.secrets overwrites duplicate keys from above.
         if secrets:
