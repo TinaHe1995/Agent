@@ -105,7 +105,7 @@ def test_empty_diff_returns_validated_base() -> None:
 
 
 def test_base_may_be_a_settings_instance() -> None:
-    base = OpenHandsAgentSettings(llm={"model": "gpt"})
+    base = OpenHandsAgentSettings.model_validate({"llm": {"model": "gpt"}})
 
     result = apply_agent_settings_diff(base, {"llm": {"model": "claude"}})
 
@@ -114,7 +114,9 @@ def test_base_may_be_a_settings_instance() -> None:
 
 
 def test_secret_in_base_survives_same_kind_merge() -> None:
-    base = OpenHandsAgentSettings(llm={"model": "gpt", "api_key": "sk-SECRET"})
+    base = OpenHandsAgentSettings.model_validate(
+        {"llm": {"model": "gpt", "api_key": "sk-SECRET"}}
+    )
 
     # diff touches an unrelated field; the base api_key must not be masked away.
     result = apply_agent_settings_diff(base, {"llm": {"model": "claude"}})
