@@ -2036,28 +2036,17 @@ class ACPAgent(AgentBase):
         client.mask = state.secret_registry.mask_secrets_in_output
 
         # Build the subprocess environment. Precedence, highest first:
-        #   acp_env > state.secret_registry > agent_context.secrets
-        #     > os.environ > default_environment
+        #   acp_env > state.secret_registry > os.environ > default_environment
         #
-        # Conversation credentials (the registry and the agent_context drain)
-        # intentionally OVERRIDE ambient os.environ: an explicit per-conversation
-        # / provider secret must win over a same-named variable in the
-        # agent-server's own environment (os.environ is the wrong process for a
-        # remote server). acp_env (deprecated) stays highest.
+        # Conversation credentials intentionally OVERRIDE ambient os.environ: an
+        # explicit per-conversation / provider secret must win over a same-named
+        # variable in the agent-server's own environment. acp_env (deprecated)
+        # stays highest.
         #
-        # Two conversation channels, because an ACP subprocess is a black box we
-        # cannot name-scan per command (unlike the regular agent's bash tool), so
-        # credentials must be injected upfront:
-        #   - state.secret_registry: the canonical channel
-        #     (StartConversationRequest.secrets; also where create_request lifts
-        #     agent_context.secrets on the Python-caller path / OpenHands cloud).
-        #   - agent_context.secrets drain: the ONLY channel that delivers
-        #     agent_context.secrets on paths that do NOT call create_request —
-        #     notably canvas-local, which builds the request in TypeScript and
-        #     relies on the server's create_agent() to fold llm.api_key into
-        #     agent_context.secrets. There is no server-side agent_context.secrets
-        #     → registry lift, so keep this drain until one exists.
-        # On a key collision the registry wins over the drain.
+        # agent_context.secrets are seeded into secret_registry at
+        # LocalConversation.__init__ (lower priority than request.secrets), so
+        # the registry is now the single channel for all secrets including
+        # provider credentials folded in by ACPAgentSettings.create_agent().
         env = default_environment()
         env.update(os.environ)
         if self.acp_env:
@@ -2076,27 +2065,7 @@ class ACPAgent(AgentBase):
         # injected as env vars, so exclude their (large blob) names from the
         # plain env-injection below; materialisation sets only the path env var.
         file_secret_names = self._present_file_secret_names(state)
-        # agent_context.secrets drain (lower precedence than the registry).
-        # Skip keys a higher tier will set — acp_env (applied last) and the
-        # registry (applied next) — to avoid a wasted SecretSource.get_value()
-        # (LookupSecret can make an HTTP request).
-        registry_names = set(state.secret_registry.secret_sources)
-        if self.agent_context and self.agent_context.secrets:
-            for name, secret in self.agent_context.secrets.items():
-                if (
-                    name in self.acp_env
-                    or name in registry_names
-                    or name in file_secret_names
-                ):
-                    continue
-                value = (
-                    secret.get_value()
-                    if isinstance(secret, SecretSource)
-                    else str(secret)
-                )
-                if value:
-                    env[name] = value
-        # state.secret_registry overrides the drain and ambient os.environ. Skip
+        # state.secret_registry overrides ambient os.environ. Skip
         # keys acp_env will set (avoids a redundant LookupSecret.get_value()).
         for name in state.secret_registry.secret_sources:
             if name in self.acp_env or name in file_secret_names:
@@ -2117,7 +2086,7 @@ class ACPAgent(AgentBase):
         # Relocate the CLI's data/config root to a per-conversation directory so
         # sandbox-sharing conversations don't race on a shared HOME (#1019).
         # Ordering is load-bearing — this must run AFTER the registry /
-        # agent_context drain and the acp_env update above (so the credential
+        # registry injection and the acp_env update above (so the credential
         # vars its Claude carve-out inspects — ANTHROPIC_API_KEY /
         # CLAUDE_CODE_OAUTH_TOKEN — are already in env, and an acp_env pin wins)
         # and BEFORE the conflict-strip below (so a CLAUDE_CONFIG_DIR it sets is
