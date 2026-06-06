@@ -1,24 +1,34 @@
 {
   "conversation_id_header_present": true,
-  "elapsed_seconds": 3.752,
+  "elapsed_seconds": 4.041,
   "response": {
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
+        "logprobs": null,
         "message": {
+          "annotations": null,
+          "audio": null,
           "content": "OPENAI_GATEWAY_OK",
-          "role": "assistant"
+          "function_call": null,
+          "refusal": null,
+          "role": "assistant",
+          "tool_calls": null
         }
       }
     ],
-    "created": 1780734295,
-    "id": "chatcmpl-6e7acc4cc31d4ba589e426e87a95c43a",
+    "created": 1780738224,
+    "id": "chatcmpl-9d6851374999421791288c24cb056a27",
     "model": "openhands_openai_nano",
     "object": "chat.completion",
+    "service_tier": null,
+    "system_fingerprint": null,
     "usage": {
       "completion_tokens": 0,
+      "completion_tokens_details": null,
       "prompt_tokens": 0,
+      "prompt_tokens_details": null,
       "total_tokens": 0
     }
   },

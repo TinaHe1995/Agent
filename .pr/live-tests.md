@@ -9,7 +9,8 @@ These artifacts were generated against this branch's OpenAI-compatible agent-ser
   - isolated temporary `HOME`, conversation directory, bash-events directory, and `TMUX_TMPDIR`
   - `OH_WEBHOOKS=[]`, `OH_ENABLE_VSCODE=0`, `OH_ENABLE_VNC=0`, `OH_PRELOAD_TOOLS=0`
 - Saved two LLM profiles through `POST /api/profiles/{name}` using `X-Session-API-Key`.
-- Called OpenAI-compatible endpoints using `Authorization: Bearer live-test-session-key`.
+- Called OpenAI-compatible endpoints using the OpenAI Python SDK with `base_url=http://127.0.0.1:<port>/v1` and `api_key=live-test-session-key`.
+- The exact runner is checked in as `.pr/live-test-runner.py` and uses `client.chat.completions.with_raw_response.create(...)` so it can record the completion response plus `X-OpenHands-ServerConversation-ID`.
 
 ## Profiles exercised
 

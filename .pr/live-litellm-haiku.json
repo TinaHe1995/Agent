@@ -1,24 +1,34 @@
 {
   "conversation_id_header_present": true,
-  "elapsed_seconds": 2.759,
+  "elapsed_seconds": 2.044,
   "response": {
     "choices": [
       {
         "finish_reason": "stop",
         "index": 0,
+        "logprobs": null,
         "message": {
+          "annotations": null,
+          "audio": null,
           "content": "LITELLM_HAIKU_GATEWAY_OK",
-          "role": "assistant"
+          "function_call": null,
+          "refusal": null,
+          "role": "assistant",
+          "tool_calls": null
         }
       }
     ],
-    "created": 1780734298,
-    "id": "chatcmpl-f1a6e8c772234b9b8f4f745ea156d366",
+    "created": 1780738226,
+    "id": "chatcmpl-d3959c56e7bb416bb2667f9cdbef3bb6",
     "model": "openhands_haiku_eval_proxy",
     "object": "chat.completion",
+    "service_tier": null,
+    "system_fingerprint": null,
     "usage": {
       "completion_tokens": 0,
+      "completion_tokens_details": null,
       "prompt_tokens": 0,
+      "prompt_tokens_details": null,
       "total_tokens": 0
     }
   },
