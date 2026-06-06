@@ -18,6 +18,7 @@ from openhands.agent_server.openai_models import (
     OpenAIModel,
     OpenAIModelListResponse,
     OpenAIResponseMessage,
+    OpenAIUsage,
 )
 from openhands.agent_server.persistence import PersistedSettings, get_settings_store
 from openhands.sdk import LLM, Message
@@ -26,7 +27,10 @@ from openhands.sdk.conversation.request import (
     SendMessageRequest,
     StartConversationRequest,
 )
-from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.conversation.state import (
+    ConversationExecutionStatus,
+    ConversationState,
+)
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.llm.message import ImageContent, TextContent
 from openhands.sdk.logger import get_logger
@@ -271,6 +275,20 @@ async def _delete_conversation_safely(
         )
 
 
+def _openai_usage_from_state(state: ConversationState) -> OpenAIUsage:
+    token_usage = state.stats.get_combined_metrics().accumulated_token_usage
+    if token_usage is None:
+        return OpenAIUsage()
+
+    prompt_tokens = token_usage.prompt_tokens
+    completion_tokens = token_usage.completion_tokens
+    return OpenAIUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+
 async def list_openai_models() -> OpenAIModelListResponse:
     try:
         profiles = LLMProfileStore().list_summaries()
@@ -341,6 +359,7 @@ async def run_chat_completion(
             event_service, allow_existing_response=allow_existing_response
         )
         _raise_for_terminal_error(status_value)
+        state = await event_service.get_state()
         final_response = await event_service.get_agent_final_response()
         response = OpenAIChatCompletionResponse(
             id=f"chatcmpl-{uuid4().hex}",
@@ -352,6 +371,7 @@ async def run_chat_completion(
                     message=OpenAIResponseMessage(content=final_response),
                 )
             ],
+            usage=_openai_usage_from_state(state),
         )
         assert conversation_id is not None
         return OpenAIChatCompletionResult(

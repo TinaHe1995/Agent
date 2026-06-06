@@ -191,7 +191,6 @@ def patched_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     ):  # type: ignore[no-untyped-def]
         from openhands.sdk.llm.llm_response import LLMResponse
         from openhands.sdk.llm.message import Message
-        from openhands.sdk.llm.utils.metrics import MetricsSnapshot
 
         # Create a minimal ModelResponse with a single assistant message
         litellm_msg = LiteLLMMessage.model_validate(
@@ -210,17 +209,21 @@ def patched_llm(monkeypatch: pytest.MonkeyPatch) -> None:
         # Convert to OpenHands Message
         message = Message.from_llm_chat_message(litellm_msg)
 
-        # Create metrics snapshot
-        metrics_snapshot = MetricsSnapshot(
-            model_name="test-model",
-            accumulated_cost=0.0,
-            max_budget_per_task=None,
-            accumulated_token_usage=None,
+        self.metrics.add_token_usage(
+            prompt_tokens=7,
+            completion_tokens=5,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            context_window=8192,
+            response_id="test-resp",
+            reasoning_tokens=0,
         )
 
         # Return LLMResponse as expected by the agent
         return LLMResponse(
-            message=message, metrics=metrics_snapshot, raw_response=raw_response
+            message=message,
+            metrics=self.metrics.get_snapshot(),
+            raw_response=raw_response,
         )
 
     monkeypatch.setattr(LLM, "completion", fake_completion, raising=True)
@@ -638,6 +641,11 @@ def test_openai_chat_completions_gateway_over_real_server(
                 assert body["choices"][0]["message"] == {
                     "role": "assistant",
                     "content": "Hello from patched LLM",
+                }
+                assert body["usage"] == {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "total_tokens": 12,
                 }
                 conversation_id = response.headers["X-OpenHands-ServerConversation-ID"]
                 UUID(conversation_id)
