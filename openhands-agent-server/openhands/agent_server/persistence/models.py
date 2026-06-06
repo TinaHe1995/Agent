@@ -105,7 +105,7 @@ def _deep_merge(
     return result
 
 
-PERSISTED_SETTINGS_SCHEMA_VERSION = 3
+PERSISTED_SETTINGS_SCHEMA_VERSION = 2
 
 
 class PersistedSettings(BaseModel):
@@ -294,19 +294,15 @@ class PersistedSettings(BaseModel):
     def from_persisted(
         cls, data: Any, *, context: dict[str, Any] | None = None
     ) -> PersistedSettings:
-        """Load persisted settings, applying top-level and nested migrations.
+        """Load persisted settings.
 
         Schema-version history:
 
         - **v1**: ``agent_settings`` + ``conversation_settings`` only.
-          Pre-app-preferences. Missing fields default to an empty
+          Pre-misc-settings. Missing ``misc_settings`` defaults to an empty
           :class:`MiscSettings`.
-        - **v2**: adds a top-level ``app_preferences`` block. We nest it under
-          ``misc_settings.app_preferences`` on load and drop the legacy key
-          before validation so the new model shape is the only one Pydantic
-          ever sees.
-        - **v3** (current): ``misc_settings`` is the addressable container;
-          ``app_preferences`` lives at ``misc_settings.app_preferences``.
+        - **v2** (current): adds the ``misc_settings`` container, which
+          currently wraps :class:`MiscSettings.app_preferences`.
         """
         if not isinstance(data, dict):
             return cls.model_validate(data, context=context)
@@ -321,15 +317,6 @@ class PersistedSettings(BaseModel):
                 f"{version} is newer than supported version "
                 f"{PERSISTED_SETTINGS_SCHEMA_VERSION}"
             )
-
-        # v2 → v3: lift top-level `app_preferences` into
-        # `misc_settings.app_preferences`. We only run this when an explicit
-        # legacy key is present and the new shape hasn't already been written
-        # — defends against the rare case where both keys appear on disk
-        # (e.g. a hand-edited file). `misc_settings` always wins.
-        legacy_prefs = payload.pop("app_preferences", None)
-        if legacy_prefs is not None and "misc_settings" not in payload:
-            payload["misc_settings"] = {"app_preferences": legacy_prefs}
 
         payload["schema_version"] = PERSISTED_SETTINGS_SCHEMA_VERSION
         return cls.model_validate(payload, context=context)

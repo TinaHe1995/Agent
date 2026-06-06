@@ -63,7 +63,7 @@ class AppPreferences(BaseModel):
     .. note::
 
        Persisted as ``misc_settings.app_preferences`` since persisted-settings
-       schema v3. The wrapper :class:`MiscSettings` is the addressable block
+       schema v2. The wrapper :class:`MiscSettings` is the addressable block
        on :class:`SettingsResponse`; this class is only the inner payload.
     """
 
@@ -86,7 +86,7 @@ class MiscSettings(BaseModel):
     (e.g. UI preferences, layout state) can be added as additional nested
     fields without churning the top-level API shape.
 
-    Persisted as ``misc_settings`` on :class:`PersistedSettings` (schema v3+).
+    Persisted as ``misc_settings`` on :class:`PersistedSettings` (schema v2+).
     Updated through ``misc_settings_diff`` on :class:`SettingsUpdateRequest`,
     which is deep-merged into the existing block — so a partial diff like
     ``{"app_preferences": {"language": "fr"}}`` updates only ``language`` and
