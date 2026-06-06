@@ -171,9 +171,10 @@ async def update_settings(
 ) -> SettingsResponse:
     """Update settings with partial changes.
 
-    Accepts ``agent_settings_diff``, ``conversation_settings_diff``, and/or
-    ``app_preferences_diff`` for incremental updates. The two ``*_settings_diff``
-    fields are deep-merged; nested objects merge recursively, and a ``null``
+    Accepts ``agent_settings_diff``, ``conversation_settings_diff``,
+    ``app_preferences_diff``, and/or ``active_profile`` for incremental updates.
+    The two ``*_settings_diff`` fields are deep-merged; nested objects merge
+    recursively, and a ``null``
     value **inside a nested map deletes that entry** — the "unset" primitive
     that lets a client remove a single map key without round-tripping the
     whole map. To drop one ACP env-var::
@@ -210,11 +211,7 @@ async def update_settings(
         # No updates provided - this is a client error
         raise HTTPException(
             status_code=400,
-            detail=(
-                "At least one of agent_settings_diff, "
-                "conversation_settings_diff, app_preferences_diff, "
-                "or active_profile must be provided"
-            ),
+            detail="At least one settings update field must be provided",
         )
 
     # Apply updates atomically with file locking

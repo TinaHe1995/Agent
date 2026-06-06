@@ -566,7 +566,9 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     response = client_with_settings.patch("/api/settings", json={})
 
     assert response.status_code == 400
-    assert "At least one of" in response.json()["detail"]
+    assert response.json()["detail"] == (
+        "At least one settings update field must be provided"
+    )
 
 
 # ── app_preferences ─────────────────────────────────────────────────────
