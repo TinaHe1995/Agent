@@ -540,17 +540,11 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     assert "At least one of" in response.json()["detail"]
 
 
-# ── app_preferences ─────────────────────────────────────────────────────
+# ── misc_settings.app_preferences ───────────────────────────────────────
 
 
-def test_get_settings_returns_empty_app_preferences_by_default(client_with_settings):
-    """GET /api/settings returns an empty app_preferences block by default."""
-    response = client_with_settings.get("/api/settings")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert "app_preferences" in body
-    assert body["app_preferences"] == {
+def _empty_app_preferences() -> dict:
+    return {
         "language": None,
         "user_consents_to_analytics": None,
         "enable_sound_notifications": None,
@@ -560,25 +554,40 @@ def test_get_settings_returns_empty_app_preferences_by_default(client_with_setti
     }
 
 
-def test_patch_settings_writes_app_preferences(client_with_settings):
-    """PATCH /api/settings with app_preferences_diff persists the fields."""
+def test_get_settings_returns_empty_misc_settings_by_default(client_with_settings):
+    """GET /api/settings returns an empty misc_settings block by default."""
+    response = client_with_settings.get("/api/settings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "misc_settings" in body
+    # The legacy flat ``app_preferences`` key is gone — clients must read
+    # through ``misc_settings.app_preferences`` now.
+    assert "app_preferences" not in body
+    assert body["misc_settings"] == {"app_preferences": _empty_app_preferences()}
+
+
+def test_patch_settings_writes_misc_settings_app_preferences(client_with_settings):
+    """PATCH /api/settings with misc_settings_diff persists the nested fields."""
     response = client_with_settings.patch(
         "/api/settings",
         json={
-            "app_preferences_diff": {
-                "language": "fr",
-                "user_consents_to_analytics": True,
-                "enable_sound_notifications": False,
-                "git_user_name": "Ada Lovelace",
-                "git_user_email": "ada@example.com",
-                "disabled_skills": ["openhands/snake", "openhands/python"],
+            "misc_settings_diff": {
+                "app_preferences": {
+                    "language": "fr",
+                    "user_consents_to_analytics": True,
+                    "enable_sound_notifications": False,
+                    "git_user_name": "Ada Lovelace",
+                    "git_user_email": "ada@example.com",
+                    "disabled_skills": ["openhands/snake", "openhands/python"],
+                }
             }
         },
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["app_preferences"] == {
+    assert body["misc_settings"]["app_preferences"] == {
         "language": "fr",
         "user_consents_to_analytics": True,
         "enable_sound_notifications": False,
@@ -590,83 +599,92 @@ def test_patch_settings_writes_app_preferences(client_with_settings):
     # Persisted across requests
     refetch = client_with_settings.get("/api/settings")
     assert refetch.status_code == 200
-    assert refetch.json()["app_preferences"]["language"] == "fr"
+    assert (
+        refetch.json()["misc_settings"]["app_preferences"]["language"] == "fr"
+    )
 
 
-def test_patch_settings_app_preferences_diff_is_shallow_overlay(
-    client_with_settings,
-):
-    """Partial app_preferences_diff overlays known fields, leaves others alone."""
+def test_patch_settings_misc_settings_diff_is_deep_merged(client_with_settings):
+    """Partial misc_settings_diff merges into existing app_preferences.
+
+    A diff like ``{"app_preferences": {"git_user_name": "Ada"}}`` must NOT
+    clobber sibling fields set by an earlier PATCH — the merge runs through
+    the same ``_deep_merge`` used for agent_settings/conversation_settings.
+    """
     client_with_settings.patch(
         "/api/settings",
         json={
-            "app_preferences_diff": {
-                "language": "fr",
-                "disabled_skills": ["openhands/snake"],
+            "misc_settings_diff": {
+                "app_preferences": {
+                    "language": "fr",
+                    "disabled_skills": ["openhands/snake"],
+                }
             }
         },
     )
 
     response = client_with_settings.patch(
         "/api/settings",
-        json={"app_preferences_diff": {"git_user_name": "Ada"}},
+        json={"misc_settings_diff": {"app_preferences": {"git_user_name": "Ada"}}},
     )
 
     assert response.status_code == 200
-    prefs = response.json()["app_preferences"]
+    prefs = response.json()["misc_settings"]["app_preferences"]
     assert prefs["language"] == "fr"
     assert prefs["git_user_name"] == "Ada"
     assert prefs["disabled_skills"] == ["openhands/snake"]
 
 
-def test_patch_settings_app_preferences_disabled_skills_replaces_list(
-    client_with_settings,
-):
-    """disabled_skills is replaced wholesale, not merged."""
+def test_patch_settings_disabled_skills_replaces_list(client_with_settings):
+    """``disabled_skills`` (a list) is replaced wholesale, not merged."""
     client_with_settings.patch(
         "/api/settings",
         json={
-            "app_preferences_diff": {
-                "disabled_skills": ["openhands/snake", "openhands/python"]
+            "misc_settings_diff": {
+                "app_preferences": {
+                    "disabled_skills": ["openhands/snake", "openhands/python"]
+                }
             }
         },
     )
 
     response = client_with_settings.patch(
         "/api/settings",
-        json={"app_preferences_diff": {"disabled_skills": []}},
+        json={"misc_settings_diff": {"app_preferences": {"disabled_skills": []}}},
     )
 
     assert response.status_code == 200
-    assert response.json()["app_preferences"]["disabled_skills"] == []
+    assert response.json()["misc_settings"]["app_preferences"]["disabled_skills"] == []
 
 
-def test_patch_settings_app_preferences_only_payload_is_accepted(
-    client_with_settings,
-):
-    """app_preferences_diff alone satisfies the "at least one of" check."""
+def test_patch_settings_misc_settings_only_payload_is_accepted(client_with_settings):
+    """misc_settings_diff alone satisfies the "at least one of" check."""
     response = client_with_settings.patch(
         "/api/settings",
-        json={"app_preferences_diff": {"language": "fr"}},
+        json={"misc_settings_diff": {"app_preferences": {"language": "fr"}}},
     )
 
     assert response.status_code == 200
 
 
-def test_patch_settings_app_preferences_rejects_invalid_type(client_with_settings):
-    """An app_preferences_diff that fails validation returns 422."""
+def test_patch_settings_misc_settings_rejects_invalid_type(client_with_settings):
+    """A misc_settings_diff with an invalid nested value returns 422."""
     response = client_with_settings.patch(
         "/api/settings",
-        json={"app_preferences_diff": {"disabled_skills": "not-a-list"}},
+        json={
+            "misc_settings_diff": {
+                "app_preferences": {"disabled_skills": "not-a-list"}
+            }
+        },
     )
 
     assert response.status_code == 422
 
 
-def test_patch_settings_app_preferences_does_not_clobber_agent_settings(
+def test_patch_settings_misc_settings_does_not_clobber_agent_settings(
     client_with_settings,
 ):
-    """Writing only app_preferences must not reset agent_settings."""
+    """Writing only misc_settings must not reset agent_settings."""
     client_with_settings.patch(
         "/api/settings",
         json={"agent_settings_diff": {"llm": {"model": "gpt-4o"}}},
@@ -674,18 +692,34 @@ def test_patch_settings_app_preferences_does_not_clobber_agent_settings(
 
     response = client_with_settings.patch(
         "/api/settings",
-        json={"app_preferences_diff": {"language": "fr"}},
+        json={"misc_settings_diff": {"app_preferences": {"language": "fr"}}},
     )
 
     assert response.status_code == 200
     assert response.json()["agent_settings"]["llm"]["model"] == "gpt-4o"
 
 
-def test_persisted_settings_v1_loads_with_empty_app_preferences(
+def test_legacy_app_preferences_diff_field_is_rejected(client_with_settings):
+    """The pre-v3 ``app_preferences_diff`` field is no longer accepted.
+
+    Since the request schema only knows the three new diff fields, sending
+    the legacy key results in the "at least one of" client error (400) — we
+    do NOT silently treat it as a misc_settings_diff. This forces clients to
+    upgrade and surfaces missing migrations loudly.
+    """
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"app_preferences_diff": {"language": "fr"}},
+    )
+
+    assert response.status_code == 400
+    assert "At least one of" in response.json()["detail"]
+
+
+def test_persisted_settings_v1_loads_with_empty_misc_settings(
     temp_persistence_dir, client_with_settings
 ):
-    """A v1 settings file (no app_preferences) loads with the default empty block."""
-    # Write a v1 payload directly to disk
+    """A v1 settings file (no misc/app prefs) loads with empty defaults."""
     settings_path = temp_persistence_dir / "settings.json"
     settings_path.write_text(
         json.dumps(
@@ -706,9 +740,90 @@ def test_persisted_settings_v1_loads_with_empty_app_preferences(
 
     response = client_with_settings.get("/api/settings")
     assert response.status_code == 200
-    prefs = response.json()["app_preferences"]
-    assert prefs["language"] is None
-    assert prefs["disabled_skills"] == []
+    assert response.json()["misc_settings"] == {
+        "app_preferences": _empty_app_preferences()
+    }
+
+
+def test_persisted_settings_v2_app_preferences_migrate_to_misc_settings(
+    temp_persistence_dir, client_with_settings
+):
+    """A v2 settings file (flat ``app_preferences``) is lifted on load.
+
+    Files written by the previous release (PR #3539) stored
+    ``app_preferences`` at the top level. On load we transparently nest it
+    under ``misc_settings.app_preferences`` so existing user data is
+    preserved without requiring an explicit migration step.
+    """
+    settings_path = temp_persistence_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "agent_settings": {
+                    "agent_kind": "openhands",
+                    "schema_version": AGENT_SETTINGS_SCHEMA_VERSION,
+                    "llm": {"model": "gpt-4o"},
+                },
+                "conversation_settings": {
+                    "schema_version": CONVERSATION_SETTINGS_SCHEMA_VERSION,
+                },
+                "active_profile": None,
+                "app_preferences": {
+                    "language": "fr",
+                    "git_user_name": "Ada Lovelace",
+                    "disabled_skills": ["openhands/snake"],
+                },
+            }
+        )
+    )
+
+    response = client_with_settings.get("/api/settings")
+    assert response.status_code == 200
+    body = response.json()
+    # Migrated, not duplicated:
+    assert "app_preferences" not in body
+    assert body["misc_settings"]["app_preferences"]["language"] == "fr"
+    assert (
+        body["misc_settings"]["app_preferences"]["git_user_name"] == "Ada Lovelace"
+    )
+    assert body["misc_settings"]["app_preferences"]["disabled_skills"] == [
+        "openhands/snake"
+    ]
+
+
+def test_persisted_settings_v2_migration_prefers_existing_misc_settings(
+    temp_persistence_dir, client_with_settings
+):
+    """If both legacy and new shapes are on disk, ``misc_settings`` wins.
+
+    Defends against a hand-edited / hand-merged file containing both keys —
+    we treat ``misc_settings`` as the authoritative shape and drop the
+    legacy ``app_preferences`` block.
+    """
+    settings_path = temp_persistence_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "agent_settings": {
+                    "agent_kind": "openhands",
+                    "schema_version": AGENT_SETTINGS_SCHEMA_VERSION,
+                    "llm": {"model": "gpt-4o"},
+                },
+                "conversation_settings": {
+                    "schema_version": CONVERSATION_SETTINGS_SCHEMA_VERSION,
+                },
+                "active_profile": None,
+                "app_preferences": {"language": "STALE"},
+                "misc_settings": {"app_preferences": {"language": "fr"}},
+            }
+        )
+    )
+
+    response = client_with_settings.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["misc_settings"]["app_preferences"]["language"] == "fr"
 
 
 def test_patch_settings_deep_merges(client_with_settings):

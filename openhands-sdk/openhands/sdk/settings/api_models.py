@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .model import AgentSettingsConfig, ConversationSettings
 
 
-# ── App Preferences ───────────────────────────────────────────────────────
+# ── Misc Settings (frontend-owned, not interpreted by the agent) ─────────
 
 
 class AppPreferences(BaseModel):
@@ -59,6 +59,12 @@ class AppPreferences(BaseModel):
       ``True``/``False`` are explicit user choices.
     - ``disabled_skills``: list of skill identifiers the user has disabled.
       Defaults to an empty list (no skills disabled).
+
+    .. note::
+
+       Persisted as ``misc_settings.app_preferences`` since persisted-settings
+       schema v3. The wrapper :class:`MiscSettings` is the addressable block
+       on :class:`SettingsResponse`; this class is only the inner payload.
     """
 
     language: str | None = None
@@ -71,6 +77,27 @@ class AppPreferences(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class MiscSettings(BaseModel):
+    """Container for frontend-owned settings that the agent doesn't interpret.
+
+    A single addressable block on :class:`SettingsResponse` so the API has one
+    extension point for "settings the frontend wants persisted, but the agent
+    doesn't act on". Currently holds :class:`AppPreferences`; new categories
+    (e.g. UI preferences, layout state) can be added as additional nested
+    fields without churning the top-level API shape.
+
+    Persisted as ``misc_settings`` on :class:`PersistedSettings` (schema v3+).
+    Updated through ``misc_settings_diff`` on :class:`SettingsUpdateRequest`,
+    which is deep-merged into the existing block — so a partial diff like
+    ``{"app_preferences": {"language": "fr"}}`` updates only ``language`` and
+    leaves every other ``app_preferences`` field alone.
+    """
+
+    app_preferences: AppPreferences = Field(default_factory=AppPreferences)
+
+    model_config = ConfigDict(extra="ignore")
+
+
 # ── Settings API Models ───────────────────────────────────────────────────
 
 
@@ -78,8 +105,8 @@ class SettingsResponse(BaseModel):
     """Response model for GET /api/settings.
 
     Contains the full settings payload including agent configuration,
-    conversation settings, app-level user preferences, and a flag indicating
-    if an LLM API key is set.
+    conversation settings, miscellaneous frontend-owned settings, and a flag
+    indicating whether an LLM API key is set.
 
     The ``agent_settings`` and ``conversation_settings`` fields are raw dicts
     because the server controls secret serialization via context. Use the
@@ -90,13 +117,13 @@ class SettingsResponse(BaseModel):
         response = SettingsResponse.model_validate(api_response.json())
         agent = response.get_agent_settings()  # Returns AgentSettingsConfig
         conv = response.get_conversation_settings()  # Returns ConversationSettings
-        prefs = response.app_preferences  # Already typed
+        prefs = response.misc_settings.app_preferences  # Already typed
     """
 
     agent_settings: dict[str, Any]
     conversation_settings: dict[str, Any]
     llm_api_key_is_set: bool
-    app_preferences: AppPreferences = Field(default_factory=AppPreferences)
+    misc_settings: MiscSettings = Field(default_factory=MiscSettings)
 
     def get_agent_settings(self) -> AgentSettingsConfig:
         """Parse and validate ``agent_settings`` into a typed model.
@@ -126,17 +153,18 @@ class SettingsUpdateRequest(BaseModel):
     Supports partial updates via diff objects that are deep-merged with
     existing settings.
 
-    ``app_preferences_diff`` accepts a partial :class:`AppPreferences` dict;
-    fields present in the diff are written through, fields omitted are left
-    untouched. The diff is *not* deep-merged because :class:`AppPreferences`
-    has no nested maps — every field is a scalar or a list, and a list
-    overwrite (rather than merge) is what callers expect for
-    ``disabled_skills``.
+    ``misc_settings_diff`` accepts a partial :class:`MiscSettings` dict and is
+    deep-merged into the persisted block, matching the semantics of
+    ``agent_settings_diff`` and ``conversation_settings_diff``. So a partial
+    payload like ``{"misc_settings_diff": {"app_preferences": {"language":
+    "fr"}}}`` updates only the ``language`` field of ``app_preferences``;
+    every other field is left alone. Lists (e.g. ``disabled_skills``) are
+    replaced wholesale rather than merged.
     """
 
     agent_settings_diff: dict[str, Any] | None = None
     conversation_settings_diff: dict[str, Any] | None = None
-    app_preferences_diff: dict[str, Any] | None = None
+    misc_settings_diff: dict[str, Any] | None = None
 
 
 # ── Secrets API Models ────────────────────────────────────────────────────

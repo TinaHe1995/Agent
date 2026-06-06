@@ -14,6 +14,7 @@ from .acp_providers import (
 )
 from .api_models import (
     AppPreferences,
+    MiscSettings,
     SecretCreateRequest,
     SecretItemResponse,
     SecretsListResponse,
@@ -83,6 +84,7 @@ __all__ = [
     "ACPModelOption",
     "ACPProviderInfo",
     "AppPreferences",
+    "MiscSettings",
     "build_session_model_meta",
     "default_acp_file_secrets",
     "AGENT_SETTINGS_SCHEMA_VERSION",

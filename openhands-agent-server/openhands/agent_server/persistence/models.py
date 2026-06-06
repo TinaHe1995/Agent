@@ -24,8 +24,8 @@ from pydantic import (
 
 from openhands.sdk.settings import (
     AgentSettingsConfig,
-    AppPreferences,
     ConversationSettings,
+    MiscSettings,
     default_agent_settings,
     validate_agent_settings,
 )
@@ -35,23 +35,23 @@ from openhands.sdk.utils.pydantic_secrets import serialize_secret, validate_secr
 class SettingsUpdatePayload(TypedDict, total=False):
     """Typed payload for PersistedSettings.update() method.
 
-    The ``*_diff`` dicts are deep-merged via :func:`_deep_merge`: nested
+    All three ``*_diff`` dicts are deep-merged via :func:`_deep_merge`: nested
     objects merge recursively, and a ``None`` value *inside a nested map*
     deletes that entry (the "unset" primitive) — e.g. send
     ``{"acp_env": {"NAME": None}}`` to drop one env-var without re-sending the
     whole map. A ``None`` on a top-level *field* is not treated as delete; it
     flows to validation as before.
 
-    ``app_preferences_diff`` is a shallow overlay — fields present in the diff
-    overwrite the persisted values, fields absent are left alone. There is no
-    deep-merge or "unset" semantic because :class:`AppPreferences` has no
-    nested maps; ``disabled_skills`` is a list and callers expect a list write
-    to replace, not merge.
+    ``misc_settings_diff`` is deep-merged into the persisted ``misc_settings``
+    block (currently just ``app_preferences``). A diff like
+    ``{"app_preferences": {"language": "fr"}}`` updates the single nested
+    field; lists (e.g. ``disabled_skills``) are replaced wholesale by the
+    deep-merge.
     """
 
     agent_settings_diff: dict[str, Any]
     conversation_settings_diff: dict[str, Any]
-    app_preferences_diff: dict[str, Any]
+    misc_settings_diff: dict[str, Any]
     active_profile: str | None
 
 
@@ -105,7 +105,7 @@ def _deep_merge(
     return result
 
 
-PERSISTED_SETTINGS_SCHEMA_VERSION = 2
+PERSISTED_SETTINGS_SCHEMA_VERSION = 3
 
 
 class PersistedSettings(BaseModel):
@@ -118,10 +118,10 @@ class PersistedSettings(BaseModel):
     The ``active_profile`` field tracks which LLM profile was last activated,
     allowing frontends to display which profile is currently in use.
 
-    The ``app_preferences`` field stores frontend app-level preferences
+    The ``misc_settings`` field stores frontend-owned settings the agent
+    doesn't interpret — currently :class:`MiscSettings.app_preferences`
     (language, sound notifications, analytics consent, git identity,
-    disabled skills) that don't affect agent execution. See
-    :class:`openhands.sdk.settings.AppPreferences`.
+    disabled skills). See :class:`openhands.sdk.settings.MiscSettings`.
     """
 
     schema_version: int = Field(
@@ -137,12 +137,13 @@ class PersistedSettings(BaseModel):
         default=None,
         description="Name of the currently active LLM profile.",
     )
-    app_preferences: AppPreferences = Field(
-        default_factory=AppPreferences,
+    misc_settings: MiscSettings = Field(
+        default_factory=MiscSettings,
         description=(
-            "Frontend app-level user preferences (language, sound notifications, "
-            "analytics opt-in, git identity, disabled skills). Persisted but not "
-            "interpreted by the agent-server."
+            "Frontend-owned settings the agent does not interpret. Currently "
+            "wraps app_preferences (language, sound notifications, analytics "
+            "opt-in, git identity, disabled skills); future categories can be "
+            "added as additional nested fields on MiscSettings."
         ),
     )
 
@@ -194,11 +195,12 @@ class PersistedSettings(BaseModel):
         agent_update = payload.get("agent_settings_diff")
         conv_update = payload.get("conversation_settings_diff")
 
-        # Phase 1: Validate both updates before any mutations
+        # Phase 1: Validate all updates before any mutations
         new_agent: AgentSettingsConfig | None = None
         new_conv: ConversationSettings | None = None
         agent_merged: dict | None = None
         conv_merged: dict | None = None
+        misc_merged: dict | None = None
 
         try:
             if isinstance(agent_update, dict):
@@ -253,19 +255,19 @@ class PersistedSettings(BaseModel):
                         f"Failed to update conversation settings: {type(e).__name__}"
                     ) from None
 
-            # Validate app_preferences before mutating anything else
-            prefs_update = payload.get("app_preferences_diff")
-            new_prefs: AppPreferences | None = None
-            if isinstance(prefs_update, dict):
-                merged_prefs = {
-                    **self.app_preferences.model_dump(mode="json"),
-                    **prefs_update,
-                }
+            # Validate misc_settings before mutating anything else
+            misc_update = payload.get("misc_settings_diff")
+            new_misc: MiscSettings | None = None
+            if isinstance(misc_update, dict):
+                misc_merged = _deep_merge(
+                    self.misc_settings.model_dump(mode="json"),
+                    misc_update,
+                )
                 try:
-                    new_prefs = AppPreferences.model_validate(merged_prefs)
+                    new_misc = MiscSettings.model_validate(misc_merged)
                 except Exception as e:
                     raise ValueError(
-                        f"Failed to update app preferences: {type(e).__name__}"
+                        f"Failed to update misc settings: {type(e).__name__}"
                     ) from None
 
             # Phase 2: Apply validated changes atomically
@@ -273,8 +275,8 @@ class PersistedSettings(BaseModel):
                 self.agent_settings = new_agent
             if new_conv is not None:
                 self.conversation_settings = new_conv
-            if new_prefs is not None:
-                self.app_preferences = new_prefs
+            if new_misc is not None:
+                self.misc_settings = new_misc
 
             # Update active_profile if explicitly provided (including None to clear)
             if "active_profile" in payload:
@@ -285,12 +287,27 @@ class PersistedSettings(BaseModel):
                 agent_merged.clear()
             if conv_merged is not None:
                 conv_merged.clear()
+            if misc_merged is not None:
+                misc_merged.clear()
 
     @classmethod
     def from_persisted(
         cls, data: Any, *, context: dict[str, Any] | None = None
     ) -> PersistedSettings:
-        """Load persisted settings, applying top-level and nested migrations."""
+        """Load persisted settings, applying top-level and nested migrations.
+
+        Schema-version history:
+
+        - **v1**: ``agent_settings`` + ``conversation_settings`` only.
+          Pre-app-preferences. Missing fields default to an empty
+          :class:`MiscSettings`.
+        - **v2**: adds a top-level ``app_preferences`` block. We nest it under
+          ``misc_settings.app_preferences`` on load and drop the legacy key
+          before validation so the new model shape is the only one Pydantic
+          ever sees.
+        - **v3** (current): ``misc_settings`` is the addressable container;
+          ``app_preferences`` lives at ``misc_settings.app_preferences``.
+        """
         if not isinstance(data, dict):
             return cls.model_validate(data, context=context)
 
@@ -304,6 +321,16 @@ class PersistedSettings(BaseModel):
                 f"{version} is newer than supported version "
                 f"{PERSISTED_SETTINGS_SCHEMA_VERSION}"
             )
+
+        # v2 → v3: lift top-level `app_preferences` into
+        # `misc_settings.app_preferences`. We only run this when an explicit
+        # legacy key is present and the new shape hasn't already been written
+        # — defends against the rare case where both keys appear on disk
+        # (e.g. a hand-edited file). `misc_settings` always wins.
+        legacy_prefs = payload.pop("app_preferences", None)
+        if legacy_prefs is not None and "misc_settings" not in payload:
+            payload["misc_settings"] = {"app_preferences": legacy_prefs}
+
         payload["schema_version"] = PERSISTED_SETTINGS_SCHEMA_VERSION
         return cls.model_validate(payload, context=context)
 
