@@ -1064,6 +1064,33 @@ def test_file_settings_store_save_rejects_malformed_constructed_settings(
     assert not (temp_persistence_dir / "settings.json").exists()
 
 
+def test_file_settings_store_save_rejects_nested_model_construct_bypass(
+    temp_persistence_dir,
+):
+    """The store must reject settings whose *nested* sub-models bypassed Pydantic.
+
+    Pydantic v2 does not re-validate already-instantiated sub-model instances
+    when ``model_validate(instance)`` is called on the outer model. That means a
+    ``ConversationSettings.model_construct(max_iterations=-1)`` would slip
+    through a naive ``PersistedSettings.model_validate(settings)`` boundary
+    check and reach disk. The store must dump-and-revalidate so nested invalid
+    state is caught.
+    """
+    store = FileSettingsStore(persistence_dir=temp_persistence_dir, cipher=None)
+    bad_conv = ConversationSettings.model_construct(max_iterations=-1)
+    assert bad_conv.max_iterations == -1  # model_construct bypassed validation
+    malformed = PersistedSettings.model_construct(
+        schema_version=PERSISTED_SETTINGS_SCHEMA_VERSION,
+        agent_settings=OpenHandsAgentSettings(),
+        conversation_settings=bad_conv,
+    )
+
+    with pytest.raises(ValidationError):
+        store.save(malformed)
+
+    assert not (temp_persistence_dir / "settings.json").exists()
+
+
 def test_secret_upsert_updates_existing(client_with_settings):
     """PUT /api/settings/secrets updates existing secret (upsert behavior)."""
     # Create initial secret

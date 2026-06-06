@@ -366,7 +366,26 @@ class FileSettingsStore(SettingsStore):
         # Revalidate at the persistence boundary. Pydantic assignment or
         # model_construct() can bypass normal field validation; the store must
         # never serialize that malformed state to disk.
+        #
+        # We validate in two steps because each step catches a different class
+        # of bypass:
+        #   1. ``model_validate(settings)`` rejects raw-dict payloads sitting in
+        #      slots typed as a sub-model (e.g. ``model_construct`` was called
+        #      with ``agent_settings={"agent_kind": "bogus"}``). It does *not*
+        #      revalidate already-instantiated sub-model instances.
+        #   2. ``model_validate(model_dump(...))`` then revalidates nested
+        #      sub-models that *were* constructed via ``model_construct()`` —
+        #      Pydantic v2 treats them as opaque on the first pass, so a
+        #      ``ConversationSettings.model_construct(max_iterations=-1)`` would
+        #      slip through step 1 alone.
+        #
+        # The dump must use ``expose_secrets="plaintext"`` so SecretStr fields
+        # round-trip without being redacted/encrypted by ``serialize_secret``;
+        # the real encrypt-or-redact dump happens below for the actual write.
         settings = PersistedSettings.model_validate(settings)
+        settings = PersistedSettings.model_validate(
+            settings.model_dump(context={"expose_secrets": "plaintext"})
+        )
 
         _ensure_secure_directory(self.persistence_dir)
 
