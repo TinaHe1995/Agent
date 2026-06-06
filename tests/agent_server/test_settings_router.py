@@ -599,9 +599,7 @@ def test_patch_settings_writes_misc_settings_app_preferences(client_with_setting
     # Persisted across requests
     refetch = client_with_settings.get("/api/settings")
     assert refetch.status_code == 200
-    assert (
-        refetch.json()["misc_settings"]["app_preferences"]["language"] == "fr"
-    )
+    assert refetch.json()["misc_settings"]["app_preferences"]["language"] == "fr"
 
 
 def test_patch_settings_misc_settings_diff_is_deep_merged(client_with_settings):
@@ -672,9 +670,7 @@ def test_patch_settings_misc_settings_rejects_invalid_type(client_with_settings)
     response = client_with_settings.patch(
         "/api/settings",
         json={
-            "misc_settings_diff": {
-                "app_preferences": {"disabled_skills": "not-a-list"}
-            }
+            "misc_settings_diff": {"app_preferences": {"disabled_skills": "not-a-list"}}
         },
     )
 
@@ -784,9 +780,7 @@ def test_persisted_settings_v2_app_preferences_migrate_to_misc_settings(
     # Migrated, not duplicated:
     assert "app_preferences" not in body
     assert body["misc_settings"]["app_preferences"]["language"] == "fr"
-    assert (
-        body["misc_settings"]["app_preferences"]["git_user_name"] == "Ada Lovelace"
-    )
+    assert body["misc_settings"]["app_preferences"]["git_user_name"] == "Ada Lovelace"
     assert body["misc_settings"]["app_preferences"]["disabled_skills"] == [
         "openhands/snake"
     ]
