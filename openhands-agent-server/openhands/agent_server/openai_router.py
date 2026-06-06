@@ -34,7 +34,7 @@ openai_router = APIRouter(tags=["OpenAI Compatibility"])
 _MODEL_PREFIX = "openhands_"
 _DEFAULT_WORKSPACE = "workspace/project"
 _GATEWAY_TIMEOUT_SECONDS = 120.0
-_POLL_INTERVAL_SECONDS = 0.1
+_POLL_INTERVAL_SECONDS = 2
 
 _SESSION_API_KEY_HEADER = APIKeyHeader(name="X-Session-API-Key", auto_error=False)
 _AUTHORIZATION_HEADER = HTTPBearer(auto_error=False)
