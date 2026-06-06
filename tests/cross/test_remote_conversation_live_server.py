@@ -13,6 +13,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID
 
 import httpx
@@ -579,6 +580,67 @@ def test_remote_conversation_over_real_server(server_env, patched_llm):
     cwd_conversations = Path("workspace/conversations")
     if cwd_conversations.exists():
         shutil.rmtree(cwd_conversations)
+
+
+def test_openai_chat_completions_gateway_over_real_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_llm
+):
+    from openhands.agent_server import (
+        config as config_module,
+        conversation_service as service_module,
+    )
+    from openhands.sdk.llm.llm_profile_store import LLMProfileStore
+
+    monkeypatch.setattr(config_module, "_default_config", None)
+    monkeypatch.setattr(service_module, "_conversation_service", None)
+    monkeypatch.delenv("OH_WEBHOOKS_0_BASE_URL", raising=False)
+
+    profiles_dir = tmp_path / "profiles"
+    store = LLMProfileStore(base_dir=profiles_dir)
+    store.save(
+        "smoke",
+        LLM(model="gpt-4o-mini", api_key=SecretStr("test")),
+        include_secrets=True,
+    )
+
+    with patch(
+        "openhands.agent_server.openai_router.LLMProfileStore",
+        lambda: LLMProfileStore(base_dir=profiles_dir),
+    ):
+        with live_server_env(tmp_path, monkeypatch) as env:
+            with httpx.Client() as client:
+                models_response = client.get(f"{env['host']}/v1/models", timeout=2.0)
+                assert models_response.status_code == 200
+                assert models_response.json()["data"] == [
+                    {
+                        "id": "openhands_smoke",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "openhands",
+                    }
+                ]
+
+                response = client.post(
+                    f"{env['host']}/v1/chat/completions",
+                    json={
+                        "model": "openhands_smoke",
+                        "messages": [
+                            {"role": "system", "content": "Answer briefly."},
+                            {"role": "user", "content": "Say hello."},
+                        ],
+                    },
+                    timeout=10.0,
+                )
+                assert response.status_code == 200
+                body = response.json()
+                assert body["object"] == "chat.completion"
+                assert body["model"] == "openhands_smoke"
+                assert body["choices"][0]["message"] == {
+                    "role": "assistant",
+                    "content": "Hello from patched LLM",
+                }
+                conversation_id = response.headers["X-OpenHands-ServerConversation-ID"]
+                UUID(conversation_id)
 
 
 @pytest.mark.skipif(

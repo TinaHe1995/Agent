@@ -1,0 +1,26 @@
+{
+  "conversation_id_header_present": true,
+  "elapsed_seconds": 2.759,
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "LITELLM_HAIKU_GATEWAY_OK",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1780734298,
+    "id": "chatcmpl-f1a6e8c772234b9b8f4f745ea156d366",
+    "model": "openhands_haiku_eval_proxy",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 0,
+      "prompt_tokens": 0,
+      "total_tokens": 0
+    }
+  },
+  "status_code": 200
+}

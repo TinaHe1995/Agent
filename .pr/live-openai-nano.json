@@ -1,0 +1,26 @@
+{
+  "conversation_id_header_present": true,
+  "elapsed_seconds": 3.752,
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "OPENAI_GATEWAY_OK",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1780734295,
+    "id": "chatcmpl-6e7acc4cc31d4ba589e426e87a95c43a",
+    "model": "openhands_openai_nano",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 0,
+      "prompt_tokens": 0,
+      "total_tokens": 0
+    }
+  },
+  "status_code": 200
+}
