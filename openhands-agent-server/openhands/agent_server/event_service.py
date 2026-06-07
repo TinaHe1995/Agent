@@ -1013,9 +1013,29 @@ class EventService:
 
     async def pause(self):
         if self._conversation:
-            self._explicit_interrupt_generation += 1
+            # The user explicitly asked to stop: clear any pending re-run
+            # intents regardless of whether pause is a state-changing call
+            # or a no-op. This preserves the existing "explicit stop wins
+            # over a pending re-run" invariant.
             self._rerun_requested = False
             self._acp_internal_rerun_requested = False
+            # Only bump the explicit-interrupt counter when pause will
+            # actually change execution state. ``LocalConversation.pause()``
+            # is a no-op on any status that is not RUNNING or IDLE (e.g.
+            # FINISHED, PAUSED, ERROR). A bump on a no-op call leaves a
+            # phantom stop-intent that strands the next
+            # :meth:`send_message` via its silent early-return guard at the
+            # post-persist generation check (see #14698).
+            #
+            # Same precedent as the ``internal_acp_rerun`` gate in
+            # :meth:`interrupt`: an interrupt that does nothing should not
+            # bump the stop-intent counter.
+            status = await self._get_execution_status()
+            if status in (
+                ConversationExecutionStatus.RUNNING,
+                ConversationExecutionStatus.IDLE,
+            ):
+                self._explicit_interrupt_generation += 1
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._conversation.pause)
             # Publish state update after pause to ensure stats are updated
@@ -1030,9 +1050,25 @@ class EventService:
         """
         if self._conversation:
             if not internal_acp_rerun:
-                self._explicit_interrupt_generation += 1
+                # External interrupt: the user explicitly asked to stop.
+                # Clear pending re-run intents regardless of whether the
+                # call is a no-op.
                 self._rerun_requested = False
                 self._acp_internal_rerun_requested = False
+                # Only bump the explicit-interrupt counter when interrupt
+                # will actually change execution state.
+                # ``LocalConversation.interrupt()`` cancels the ``arun()``
+                # task if it is live; otherwise it falls back to
+                # ``LocalConversation.pause()``, which is a no-op on any
+                # non-RUNNING/IDLE status. A bump on a no-op call leaves a
+                # phantom stop-intent that strands the next
+                # :meth:`send_message` (see #14698).
+                status = await self._get_execution_status()
+                if status in (
+                    ConversationExecutionStatus.RUNNING,
+                    ConversationExecutionStatus.IDLE,
+                ):
+                    self._explicit_interrupt_generation += 1
             self._conversation.interrupt()
             # Wait for the run task to finish so we can publish the final
             # state update (PAUSED + InterruptEvent) cleanly. The shield keeps
