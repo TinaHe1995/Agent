@@ -3,7 +3,7 @@
 Queries GET /api/2.0/serving-endpoints and returns the chat-capable endpoints
 exposed through the AI Gateway. Three endpoint classes are surfaced:
 
-* ``FOUNDATION_MODEL_API`` — workspace-hosted DBRX / Llama / Claude / Gemini /
+* ``FOUNDATION_MODEL_API`` — workspace-hosted Llama / Claude / Gemini /
   GPT-5 pay-per-token models (native AI Gateway).
 * ``EXTERNAL_MODEL``      — customer-configured external model endpoints
   proxied through the gateway (still routed to provider-native APIs).
@@ -195,8 +195,8 @@ def _curated_entry(
 
 
 # Curated tier-1 set — Claude / GPT / Gemini only. One "recommended" per family
-# (fast + capable), plus a couple of siblings. Intentionally excludes Llama,
-# DBRX, and legacy endpoints — those surface automatically via discovery if the
+# (fast + capable), plus a couple of siblings. Intentionally excludes Llama
+# and legacy endpoints — those surface automatically via discovery if the
 # workspace has them enabled.
 #
 # Last sync with Databricks FMAPI docs: May 2026.

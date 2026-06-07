@@ -213,8 +213,7 @@ def detect_family(model: str) -> ProviderFamily:
        this rule — Databricks routes all numbered GPT generations through
        the OpenAI Responses API (``/openai/v1/responses``).
     4. Everything else      → :attr:`ProviderFamily.OPENAI` (universal
-       MLflow Chat Completions — safe default for ``gpt-oss``, Llama,
-       Mistral, DBRX, Qwen, …)
+       MLflow Chat Completions — safe default for ``gpt-oss``, Llama, …)
     """
     name = _bare_name(model)
     if "claude" in name:
