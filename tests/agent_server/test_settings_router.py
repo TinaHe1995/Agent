@@ -220,6 +220,7 @@ def test_get_settings_migrates_legacy_openhands_settings_and_resaves_current(
     assert agent_settings["llm"]["api_key"] == "sk-legacy-agent-key"
     assert agent_settings["condenser"] == {
         "enabled": False,
+        "condenser_kind": "llm_summarizing",
         "max_size": 120,
         "max_tokens": None,
         "keep_first": 2,
@@ -490,6 +491,7 @@ def test_patch_settings_updates_condenser_config(client_with_settings):
             "agent_settings_diff": {
                 "condenser": {
                     "enabled": True,
+                    "condenser_kind": "llm_summarizing",
                     "max_size": 120,
                     "max_tokens": 56000,
                     "keep_first": 3,
@@ -504,12 +506,34 @@ def test_patch_settings_updates_condenser_config(client_with_settings):
     assert response.status_code == 200, response.text
     assert response.json()["agent_settings"]["condenser"] == {
         "enabled": True,
+        "condenser_kind": "llm_summarizing",
         "max_size": 120,
         "max_tokens": 56000,
         "keep_first": 3,
         "minimum_progress": 0.2,
         "hard_context_reset_max_retries": 7,
         "hard_context_reset_context_scaling": 0.6,
+    }
+
+
+def test_patch_settings_switches_condenser_variant(client_with_settings):
+    """PATCH /api/settings can switch to a different condenser settings variant."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "condenser": {
+                    "enabled": True,
+                    "condenser_kind": "no_op",
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_settings"]["condenser"] == {
+        "enabled": True,
+        "condenser_kind": "no_op",
     }
 
 
