@@ -3,7 +3,9 @@ name: Agent Server
 
 on:
     push:
-        branches: [main]
+        branches:
+            - main
+            - 'jl/**'  # build images for jl/* working branches
         tags:
             - '*'  # Trigger on any tag (e.g., 1.0.0, 1.0.0a5, build-docker)
     pull_request:
@@ -270,7 +272,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                # Explicit matrix: 3 variants × 2 architectures = 6 jobs
+                # Explicit matrix: 4 variants × 2 architectures = 8 jobs
                 # Each job specifies exactly what it builds and where it runs
                 include:
                     # Python variant
@@ -309,6 +311,19 @@ jobs:
                     - variant: golang
                       arch: arm64
                       base_image: golang:1.21-bookworm
+                      runner: ubuntu-24.04-arm
+                      platform: linux/arm64
+
+                    # Rust variant
+                    - variant: rust
+                      arch: amd64
+                      base_image: rust:1-bookworm
+                      runner: ubuntu-24.04
+                      platform: linux/amd64
+
+                    - variant: rust
+                      arch: arm64
+                      base_image: rust:1-bookworm
                       runner: ubuntu-24.04-arm
                       platform: linux/arm64
 
@@ -453,7 +468,7 @@ jobs:
         runs-on: ubuntu-24.04
         strategy:
             matrix:
-                variant: [python, java, golang]
+                variant: [python, java, golang, rust]
         env:
             IMAGE: ${{ inputs.image != '' && inputs.image || 'ghcr.io/openhands/agent-server' }}
 

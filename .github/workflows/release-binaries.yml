@@ -248,6 +248,12 @@ jobs:
                     - variant: golang
                       arch: arm64
                       runner: ubuntu-24.04-arm
+                    - variant: rust
+                      arch: amd64
+                      runner: ubuntu-24.04
+                    - variant: rust
+                      arch: arm64
+                      runner: ubuntu-24.04-arm
         env:
             IMAGE: ghcr.io/openhands/agent-server
             IMAGE_TAG: ${{ needs.resolve-tag.outputs.image_tag }}

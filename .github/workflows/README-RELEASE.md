@@ -70,7 +70,7 @@ It also runs on every push to `main` as ongoing smoke coverage. It:
 - ✅ Verifies that the multi-arch Docker manifest
   `ghcr.io/openhands/agent-server:<image-tag>-<variant>` published by
   `server.yml` covers both `linux/amd64` and `linux/arm64` for every variant
-  (`python`, `java`, `golang`)
+  (`python`, `java`, `golang`, `rust`)
 - ✅ Pulls each variant on each architecture with `--platform=linux/<arch>`,
   boots the container, and asserts `/health` responds
 
