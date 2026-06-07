@@ -379,7 +379,7 @@ class LLMSummarizingCondenserSettings(CondenserSettings):
 class NoOpCondenserSettings(CondenserSettings):
     """Settings for a condenser that leaves conversation views unchanged."""
 
-    max_size: ClassVar[int] = 240
+    max_size: ClassVar[int] = 240  # type: ignore[reportIncompatibleVariableOverride]
     condenser_kind: Literal["no_op"] = Field(
         default="no_op",
         description=(

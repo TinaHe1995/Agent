@@ -602,8 +602,8 @@ def test_openhands_agent_settings_dispatches_no_op_condenser_payload() -> None:
 
 
 def test_openhands_agent_settings_upgrades_base_condenser_settings_instance() -> None:
-    settings = OpenHandsAgentSettings(
-        condenser=CondenserSettings(enabled=True, max_size=100)
+    settings = OpenHandsAgentSettings.model_validate(
+        {"condenser": CondenserSettings(enabled=True, max_size=100)}
     )
 
     assert isinstance(settings.condenser, LLMSummarizingCondenserSettings)
