@@ -190,10 +190,9 @@ async def update_settings(
     fails loudly rather than silently resetting the field to its default.
 
     ``misc_settings_diff`` is deep-merged into the persisted ``misc_settings``
-    block (currently the ``app_preferences`` sub-object). A partial diff like
-    ``{"app_preferences": {"language": "fr"}}`` updates only ``language`` and
-    leaves the other ``app_preferences`` fields untouched. Lists (e.g.
-    ``disabled_skills``) are replaced wholesale rather than merged.
+    block. The agent-server treats ``misc_settings`` as opaque frontend-owned
+    data: nested dicts are merged recursively, lists are replaced wholesale,
+    and the contents are never read or validated server-side.
 
     Uses file locking to prevent concurrent updates from overwriting each other.
 

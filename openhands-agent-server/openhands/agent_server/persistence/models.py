@@ -25,7 +25,6 @@ from pydantic import (
 from openhands.sdk.settings import (
     AgentSettingsConfig,
     ConversationSettings,
-    MiscSettings,
     default_agent_settings,
     validate_agent_settings,
 )
@@ -43,10 +42,10 @@ class SettingsUpdatePayload(TypedDict, total=False):
     flows to validation as before.
 
     ``misc_settings_diff`` is deep-merged into the persisted ``misc_settings``
-    block (currently just ``app_preferences``). A diff like
-    ``{"app_preferences": {"language": "fr"}}`` updates the single nested
-    field; lists (e.g. ``disabled_skills``) are replaced wholesale by the
-    deep-merge.
+    block. The agent-server treats ``misc_settings`` as opaque
+    frontend-owned data (it persists and merges, but does not interpret), so
+    any shape the client chooses is valid; lists are replaced wholesale by
+    the deep-merge.
     """
 
     agent_settings_diff: dict[str, Any]
@@ -118,10 +117,11 @@ class PersistedSettings(BaseModel):
     The ``active_profile`` field tracks which LLM profile was last activated,
     allowing frontends to display which profile is currently in use.
 
-    The ``misc_settings`` field stores frontend-owned settings the agent
-    doesn't interpret — currently :class:`MiscSettings.app_preferences`
-    (language, sound notifications, analytics consent, git identity,
-    disabled skills). See :class:`openhands.sdk.settings.MiscSettings`.
+    The ``misc_settings`` field is an opaque dict the agent-server persists
+    on behalf of the frontend. The agent-server never reads its contents and
+    has no schema for it; clients are free to store any JSON-serializable
+    structure they need (e.g. app/UI preferences, analytics consent, git
+    identity used for in-conversation commits, etc.).
     """
 
     schema_version: int = Field(
@@ -137,13 +137,12 @@ class PersistedSettings(BaseModel):
         default=None,
         description="Name of the currently active LLM profile.",
     )
-    misc_settings: MiscSettings = Field(
-        default_factory=MiscSettings,
+    misc_settings: dict[str, Any] = Field(
+        default_factory=dict,
         description=(
-            "Frontend-owned settings the agent does not interpret. Currently "
-            "wraps app_preferences (language, sound notifications, analytics "
-            "opt-in, git identity, disabled skills); future categories can be "
-            "added as additional nested fields on MiscSettings."
+            "Opaque dict the agent-server persists on behalf of the frontend. "
+            "Updated through misc_settings_diff (deep-merged); contents are "
+            "never read or validated by the agent-server."
         ),
     )
 
@@ -200,7 +199,6 @@ class PersistedSettings(BaseModel):
         new_conv: ConversationSettings | None = None
         agent_merged: dict | None = None
         conv_merged: dict | None = None
-        misc_merged: dict | None = None
 
         try:
             if isinstance(agent_update, dict):
@@ -255,20 +253,15 @@ class PersistedSettings(BaseModel):
                         f"Failed to update conversation settings: {type(e).__name__}"
                     ) from None
 
-            # Validate misc_settings before mutating anything else
+            # ``misc_settings`` is opaque: deep-merge without schema
+            # validation. The agent-server doesn't interpret what's inside,
+            # and ``misc_settings`` is not a secret container — the merged
+            # dict is therefore stored directly without the post-commit
+            # clear-down used by ``agent_settings`` / ``conversation_settings``.
             misc_update = payload.get("misc_settings_diff")
-            new_misc: MiscSettings | None = None
+            new_misc: dict[str, Any] | None = None
             if isinstance(misc_update, dict):
-                misc_merged = _deep_merge(
-                    self.misc_settings.model_dump(mode="json"),
-                    misc_update,
-                )
-                try:
-                    new_misc = MiscSettings.model_validate(misc_merged)
-                except Exception as e:
-                    raise ValueError(
-                        f"Failed to update misc settings: {type(e).__name__}"
-                    ) from None
+                new_misc = _deep_merge(self.misc_settings, misc_update)
 
             # Phase 2: Apply validated changes atomically
             if new_agent is not None:
@@ -287,8 +280,6 @@ class PersistedSettings(BaseModel):
                 agent_merged.clear()
             if conv_merged is not None:
                 conv_merged.clear()
-            if misc_merged is not None:
-                misc_merged.clear()
 
     @classmethod
     def from_persisted(
@@ -299,10 +290,8 @@ class PersistedSettings(BaseModel):
         Schema-version history:
 
         - **v1**: ``agent_settings`` + ``conversation_settings`` only.
-          Pre-misc-settings. Missing ``misc_settings`` defaults to an empty
-          :class:`MiscSettings`.
-        - **v2** (current): adds the ``misc_settings`` container, which
-          currently wraps :class:`MiscSettings.app_preferences`.
+          Missing ``misc_settings`` defaults to an empty dict.
+        - **v2** (current): adds the opaque ``misc_settings`` container.
         """
         if not isinstance(data, dict):
             return cls.model_validate(data, context=context)

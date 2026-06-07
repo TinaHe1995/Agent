@@ -28,74 +28,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 
 if TYPE_CHECKING:
     from .model import AgentSettingsConfig, ConversationSettings
-
-
-# ── Misc Settings (frontend-owned, not interpreted by the agent) ─────────
-
-
-class AppPreferences(BaseModel):
-    """Frontend app-level user preferences that don't affect agent execution.
-
-    These fields are app/UI-level metadata (preferred language, sound
-    notifications, analytics opt-in, git identity used for in-conversation
-    commits) plus the list of skills the user has disabled. The agent-server
-    persists them alongside agent/conversation settings but does not interpret
-    them — the cloud equivalent (``POST /api/v1/settings``) accepts the same
-    keys at the top level, so frontends can use a single shape for both
-    backends.
-
-    Field semantics:
-
-    - ``language``, ``git_user_name``, ``git_user_email``: ``None`` means "no
-      preference set" (the frontend can fall back to its own default).
-    - ``user_consents_to_analytics``: tri-state — ``None`` means "not yet
-      asked", ``True``/``False`` are explicit answers.
-    - ``enable_sound_notifications``: ``None`` means "use frontend default";
-      ``True``/``False`` are explicit user choices.
-    - ``disabled_skills``: list of skill identifiers the user has disabled.
-      Defaults to an empty list (no skills disabled).
-
-    .. note::
-
-       Persisted as ``misc_settings.app_preferences`` since persisted-settings
-       schema v2. The wrapper :class:`MiscSettings` is the addressable block
-       on :class:`SettingsResponse`; this class is only the inner payload.
-    """
-
-    language: str | None = None
-    user_consents_to_analytics: bool | None = None
-    enable_sound_notifications: bool | None = None
-    git_user_name: str | None = None
-    git_user_email: str | None = None
-    disabled_skills: list[str] = Field(default_factory=list)
-
-    model_config = ConfigDict(extra="ignore")
-
-
-class MiscSettings(BaseModel):
-    """Container for frontend-owned settings that the agent doesn't interpret.
-
-    A single addressable block on :class:`SettingsResponse` so the API has one
-    extension point for "settings the frontend wants persisted, but the agent
-    doesn't act on". Currently holds :class:`AppPreferences`; new categories
-    (e.g. UI preferences, layout state) can be added as additional nested
-    fields without churning the top-level API shape.
-
-    Persisted as ``misc_settings`` on :class:`PersistedSettings` (schema v2+).
-    Updated through ``misc_settings_diff`` on :class:`SettingsUpdateRequest`,
-    which is deep-merged into the existing block — so a partial diff like
-    ``{"app_preferences": {"language": "fr"}}`` updates only ``language`` and
-    leaves every other ``app_preferences`` field alone.
-    """
-
-    app_preferences: AppPreferences = Field(default_factory=AppPreferences)
-
-    model_config = ConfigDict(extra="ignore")
 
 
 # ── Settings API Models ───────────────────────────────────────────────────
@@ -117,13 +54,16 @@ class SettingsResponse(BaseModel):
         response = SettingsResponse.model_validate(api_response.json())
         agent = response.get_agent_settings()  # Returns AgentSettingsConfig
         conv = response.get_conversation_settings()  # Returns ConversationSettings
-        prefs = response.misc_settings.app_preferences  # Already typed
+
+    ``misc_settings`` is an opaque container for frontend-owned data that the
+    agent-server persists but does not interpret — see the docstring of
+    :class:`PersistedSettings.misc_settings`.
     """
 
     agent_settings: dict[str, Any]
     conversation_settings: dict[str, Any]
     llm_api_key_is_set: bool
-    misc_settings: MiscSettings = Field(default_factory=MiscSettings)
+    misc_settings: dict[str, Any] = Field(default_factory=dict)
 
     def get_agent_settings(self) -> AgentSettingsConfig:
         """Parse and validate ``agent_settings`` into a typed model.
@@ -151,15 +91,12 @@ class SettingsUpdateRequest(BaseModel):
     """Request model for PATCH /api/settings.
 
     Supports partial updates via diff objects that are deep-merged with
-    existing settings.
-
-    ``misc_settings_diff`` accepts a partial :class:`MiscSettings` dict and is
-    deep-merged into the persisted block, matching the semantics of
-    ``agent_settings_diff`` and ``conversation_settings_diff``. So a partial
-    payload like ``{"misc_settings_diff": {"app_preferences": {"language":
-    "fr"}}}`` updates only the ``language`` field of ``app_preferences``;
-    every other field is left alone. Lists (e.g. ``disabled_skills``) are
-    replaced wholesale rather than merged.
+    existing settings. ``misc_settings_diff`` is deep-merged into the
+    persisted ``misc_settings`` block with the same semantics as
+    ``agent_settings_diff`` and ``conversation_settings_diff``: nested dicts
+    merge recursively, and lists are replaced wholesale rather than merged.
+    Because ``misc_settings`` is opaque to the agent-server, callers are
+    responsible for the shape of what they store there.
     """
 
     agent_settings_diff: dict[str, Any] | None = None
