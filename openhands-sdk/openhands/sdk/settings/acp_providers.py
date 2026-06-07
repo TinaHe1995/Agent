@@ -264,6 +264,27 @@ class ACPProviderInfo:
     servers); defaulted so positional construction keeps working.
     """
 
+    data_dir_env_var: str | None = None
+    """Env var that relocates this CLI's per-user data/config root.
+
+    Set it to a per-conversation directory to isolate the CLI's on-disk state
+    (config, transcripts, caches, lockfiles) when several of a user's
+    conversations share one sandbox (``SandboxGroupingStrategy != NO_GROUPING``)
+    — otherwise they race on a single shared ``HOME`` (see #1019). Each CLI
+    exposes a different lever:
+
+    - ``CODEX_HOME``        — codex-acp (relocates ``~/.codex`` wholesale)
+    - ``CLAUDE_CONFIG_DIR`` — claude-agent-acp (relocates ``~/.claude*``)
+    - ``HOME``              — gemini-cli (no dedicated var; it hard-codes
+      ``~/.gemini`` and ignores ``XDG``, so only ``HOME`` moves it)
+
+    ``None`` for providers with no known relocation lever, which then skip
+    isolation. Consumed by
+    :attr:`~openhands.sdk.agent.ACPAgent.acp_isolate_data_dir`.
+    """
+
+    # Appended last to keep existing positional construction stable (the API
+    # breakage check flags moving an existing positional parameter).
     session_subtrees: tuple[str, ...] = field(default=(), compare=False)
     """Top-level subdirectories of the data root that hold session transcripts.
 
@@ -284,25 +305,6 @@ class ACPProviderInfo:
       data-dir lever is ``HOME``, far too broad to snapshot)
 
     Empty means the provider does not support session snapshots.
-    """
-
-    data_dir_env_var: str | None = None
-    """Env var that relocates this CLI's per-user data/config root.
-
-    Set it to a per-conversation directory to isolate the CLI's on-disk state
-    (config, transcripts, caches, lockfiles) when several of a user's
-    conversations share one sandbox (``SandboxGroupingStrategy != NO_GROUPING``)
-    — otherwise they race on a single shared ``HOME`` (see #1019). Each CLI
-    exposes a different lever:
-
-    - ``CODEX_HOME``        — codex-acp (relocates ``~/.codex`` wholesale)
-    - ``CLAUDE_CONFIG_DIR`` — claude-agent-acp (relocates ``~/.claude*``)
-    - ``HOME``              — gemini-cli (no dedicated var; it hard-codes
-      ``~/.gemini`` and ignores ``XDG``, so only ``HOME`` moves it)
-
-    ``None`` for providers with no known relocation lever, which then skip
-    isolation. Consumed by
-    :attr:`~openhands.sdk.agent.ACPAgent.acp_isolate_data_dir`.
     """
 
 

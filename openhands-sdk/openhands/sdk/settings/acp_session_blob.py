@@ -168,9 +168,7 @@ def import_acp_session_blob(
                     f"session blob target escapes data root: {member.name!r}"
                 )
             if target.is_symlink():
-                raise ValueError(
-                    f"refusing to write through symlink: {member.name!r}"
-                )
+                raise ValueError(f"refusing to write through symlink: {member.name!r}")
             if target.is_file() and target.stat().st_size > 0:
                 continue  # seed-if-absent: never clobber live state
             extracted = tar.extractfile(member)

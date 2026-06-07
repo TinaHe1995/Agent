@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from openhands.sdk.settings.acp_providers import ACP_PROVIDERS, get_acp_provider
+from openhands.sdk.settings.acp_providers import ACP_PROVIDERS
 from openhands.sdk.settings.acp_session_blob import (
     export_acp_session_blob,
     import_acp_session_blob,
@@ -231,6 +231,6 @@ def test_import_writes_restrictive_permissions(tmp_path):
 
 def test_registry_allowlists():
     """Pin the allowlists — widening one must be a deliberate, reviewed act."""
-    assert get_acp_provider("codex").session_subtrees == ("sessions",)
-    assert get_acp_provider("claude-code").session_subtrees == ("projects",)
-    assert get_acp_provider("gemini-cli").session_subtrees == ()
+    assert ACP_PROVIDERS["codex"].session_subtrees == ("sessions",)
+    assert ACP_PROVIDERS["claude-code"].session_subtrees == ("projects",)
+    assert ACP_PROVIDERS["gemini-cli"].session_subtrees == ()
