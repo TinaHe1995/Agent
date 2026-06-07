@@ -543,20 +543,6 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 return sub.model_validate(data, context=info.context)
         return handler(data)
 
-    @field_validator("safety_settings", mode="before", check_fields=False)
-    @classmethod
-    def _warn_safety_settings_deprecated(
-        cls, v: list[dict[str, str]] | None
-    ) -> list[dict[str, str]] | None:
-        if v is not None:
-            warn_deprecated(
-                "LLM.safety_settings",
-                deprecated_in="1.15.0",
-                removed_in="1.20.0",
-                details="Safety settings are no longer applied.",
-            )
-        return v
-
     @field_validator(
         "api_key", "aws_access_key_id", "aws_secret_access_key", "aws_session_token"
     )
