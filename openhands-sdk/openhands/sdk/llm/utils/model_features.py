@@ -232,6 +232,7 @@ def get_features(model: str) -> ModelFeatures:
             force_string_serializer=False,
             send_reasoning_content=False,
             supports_prompt_cache_retention=False,
+            requires_inline_image_data=False,
         )
 
     return ModelFeatures(

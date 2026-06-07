@@ -278,7 +278,14 @@ def find_third_party_files(
     files: list[Path] = []
     seen_names: set[str] = set()
     seen_real_paths: set[Path] = set()
-    for item in repo_root.iterdir():
+    try:
+        dir_items = list(repo_root.iterdir())
+    except PermissionError:
+        logger.debug(
+            f"Skipping third-party skill discovery in {repo_root}: permission denied"
+        )
+        return files
+    for item in dir_items:
         if item.is_file() and item.name.lower() in target_names:
             # Avoid duplicates (e.g., AGENTS.md and agents.md in same dir)
             name_lower = item.name.lower()

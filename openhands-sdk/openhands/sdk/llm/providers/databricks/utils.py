@@ -127,11 +127,15 @@ def _raise_non_retryable(response: httpx.Response) -> None:
 
     Called immediately (no sleep) for 400/401/403/404/422.
     """
+    raw_text = response.text[:500] if response.text else ""
     try:
         body = response.json()
     except Exception:
         body = {}
     msg = map_databricks_error(response.status_code, body)
+    # Include raw response body in the message when no structured error field was found
+    if msg.endswith("Unknown error") and raw_text:
+        msg = f"{msg} | url={response.url} | body={raw_text}"
     exc_class = STATUS_TO_LITELLM.get(response.status_code, BadRequestError)
     raise exc_class(msg, model="", llm_provider="databricks")
 
