@@ -483,9 +483,9 @@ def test_get_picker_entries_sort_order_recommended_first() -> None:
 
 def test_get_picker_entries_merges_discovered_on_top_of_curated() -> None:
     """Discovery adds non-curated endpoints; curated entries get live signals."""
-    # One endpoint overlaps curated (claude-sonnet-4-5), two are new.
+    # One endpoint overlaps curated (claude-sonnet-4-6), two are new.
     payload = _make_endpoints_payload([
-        _fmapi_ep("databricks-claude-sonnet-4-5"),   # overlaps curated
+        _fmapi_ep("databricks-claude-sonnet-4-6"),   # overlaps curated
         _fmapi_ep("databricks-meta-llama-4-maverick"),   # discovered only
         _external_ep("customer-private-gpt"),   # external-model discovered only
     ])
@@ -497,7 +497,7 @@ def test_get_picker_entries_merges_discovered_on_top_of_curated() -> None:
 
     # Overlap: curated entry kept recommended + its opinionated family, but
     # gained "curated+discovered" source and the live endpoint_type/ready.
-    overlap = by_qn["databricks/databricks-claude-sonnet-4-5"]
+    overlap = by_qn["databricks/databricks-claude-sonnet-4-6"]
     assert overlap.source == "curated+discovered"
     assert overlap.family is ProviderFamily.ANTHROPIC
     assert overlap.recommended is True

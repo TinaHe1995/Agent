@@ -77,8 +77,6 @@ def test_provider_family_openai_is_default_fallback() -> None:
         ("gpt-oss-120b",                             ProviderFamily.OPENAI),
         ("databricks-gpt-oss-120b",                  ProviderFamily.OPENAI),
         ("databricks-meta-llama-3-3-70b-instruct",   ProviderFamily.OPENAI),
-        ("databricks-dbrx-instruct",                 ProviderFamily.OPENAI),
-        ("mistral-7b-instruct",                      ProviderFamily.OPENAI),
 
         # Case-insensitive
         ("DATABRICKS-CLAUDE-SONNET-4-5",         ProviderFamily.ANTHROPIC),

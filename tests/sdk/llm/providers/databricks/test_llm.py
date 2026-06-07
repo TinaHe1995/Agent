@@ -29,8 +29,7 @@ from openhands.sdk.llm.providers.databricks.models import (
 
 _HOST = "https://adb-123.azuredatabricks.net"
 _MODEL_LLAMA = "databricks/databricks-meta-llama-3-3-70b-instruct"
-_MODEL_DBRX = "databricks/databricks-dbrx-instruct"
-_MODEL_CLAUDE = "databricks/databricks-claude-3-7-sonnet"
+_MODEL_CLAUDE = "databricks/databricks-claude-sonnet-4"
 _MODEL_UNKNOWN = "databricks/my-custom-finetuned-model"
 
 
@@ -168,12 +167,6 @@ def test_context_window_llama_70b() -> None:
     assert llm.max_input_tokens == DATABRICKS_CONTEXT_WINDOWS[_MODEL_LLAMA]
 
 
-def test_context_window_dbrx() -> None:
-    llm = _make_llm(model=_MODEL_DBRX)
-    assert llm.max_input_tokens == DATABRICKS_CONTEXT_WINDOWS[_MODEL_DBRX]
-    assert llm.max_input_tokens == 32_768
-
-
 def test_context_window_claude() -> None:
     """Claude-based Databricks models have 200K context window."""
     llm = _make_llm(model=_MODEL_CLAUDE)
@@ -184,12 +177,6 @@ def test_context_window_unknown_model_fallback() -> None:
     """Unknown Databricks models fall back to 128K context window."""
     llm = _make_llm(model=_MODEL_UNKNOWN)
     assert llm.max_input_tokens == 128_000
-
-
-def test_max_output_tokens_dbrx() -> None:
-    llm = _make_llm(model=_MODEL_DBRX)
-    assert llm.max_output_tokens == DATABRICKS_MAX_OUTPUT[_MODEL_DBRX]
-    assert llm.max_output_tokens == 4_096
 
 
 def test_max_output_tokens_claude() -> None:
@@ -386,7 +373,6 @@ def test_auth_method_property_reflects_pat_construction() -> None:
     "model,expected",
     [
         ("databricks/databricks-meta-llama-3-3-70b-instruct", ProviderFamily.OPENAI),
-        ("databricks/databricks-dbrx-instruct",               ProviderFamily.OPENAI),
         ("databricks/databricks-gpt-oss-120b",                ProviderFamily.OPENAI),
         ("databricks/databricks-claude-sonnet-4-5",           ProviderFamily.ANTHROPIC),
         ("databricks/databricks-claude-opus-4-6",             ProviderFamily.ANTHROPIC),
