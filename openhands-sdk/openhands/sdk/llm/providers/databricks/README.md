@@ -78,6 +78,19 @@ backend and the OpenHands-CLI, so the three front-ends can't drift apart. Each
 caller supplies its own local redirect/callback handling and passes the
 resulting tokens back in via `stored_u2m_tokens`.
 
+## Alignment with Databricks `ucode`
+
+This connector follows the same credential model as
+[Databricks `ucode`](https://github.com/databricks/ucode) — the *Unity AI
+Gateway Coding CLI* — which routes coding agents through the Databricks AI
+Gateway using workspace credentials, **no API keys required**. The `PROFILE`
+and `UNIFIED` strategies read the workspace login a developer has already
+established (`databricks auth login` / `~/.databrickscfg`), and `U2M` provides
+interactive browser OAuth. An OpenHands agent can therefore reach AI Gateway the
+same key-free, governed way `ucode` does — reusing the existing workspace
+session rather than minting a separate token — over one consistent path to the
+gateway (and the Unity Catalog–governed resources behind it).
+
 ## Discovery (picker UIs)
 
 Listing AI-Gateway-shaped chat endpoints:
