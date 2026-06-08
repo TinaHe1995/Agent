@@ -106,6 +106,28 @@ def sample_conversation_id():
     return uuid4()
 
 
+async def _cancel_pending_webhook_flush_tasks():
+    current_task = asyncio.current_task()
+    pending_flush_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not current_task
+        and not task.done()
+        and task.get_coro().__qualname__ == "WebhookSubscriber._flush_after_delay"
+    ]
+    for task in pending_flush_tasks:
+        task.cancel()
+    if pending_flush_tasks:
+        await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+
+
+@pytest.fixture(autouse=True)
+async def isolate_webhook_flush_timers():
+    await _cancel_pending_webhook_flush_tasks()
+    yield
+    await _cancel_pending_webhook_flush_tasks()
+
+
 class TestWebhookSpecValidation:
     """Test cases for WebhookSpec validation."""
 
