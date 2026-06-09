@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import importlib.util
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Tests that exercise the real `toolshield` package (bundled experiences,
+# `mcp_scan`, etc.) only run when the [toolshield] extra is installed.
+# The core SDK test job does not pull optional extras, so without this
+# guard those tests fail with `ImportError: toolshield is not installed`.
+requires_toolshield = pytest.mark.skipif(
+    importlib.util.find_spec("toolshield") is None,
+    reason="requires the [toolshield] extra (`pip install openhands-sdk[toolshield]`)",
+)
 from litellm.types.utils import Choices
 from litellm.types.utils import Message as LiteLLMMessage
 from litellm.types.utils import ModelResponse
@@ -598,10 +608,11 @@ class TestSafetyExperiences:
         sys_text = next(m for m in messages if m.role == "system").content[0].text
         assert "No tool-specific safety experiences" in sys_text
 
+    @requires_toolshield
     def test_opt_in_to_default_seed(self):
         """Callers who want the ToolShield seed must opt in explicitly by
         passing ``default_safety_experiences()`` -- there is no implicit
-        auto-load. Requires the ``[toolshield]`` extra (installed in CI).
+        auto-load. Requires the ``[toolshield]`` extra.
         """
         from openhands.sdk.security import default_safety_experiences
 
@@ -683,6 +694,7 @@ class TestToolShieldHelpers:
     # behavior paths so CI never has to TCP-probe localhost.
     # ----------------------------------------------------------------------
 
+    @requires_toolshield
     def test_auto_detect_loads_experiences_for_detected_server(self):
         """When toolshield.mcp_scan returns a recognized server, the helper
         loads its bundled experience."""
@@ -707,6 +719,7 @@ class TestToolShieldHelpers:
         assert "filesystem" in result.lower()
         assert "terminal" in result.lower()
 
+    @requires_toolshield
     def test_auto_detect_falls_back_to_default_seed_when_nothing_detected(self):
         """No networked servers + fallback_to_default=True -> default seed."""
         from openhands.sdk.security import toolshield_helpers as th
@@ -720,6 +733,7 @@ class TestToolShieldHelpers:
         assert len(result) > 100
         assert "terminal" in result.lower()
 
+    @requires_toolshield
     def test_auto_detect_handles_already_inside_event_loop(self):
         """If we're called from inside a running event loop, ``asyncio.run``
         raises RuntimeError. The helper must catch it and return just the
