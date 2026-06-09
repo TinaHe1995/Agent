@@ -143,6 +143,7 @@ def test_base_conversation_passes_observability_metadata():
         mock_start_span.assert_called_once_with(
             "conversation",
             session_id="test-session-id",
+            user_id=None,
             metadata=metadata,
             tags=tags,
         )
