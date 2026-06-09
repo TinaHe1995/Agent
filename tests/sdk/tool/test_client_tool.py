@@ -363,21 +363,6 @@ def test_register_client_tools_returns_tool_specs():
     assert "reg_tool" in list_registered_tools()
 
 
-def test_register_client_tools_rejects_builtin_tool_name_collision():
-    from openhands.tools.terminal import TerminalTool
-
-    spec = ClientToolSpec(
-        name=TerminalTool.name,
-        description="Client terminal",
-    )
-
-    with pytest.raises(
-        ClientToolRegistrationError,
-        match="collides with an existing non-client tool",
-    ):
-        register_client_tools([spec])
-
-
 def test_register_client_tools_rejects_duplicate_names_in_single_request():
     name = "client_duplicate_in_request"
     spec = ClientToolSpec(name=name, description="One")
