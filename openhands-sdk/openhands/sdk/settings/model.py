@@ -1798,7 +1798,12 @@ def validate_agent_settings(
     return _AGENT_SETTINGS_ADAPTER.validate_python(payload, context=context)
 
 
-def _merge_patch(base: dict[str, Any], diff: Mapping[str, Any]) -> dict[str, Any]:
+def _merge_patch(
+    base: dict[str, Any],
+    diff: Mapping[str, Any],
+    *,
+    remove_nulls: bool = False,
+) -> dict[str, Any]:
     """Apply an RFC 7386 JSON Merge Patch.
 
     Nested mappings merge recursively; ``None`` deletes a key; every other value
@@ -1807,10 +1812,12 @@ def _merge_patch(base: dict[str, Any], diff: Mapping[str, Any]) -> dict[str, Any
     """
     result = dict(base)
     for key, value in diff.items():
-        if value is None:
+        if value is None and remove_nulls:
             result.pop(key, None)
+        elif value is None:
+            result[key] = None
         elif isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
-            result[key] = _merge_patch(result[key], value)
+            result[key] = _merge_patch(result[key], value, remove_nulls=True)
         else:
             result[key] = value
     return result
@@ -1832,7 +1839,9 @@ def apply_agent_settings_diff(
       silently drop the outgoing variant's fields (the variants ignore unknown
       keys), producing a mongrel row.
     * When ``agent_kind`` is unchanged or omitted, deep-merge the diff within
-      the variant (``None`` unsets a key, per :func:`_merge_patch`).
+      the variant. Top-level ``None`` values are validated as ``None`` so
+      non-optional fields fail loudly; nested mapping ``None`` values remove
+      individual entries.
 
     ``base`` may be a raw persisted mapping or a settings instance; it is
     migrated and validated first. The merged result is re-validated against

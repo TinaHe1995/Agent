@@ -109,6 +109,30 @@ def test_none_in_diff_unsets_key_merge_patch() -> None:
     assert result.acp_model is None
 
 
+def test_null_top_level_required_field_is_rejected() -> None:
+    base = {
+        "agent_kind": "acp",
+        "acp_server": "claude-code",
+        "acp_env": {"KEEP_ME": "keep"},
+    }
+
+    with pytest.raises(ValueError):
+        apply_agent_settings_diff(base, {"acp_env": None})
+
+
+def test_null_nested_mapping_entry_is_removed() -> None:
+    base = {
+        "agent_kind": "acp",
+        "acp_server": "claude-code",
+        "acp_env": {"KEEP_ME": "keep", "DROP_ME": "drop"},
+    }
+
+    result = apply_agent_settings_diff(base, {"acp_env": {"DROP_ME": None}})
+
+    assert isinstance(result, ACPAgentSettings)
+    assert result.acp_env == {"KEEP_ME": "keep"}
+
+
 def test_empty_diff_returns_validated_base() -> None:
     base = {"agent_kind": "acp", "acp_server": "claude-code"}
 

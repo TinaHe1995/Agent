@@ -1104,6 +1104,7 @@ def test_patch_settings_same_kind_merge_after_a_switch(client_with_settings):
         json={
             "agent_settings_diff": {
                 "agent_kind": "acp",
+                "agent_context": {},
                 "acp_command": ["my-cli"],
                 "acp_env": {"FOO": "bar"},
             }
