@@ -1846,9 +1846,49 @@ async def test_async_subscription_api_key_uses_async_refresh(monkeypatch) -> Non
     )
     llm._is_subscription = True
 
-    assert await llm._aget_litellm_api_key_value() == "access-token"
-    assert llm.extra_headers is not None
-    assert llm.extra_headers["chatgpt-account-id"] == "account-id"
+    api_key, extra_headers = await llm._aget_litellm_auth_values()
+    assert api_key == "access-token"
+    assert extra_headers["chatgpt-account-id"] == "account-id"
+    assert llm.extra_headers is None
+
+
+def test_sync_subscription_api_key_uses_valid_runtime_credentials(
+    monkeypatch,
+) -> None:
+    import openhands.sdk.llm.auth.openai as openai_auth
+    from openhands.sdk.llm.auth.credentials import OAuthCredentials
+
+    credentials = OAuthCredentials(
+        vendor="openai",
+        access_token="access-token",
+        refresh_token="refresh-token",
+        expires_at=4_102_444_800_000,
+    )
+
+    class FakeAuth:
+        def __init__(self, credential_store=None):
+            self.credential_store = credential_store
+
+        def refresh_if_needed_sync(self):
+            raise AssertionError("valid runtime credentials should not sync-refresh")
+
+        def extract_chatgpt_account_id(self, refreshed_credentials):
+            assert refreshed_credentials is credentials
+            return "account-id"
+
+    monkeypatch.setattr(openai_auth, "OpenAISubscriptionAuth", FakeAuth)
+    llm = LLM(
+        model="openai/gpt-5.2-codex",
+        auth_type="subscription",
+        subscription_vendor="openai",
+    )
+    llm._is_subscription = True
+    llm._subscription_credentials = credentials
+
+    api_key, extra_headers = llm._get_litellm_auth_values()
+    assert api_key == "access-token"
+    assert extra_headers["chatgpt-account-id"] == "account-id"
+    assert llm.extra_headers is None
 
 
 def test_openai_subscription_create_llm_serializes_subscription_auth(

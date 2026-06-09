@@ -224,21 +224,18 @@ async def poll_openai_subscription_device_login(
         _IN_FLIGHT_OPENAI_DEVICE_LOGINS.add(request.device_code)
 
     auth = _get_openai_subscription_auth()
+    credentials = None
     try:
         credentials = await auth.poll_device_login(pending.device_code, persist=False)
-    except BaseException:
+    finally:
         async with _OPENAI_DEVICE_LOGIN_LOCK:
             _IN_FLIGHT_OPENAI_DEVICE_LOGINS.discard(request.device_code)
-            if pending.epoch == _OPENAI_DEVICE_LOGIN_EPOCH:
+            if credentials is None and pending.epoch == _OPENAI_DEVICE_LOGIN_EPOCH:
                 _PENDING_OPENAI_DEVICE_LOGINS[request.device_code] = pending
-        raise
 
     async with _OPENAI_DEVICE_LOGIN_LOCK:
-        _IN_FLIGHT_OPENAI_DEVICE_LOGINS.discard(request.device_code)
         current_epoch = _OPENAI_DEVICE_LOGIN_EPOCH
         if credentials is None:
-            if pending.epoch == current_epoch:
-                _PENDING_OPENAI_DEVICE_LOGINS[request.device_code] = pending
             return SubscriptionStatusResponse(connected=False)
         if pending.epoch != current_epoch:
             return SubscriptionStatusResponse(connected=False)
