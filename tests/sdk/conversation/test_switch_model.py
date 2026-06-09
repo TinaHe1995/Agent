@@ -10,11 +10,13 @@ from openhands.sdk import LLM, LocalConversation
 from openhands.sdk.agent import Agent
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
+from openhands.sdk.context.view import View
 from openhands.sdk.conversation.persistence_const import BASE_STATE
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
 )
+from openhands.sdk.event.llm_convertible import MessageEvent
 from openhands.sdk.llm import Message, MessageToolCall, TextContent, llm_profile_store
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.testing import TestLLM
@@ -24,6 +26,13 @@ from tests.conftest import create_mock_litellm_response
 
 def _make_llm(model: str, usage_id: str) -> LLM:
     return TestLLM.from_messages([], model=model, usage_id=usage_id)
+
+
+def _message_event(content: str) -> MessageEvent:
+    return MessageEvent(
+        llm_message=Message(role="user", content=[TextContent(text=content)]),
+        source="user",
+    )
 
 
 @pytest.fixture()
@@ -351,6 +360,46 @@ def test_switch_llm_refreshes_llm_condenser_credentials(
     content = response.message.content[0]
     assert isinstance(content, TextContent)
     assert content.text == "condensed summary"
+
+
+def test_switch_llm_condenser_can_generate_condensation(
+    empty_profile_store, tmp_path, monkeypatch
+):
+    initial_llm = LLM(model="litellm_proxy/old-model", usage_id="default")
+    condenser = LLMSummarizingCondenser(
+        llm=initial_llm.model_copy(update={"usage_id": "condenser"}),
+        max_size=6,
+        keep_first=1,
+    )
+    conv = LocalConversation(
+        agent=Agent(llm=initial_llm, condenser=condenser, tools=[]),
+        workspace=tmp_path,
+    )
+    conv._ensure_agent_ready()
+
+    switched_llm = LLM(
+        model="litellm_proxy/new-model",
+        api_key=SecretStr("new-test-key"),
+        usage_id="profile:new",
+    )
+    conv.switch_llm(switched_llm)
+
+    def _fake_completion(**kwargs):
+        return create_mock_litellm_response(
+            content="condensed summary",
+            model=kwargs["model"],
+        )
+
+    monkeypatch.setattr("openhands.sdk.llm.llm.litellm_completion", _fake_completion)
+
+    assert isinstance(conv.agent.condenser, LLMSummarizingCondenser)
+    condensation = conv.agent.condenser.get_condensation(
+        View.from_events([_message_event(f"event {i}") for i in range(12)]),
+        agent_llm=conv.agent.llm,
+    )
+
+    assert condensation.summary == "condensed summary"
+    assert len(condensation.forgotten_event_ids) > 0
 
 
 def test_switch_llm_then_send_message(empty_profile_store):
