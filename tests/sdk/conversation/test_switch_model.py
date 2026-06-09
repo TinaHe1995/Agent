@@ -402,6 +402,45 @@ def test_switch_llm_condenser_can_generate_condensation(
     assert len(condensation.forgotten_event_ids) > 0
 
 
+def test_switch_llm_preserves_independent_condenser_profile(
+    empty_profile_store, tmp_path
+):
+    initial_llm = LLM(
+        model="litellm_proxy/agent-old",
+        api_key=SecretStr("agent-old-key"),
+        usage_id="default",
+    )
+    independent_condenser_llm = LLM(
+        model="litellm_proxy/condenser-profile",
+        api_key=SecretStr("condenser-key"),
+        usage_id="condenser",
+    )
+    condenser = LLMSummarizingCondenser(
+        llm=independent_condenser_llm,
+        max_size=100,
+        keep_first=2,
+    )
+    conv = LocalConversation(
+        agent=Agent(llm=initial_llm, condenser=condenser, tools=[]),
+        workspace=tmp_path,
+    )
+    conv._ensure_agent_ready()
+
+    conv.switch_llm(
+        LLM(
+            model="litellm_proxy/agent-new",
+            api_key=SecretStr("agent-new-key"),
+            usage_id="profile:new",
+        )
+    )
+
+    assert isinstance(conv.agent.condenser, LLMSummarizingCondenser)
+    condenser_llm = conv.agent.condenser.llm
+    assert condenser_llm.model == "litellm_proxy/condenser-profile"
+    assert isinstance(condenser_llm.api_key, SecretStr)
+    assert condenser_llm.api_key.get_secret_value() == "condenser-key"
+
+
 def test_switch_llm_then_send_message(empty_profile_store):
     """send_message triggers _ensure_agent_ready, which re-registers agent
     LLMs in the registry. switch_llm adds an entry under the caller's

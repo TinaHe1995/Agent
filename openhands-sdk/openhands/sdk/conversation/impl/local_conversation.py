@@ -750,12 +750,29 @@ class LocalConversation(BaseConversation):
                 **existing,
             }
 
-    def _condenser_for_switched_llm(self, llm: LLM) -> CondenserBase | None:
+    def _condenser_for_switched_llm(
+        self,
+        current_llm: LLM,
+        new_llm: LLM,
+    ) -> CondenserBase | None:
         condenser = self.agent.condenser
         if not isinstance(condenser, LLMSummarizingCondenser):
             return condenser
 
-        condenser_llm = llm.model_copy(
+        current_config = current_llm.model_dump(
+            mode="json",
+            context={"expose_secrets": True},
+            exclude={"usage_id"},
+        )
+        condenser_config = condenser.llm.model_dump(
+            mode="json",
+            context={"expose_secrets": True},
+            exclude={"usage_id"},
+        )
+        if condenser_config != current_config:
+            return condenser
+
+        condenser_llm = new_llm.model_copy(
             update={"usage_id": condenser.llm.usage_id},
         )
         condenser_llm.reset_metrics()
@@ -790,7 +807,10 @@ class LocalConversation(BaseConversation):
         with lock:
             updates = {
                 "llm": new_llm,
-                "condenser": self._condenser_for_switched_llm(new_llm),
+                "condenser": self._condenser_for_switched_llm(
+                    self.agent.llm,
+                    new_llm,
+                ),
             }
             self.agent = self.agent.model_copy(update=updates)
             self._state.agent = self.agent
