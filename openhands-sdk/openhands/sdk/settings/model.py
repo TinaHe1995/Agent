@@ -1845,6 +1845,10 @@ def apply_agent_settings_diff(
         return base_settings
     new_kind = diff.get("agent_kind")
     if new_kind and new_kind != base_settings.agent_kind:
+        if new_kind == "acp" and diff.get("agent_context") is None:
+            raise ValueError(
+                "agent_context is required when switching agent_kind to acp"
+            )
         merged = _merge_patch({"agent_kind": new_kind}, diff)
     else:
         merged = _merge_patch(

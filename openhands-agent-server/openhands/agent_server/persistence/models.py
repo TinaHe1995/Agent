@@ -25,6 +25,7 @@ from pydantic import (
 from openhands.sdk.settings import (
     AgentSettingsConfig,
     ConversationSettings,
+    apply_agent_settings_diff,
     default_agent_settings,
     validate_agent_settings,
 )
@@ -201,42 +202,14 @@ class PersistedSettings(BaseModel):
         # Phase 1: Validate all updates before any mutations
         new_agent: AgentSettingsConfig | None = None
         new_conv: ConversationSettings | None = None
-        agent_merged: dict | None = None
         conv_merged: dict | None = None
 
         try:
             if isinstance(agent_update, dict):
-                # Check if this is a variant (agent_kind) switch
-                old_kind = self.agent_settings.agent_kind
-                new_kind = agent_update.get("agent_kind")
-                is_kind_switch = new_kind is not None and new_kind != old_kind
-
-                if is_kind_switch:
-                    # Variant replacement: validate the diff as-is rather than
-                    # deep-merging it onto the old variant. A kind switch picks a
-                    # different member of the AgentSettingsConfig union, and the
-                    # old variant's serialized fields are not a valid base for the
-                    # new one (e.g. ACP's acp_command has no place in
-                    # OpenHandsAgentSettings and would fail validation).
-                    #
-                    # Consequence (intentional): fields the two variants happen to
-                    # share (e.g. ``llm``) are NOT carried over — they fall back to
-                    # the new variant's defaults unless the caller restates them in
-                    # this same diff. Switching kinds is a fresh start on the new
-                    # variant, mirroring the frontend's "fresh base on kind switch"
-                    # behaviour. Callers that want to preserve a shared field must
-                    # include it in the switch payload.
-                    agent_merged = agent_update
-                else:
-                    # Same-kind update: deep-merge for incremental field edits
-                    agent_merged = _deep_merge(
-                        self.agent_settings.model_dump(
-                            mode="json", context={"expose_secrets": "plaintext"}
-                        ),
-                        agent_update,
-                    )
                 try:
-                    new_agent = validate_agent_settings(agent_merged)
+                    new_agent = apply_agent_settings_diff(
+                        self.agent_settings, agent_update
+                    )
                 except Exception as e:
                     # Use 'from None' to break exception chain - the original
                     # exception may contain secret values in Pydantic errors
@@ -280,8 +253,6 @@ class PersistedSettings(BaseModel):
                 self.active_profile = payload["active_profile"]
         finally:
             # Clear merged dicts to minimize plaintext exposure window
-            if agent_merged is not None:
-                agent_merged.clear()
             if conv_merged is not None:
                 conv_merged.clear()
 

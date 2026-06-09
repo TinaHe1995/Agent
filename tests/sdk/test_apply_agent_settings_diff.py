@@ -6,6 +6,7 @@ base, same-variant edits deep-merge. The settings stores previously hand-rolled
 this in several places; this exercises the single SDK owner.
 """
 
+import pytest
 from pydantic import SecretStr
 
 from openhands.sdk import apply_agent_settings_diff, validate_agent_settings
@@ -24,13 +25,29 @@ def test_switch_openhands_to_acp_replaces_with_fresh_variant() -> None:
     base = {"agent_kind": "openhands", "llm": {"model": "gpt"}}
 
     result = apply_agent_settings_diff(
-        base, {"agent_kind": "acp", "acp_server": "claude-code"}
+        base,
+        {
+            "agent_kind": "acp",
+            "agent_context": {},
+            "acp_server": "claude-code",
+        },
     )
 
     assert isinstance(result, ACPAgentSettings)
     assert result.acp_server == "claude-code"
-    # ACP's agent_context is nullable; the openhands llm.model is not carried.
-    assert result.agent_context is None
+    # The OpenHands llm.model is not carried across the variant boundary.
+    assert result.agent_context is not None
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [{"agent_kind": "acp"}, {"agent_kind": "acp", "agent_context": None}],
+)
+def test_switch_openhands_to_acp_requires_agent_context(diff) -> None:
+    base = {"agent_kind": "openhands", "llm": {"model": "gpt"}}
+
+    with pytest.raises(ValueError, match="agent_context is required"):
+        apply_agent_settings_diff(base, diff)
 
 
 def test_switch_acp_to_openhands_replaces_with_fresh_variant() -> None:
