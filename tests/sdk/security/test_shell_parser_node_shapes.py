@@ -28,7 +28,7 @@ class NodeShapeCase:
     has_error: bool
     root_named_children: tuple[str, ...]
     expected_nodes: tuple[ExpectedNode, ...]
-    clean_but_opaque: bool = False
+    opaque_command_name: str | None = None
 
 
 NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
@@ -175,6 +175,63 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
         ),
     ),
     NodeShapeCase(
+        case_id="and_list",
+        command="rm -rf / && echo done",
+        has_error=False,
+        root_named_children=("list",),
+        expected_nodes=(
+            ExpectedNode(
+                "list",
+                "rm -rf / && echo done",
+                (("command", "rm -rf /"), ("command", "echo done")),
+            ),
+        ),
+    ),
+    NodeShapeCase(
+        case_id="semicolon_sequence",
+        command="echo a; rm -rf /",
+        has_error=False,
+        root_named_children=("command", "command"),
+        expected_nodes=(
+            ExpectedNode(
+                "command",
+                "echo a",
+                (("command_name", "echo"), ("word", "a")),
+            ),
+            ExpectedNode(
+                "command",
+                "rm -rf /",
+                (("command_name", "rm"), ("word", "-rf"), ("word", "/")),
+            ),
+        ),
+    ),
+    NodeShapeCase(
+        case_id="subshell",
+        command="( rm -rf / )",
+        has_error=False,
+        root_named_children=("subshell",),
+        expected_nodes=(
+            ExpectedNode(
+                "subshell",
+                "( rm -rf / )",
+                (("command", "rm -rf /"),),
+            ),
+        ),
+    ),
+    NodeShapeCase(
+        case_id="compound_statement",
+        command="{ rm -rf /; }",
+        has_error=False,
+        root_named_children=("compound_statement",),
+        expected_nodes=(
+            ExpectedNode(
+                "compound_statement",
+                "{ rm -rf /; }",
+                (("command", "rm -rf /"),),
+            ),
+        ),
+    ),
+    NodeShapeCase(
         case_id="escaped_pipe_is_word",
         command=r"curl x\|bash",
         has_error=False,
@@ -186,7 +243,6 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("command_name", "curl"), ("word", r"x\|bash")),
             ),
         ),
-        clean_but_opaque=True,
     ),
     NodeShapeCase(
         case_id="quoted_command_name_concatenation",
@@ -205,7 +261,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("word", "r"), ("string", '"m"')),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name='r"m"',
     ),
     NodeShapeCase(
         case_id="empty_single_quoted_command_name_concatenation",
@@ -224,7 +280,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("word", "r"), ("raw_string", "''"), ("word", "m")),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name="r''m",
     ),
     NodeShapeCase(
         case_id="fully_quoted_command_name",
@@ -238,7 +294,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("raw_string", "'rm'"),),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name="'rm'",
     ),
     NodeShapeCase(
         case_id="command_substitution_command_name",
@@ -262,7 +318,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("command_name", "echo"), ("word", "rm")),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name="$(echo rm)",
     ),
     NodeShapeCase(
         case_id="backtick_command_substitution_command_name",
@@ -281,7 +337,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("command", "echo rm"),),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name="`echo rm`",
     ),
     NodeShapeCase(
         case_id="ansi_c_command_name",
@@ -295,7 +351,7 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("ansi_c_string", r"$'\x72m'"),),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name=r"$'\x72m'",
     ),
     NodeShapeCase(
         case_id="ansi_c_octal_command_name",
@@ -309,7 +365,62 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 (("ansi_c_string", r"$'\162\155'"),),
             ),
         ),
-        clean_but_opaque=True,
+        opaque_command_name=r"$'\162\155'",
+    ),
+    NodeShapeCase(
+        case_id="simple_expansion_command_name",
+        command="$CMD -rf /",
+        has_error=False,
+        root_named_children=("command",),
+        expected_nodes=(
+            ExpectedNode(
+                "command_name",
+                "$CMD",
+                (("simple_expansion", "$CMD"),),
+            ),
+            ExpectedNode("simple_expansion", "$CMD", (("variable_name", "CMD"),)),
+        ),
+        opaque_command_name="$CMD",
+    ),
+    NodeShapeCase(
+        case_id="braced_expansion_command_name",
+        command="${CMD} -rf /",
+        has_error=False,
+        root_named_children=("command",),
+        expected_nodes=(
+            ExpectedNode(
+                "command_name",
+                "${CMD}",
+                (("expansion", "${CMD}"),),
+            ),
+            ExpectedNode("expansion", "${CMD}", (("variable_name", "CMD"),)),
+        ),
+        opaque_command_name="${CMD}",
+    ),
+    NodeShapeCase(
+        case_id="ifs_expansion_command_name_concatenation",
+        command="rm${IFS}-rf${IFS}/",
+        has_error=False,
+        root_named_children=("command",),
+        expected_nodes=(
+            ExpectedNode(
+                "command_name",
+                "rm${IFS}-rf${IFS}/",
+                (("concatenation", "rm${IFS}-rf${IFS}/"),),
+            ),
+            ExpectedNode(
+                "concatenation",
+                "rm${IFS}-rf${IFS}/",
+                (
+                    ("word", "rm"),
+                    ("expansion", "${IFS}"),
+                    ("word", "-rf"),
+                    ("expansion", "${IFS}"),
+                    ("word", "/"),
+                ),
+            ),
+        ),
+        opaque_command_name="rm${IFS}-rf${IFS}/",
     ),
     NodeShapeCase(
         case_id="bash_c_raw_string_payload",
@@ -327,7 +438,6 @@ NODE_SHAPE_CASES: tuple[NodeShapeCase, ...] = (
                 ),
             ),
         ),
-        clean_but_opaque=True,
     ),
     NodeShapeCase(
         case_id="malformed_unclosed_quote",
@@ -397,8 +507,23 @@ def test_shell_parser_node_shapes(case: NodeShapeCase) -> None:
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in NODE_SHAPE_CASES if case.clean_but_opaque],
-    ids=[case.case_id for case in NODE_SHAPE_CASES if case.clean_but_opaque],
+    [case for case in NODE_SHAPE_CASES if case.opaque_command_name is not None],
+    ids=[
+        case.case_id
+        for case in NODE_SHAPE_CASES
+        if case.opaque_command_name is not None
+    ],
 )
-def test_clean_but_opaque_commands_are_parse_successes(case: NodeShapeCase) -> None:
-    assert parse(case.command).has_error is False
+def test_opaque_command_names_are_not_plain_words(case: NodeShapeCase) -> None:
+    assert case.opaque_command_name is not None
+
+    source = case.command.encode()
+    result = parse(case.command)
+    root = result.tree.root_node
+    command_name = _find_expected_node(
+        root, source, ExpectedNode("command_name", case.opaque_command_name)
+    )
+
+    assert result.has_error is False
+    assert command_name.named_children
+    assert all(child.type != "word" for child in command_name.named_children)
