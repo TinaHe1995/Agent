@@ -5989,9 +5989,7 @@ class TestACPSessionIdPersistence:
         models.available_models = entries
         return models
 
-    def test_unknown_provider_applies_override_via_set_config_option(
-        self, tmp_path
-    ):
+    def test_unknown_provider_applies_override_via_set_config_option(self, tmp_path):
         """Fresh session on an unknown/custom provider with ``acp_model`` set:
         the override is pushed via ``set_config_option`` (not ``set_session_model``),
         so ``current_model_id`` must reflect the applied override.
