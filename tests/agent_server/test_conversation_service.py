@@ -48,6 +48,7 @@ from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.secret import SecretSource, StaticSecret
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 from openhands.sdk.security.risk import SecurityRisk
+from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
 from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
 
@@ -134,6 +135,146 @@ def conversation_service():
         # Initialize the _event_services dict to simulate an active service
         service._event_services = {}
         yield service
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_registers_and_injects_client_tools(
+    conversation_service, tmp_path
+):
+    """client_tools specs are registered, injected into the agent, and persisted.
+
+    Persistence on ``StoredConversation`` is what allows forks and server
+    restarts to re-register the dynamic client tools.
+    """
+    from openhands.sdk.tool.client_tool import ClientToolSpec
+
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        client_tools=[
+            ClientToolSpec(
+                name="srv_show_dialog",
+                description="Show a dialog",
+                parameters={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            )
+        ],
+    )
+
+    captured: dict[str, StoredConversation] = {}
+
+    async def fake_start_event_service(stored: StoredConversation):
+        captured["stored"] = stored
+        service = AsyncMock(spec=EventService)
+        service.stored = stored
+        service.get_state.return_value = ConversationState(
+            id=stored.id,
+            agent=stored.agent,
+            workspace=stored.workspace,
+            execution_status=ConversationExecutionStatus.IDLE,
+            confirmation_policy=stored.confirmation_policy,
+        )
+        return service
+
+    with patch.object(
+        conversation_service,
+        "_start_event_service",
+        side_effect=fake_start_event_service,
+    ):
+        await conversation_service.start_conversation(request)
+
+    stored = captured["stored"]
+    # Injected into the agent's tool specs so _initialize() can resolve it
+    assert "srv_show_dialog" in {t.name for t in stored.agent.tools}
+    # Persisted so forks / restarts can re-register the dynamic action type
+    assert [s.name for s in stored.client_tools] == ["srv_show_dialog"]
+    # The class is registered in the global tool registry
+    from openhands.sdk.tool.registry import list_registered_tools
+
+    assert "srv_show_dialog" in list_registered_tools()
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_decrypts_encrypted_agent_settings_mcp_env(
+    conversation_service, tmp_path
+):
+    cipher = Cipher("mcp-env-test-key")
+    conversation_service.cipher = cipher
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    encrypted_llm_key = cipher.encrypt(SecretStr("sk-plaintext"))
+    encrypted_mcp_token = cipher.encrypt(SecretStr("ghp-plaintext"))
+    request = StartConversationRequest(
+        agent_settings={
+            "schema_version": 1,
+            "agent_kind": "llm",
+            "llm": {
+                "model": "gpt-4o",
+                "usage_id": "test-llm",
+                "api_key": encrypted_llm_key,
+            },
+            "tools": [],
+            "mcp_config": {
+                "mcpServers": {
+                    "github": {
+                        "command": "npx",
+                        "env": {
+                            "GITHUB_PERSONAL_ACCESS_TOKEN": encrypted_mcp_token,
+                        },
+                    }
+                }
+            },
+        },
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        secrets_encrypted=True,
+    )
+    assert (
+        request.agent.mcp_config["mcpServers"]["github"]["env"][
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+        ]
+        == encrypted_mcp_token
+    )
+
+    captured: dict[str, StoredConversation] = {}
+
+    async def fake_start_event_service(stored: StoredConversation):
+        captured["stored"] = stored
+        service = AsyncMock(spec=EventService)
+        service.stored = stored
+        service.get_state.return_value = ConversationState(
+            id=stored.id,
+            agent=stored.agent,
+            workspace=stored.workspace,
+            execution_status=ConversationExecutionStatus.IDLE,
+            confirmation_policy=stored.confirmation_policy,
+        )
+        return service
+
+    with patch.object(
+        conversation_service,
+        "_start_event_service",
+        side_effect=fake_start_event_service,
+    ):
+        await conversation_service.start_conversation(request)
+
+    stored = captured["stored"]
+    assert isinstance(stored.agent.llm.api_key, SecretStr)
+    assert stored.agent.llm.api_key.get_secret_value() == "sk-plaintext"
+    assert (
+        stored.agent.mcp_config["mcpServers"]["github"]["env"][
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+        ]
+        == "ghp-plaintext"
+    )
 
 
 @pytest.mark.asyncio

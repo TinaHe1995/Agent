@@ -34,6 +34,40 @@ a human maintainer has commented confirming the results (e.g., "Human review don
 follow the normal approval policy. The eval monitor link is authoritative proof of
 benchmark validation for this repository.
 
+### Review decision policy (release PR workflow validation)
+
+For release PRs (for example branches like `rel-1.23.0`, or diffs that bump package versions
+across the distributable packages), do **NOT** approve until you have checked the latest PR-specific
+results for all three of these workflows:
+
+- `Run tests`
+- `Run Examples Scripts`
+- `Run Integration Tests`
+
+The standard review prompt does not inline ordinary PR issue comments, so use the
+GitHub API / `gh` from the terminal to inspect the latest PR comments and workflow
+results before deciding.
+
+For each workflow:
+
+1. Verify it actually ran for **this PR**, not only on `main`, on a scheduled run,
+   or on an older PR head commit.
+2. Read the latest PR comment from that workflow. In this repo those comments
+   normally look like:
+   - `Run tests`: the coverage report comment containing
+     `<!-- Pytest Coverage Comment: coverage-report -->`
+   - `Run Examples Scripts`: a comment starting with
+     `## 🔄 Running Examples`
+   - `Run Integration Tests`: a comment starting with
+     `# 🧪 Integration Tests Results`
+3. Cross-check the corresponding workflow/check result and make sure the comment
+   still matches the current PR state.
+
+If any of the three workflows is missing, skipped, stale, ambiguous, or failing,
+do **NOT** approve. Leave a **COMMENT** review that names the missing/failing
+validation and explicitly asks for human maintainer review instead.
+
+
 ### Default approval policy
 
 **Default to APPROVE**: If your review finds no issues at "important" level or higher,
@@ -70,6 +104,36 @@ Examples:
 - A PR adding a new model to `resolve_model_config.py` or `verified_models.py` with corresponding test updates
 - A PR adding documentation notes to docstrings clarifying method behavior (e.g., security considerations, bypass behaviors)
 - A PR changing CI runners or fixing workflow infrastructure issues (e.g., standardizing runner types to fix path inconsistencies)
+
+### Special rule: live preflight failures for newly-added models
+
+PRs that only add an entry to `.github/run-eval/resolve_model_config.py` (and
+the matching test in `tests/cross/test_resolve_model_config.py`) interact with
+the LiteLLM proxy at `LLM_BASE_URL` (default
+`https://llm-proxy.eval.all-hands.dev`). Provisioning a new model name on that
+proxy is done **out-of-band**, not in the PR.
+
+A live preflight call that returns
+`Invalid model name passed in model=<provider>/<name>` for a model the PR is
+introducing is therefore **not** evidence that the PR is broken — it is most
+likely transient proxy-provisioning lag.
+
+When reviewing or QA-ing such a PR:
+
+- Do **not** post `❌ QA Report: FAIL` purely because the live preflight
+  rejected the new model name.
+- Do **not** open or re-open a 🔴 Critical inline thread on the new model
+  entry purely on the basis of `Invalid model name` from the live proxy.
+- Treat any of the following as authoritative validation instead:
+  1. A successful integration-runner workflow run for this PR.
+  2. A run for this model on
+     [openhands-eval-monitor.vercel.app](https://openhands-eval-monitor.vercel.app/).
+  3. The author's explicit confirmation (e.g. screenshot) that the model is
+     reachable via the proxy.
+
+Real preflight blockers still apply (parameter conflicts on Claude, bad
+`litellm_extra_body`, unit-test failures, regressions on existing models —
+see `.github/run-eval/AGENTS.md` "What still IS a real preflight blocker").
 
 ### When to COMMENT
 
