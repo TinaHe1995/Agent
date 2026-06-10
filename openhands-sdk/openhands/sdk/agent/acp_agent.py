@@ -605,7 +605,8 @@ async def _reapply_session_model_on_resume(
                 session_id=session_id,
             )
             logger.info(
-                "Reapplied model %r on unknown/custom ACP server %s via set_config_option",
+                "Reapplied model %r on unknown/custom ACP server %s "
+                "via set_config_option",
                 acp_model,
                 agent_name,
             )
