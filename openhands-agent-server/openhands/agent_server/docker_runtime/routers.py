@@ -23,9 +23,6 @@ What's intentionally NOT here:
 
 * No batch-get / count / search routes — those are served by the
   unchanged ``conversation_router`` against the shared filesystem.
-* No workspace static router — the catch-all
-  ``/{cid}/{tail:path}`` proxy covers ``/{cid}/workspace/...`` already,
-  and the outer mounts a thin cookie-auth wrapper that delegates here.
 """
 
 from __future__ import annotations
@@ -51,9 +48,9 @@ from openhands.agent_server.docker_runtime.proxy import (
 )
 from openhands.agent_server.docker_runtime.registry import (
     DockerConversationRegistry,
+    RunningConversationContainer,
 )
 from openhands.sdk.logger import get_logger
-from openhands.workspace.docker.workspace import DockerWorkspace
 
 
 logger = get_logger(__name__)
@@ -75,7 +72,7 @@ def _ws_get_registry(websocket: WebSocket) -> DockerConversationRegistry | None:
 
 def _workspace_or_404(
     registry: DockerConversationRegistry, conversation_id: UUID
-) -> DockerWorkspace:
+) -> RunningConversationContainer:
     ws = registry.get(conversation_id)
     if ws is None:
         raise HTTPException(

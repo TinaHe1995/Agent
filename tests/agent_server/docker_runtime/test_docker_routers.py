@@ -196,6 +196,7 @@ def docker_app(tmp_path):
         app = create_app(
             Config(
                 conversation_runtime="docker",
+                session_api_keys=[],
                 conversations_path=tmp_path / "conversations",
             )
         )
@@ -320,6 +321,7 @@ def test_metadata_routes_are_mounted_locally_in_docker_mode(tmp_path):
     app = create_app(
         Config(
             conversation_runtime="docker",
+            session_api_keys=[],
             conversations_path=tmp_path / "conversations",
         )
     )
@@ -345,10 +347,11 @@ def test_local_mode_routes_are_unchanged(tmp_path):
     app = create_app(
         Config(
             conversation_runtime="local",
+            session_api_keys=[],
             conversations_path=tmp_path / "conversations",
         )
     )
-    paths = {r.path for r in app.routes if hasattr(r, "path")}
+    paths = {getattr(r, "path", None) for r in app.routes}
     assert "/api/conversations" in paths
     # The docker-mode catch-all path must NOT appear in local mode.
     assert "/api/conversations/{conversation_id}/{tail:path}" not in paths
@@ -516,6 +519,7 @@ def test_workspace_router_registered_under_cookie_auth_in_docker_mode(tmp_path):
     app = create_app(
         Config(
             conversation_runtime="docker",
+            session_api_keys=[],
             conversations_path=tmp_path / "conversations",
         )
     )

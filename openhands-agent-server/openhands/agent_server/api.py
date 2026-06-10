@@ -210,9 +210,9 @@ async def api_lifespan(api: FastAPI) -> AsyncIterator[None]:
                     config.bash_events_retention_seconds,
                 )
 
-            # Docker runtime: per-conversation container registry, backed by
-            # ``DockerWorkspace``. The proxy routers each construct their own
-            # short-lived ``httpx.AsyncClient`` per request, so there is no
+            # Docker runtime: per-conversation container registry. The proxy
+            # routers each construct their own short-lived ``httpx.AsyncClient``
+            # per request, so there is no
             # shared HTTP client to plumb in here. The in-process
             # ``ConversationService`` stays live but runs in
             # ``read_only_metadata`` mode — it answers list/count/search/get

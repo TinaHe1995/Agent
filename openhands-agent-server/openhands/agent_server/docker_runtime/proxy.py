@@ -5,10 +5,9 @@ agent-server and an inner per-conversation container, without inspecting
 request bodies or response shapes.
 
 The inner agent-server is reached on ``127.0.0.1:<host_port>`` (loopback
-only — see :attr:`DockerWorkspace.bind_host`) and currently doesn't
-require any auth header: defense-in-depth is provided by the loopback
-binding, and the OUTER server has already enforced its session-API-key
-checks (or other auth) before these helpers run.
+only) and receives the registry's per-container session key. Defense-in-depth
+is provided by the loopback binding, and the OUTER server has already enforced
+its session-API-key checks (or other auth) before these helpers run.
 
 These helpers are *only* used by routes in
 :mod:`openhands.agent_server.docker_runtime.routers`; nothing outside the
@@ -19,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Protocol
 
 import httpx
 import websockets
@@ -28,7 +28,11 @@ from starlette.responses import StreamingResponse
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from openhands.sdk.logger import get_logger
-from openhands.workspace.docker.workspace import DockerWorkspace
+
+
+class ProxyTarget(Protocol):
+    host: str
+    api_key: str | None
 
 
 logger = get_logger(__name__)
@@ -62,7 +66,7 @@ def _filter_headers(headers) -> dict[str, str]:
 
 async def proxy_http(
     request: Request,
-    workspace: DockerWorkspace,
+    workspace: ProxyTarget,
     *,
     upstream_path: str,
     timeout: float | None = None,
@@ -71,7 +75,7 @@ async def proxy_http(
 
     Args:
         request: Incoming Starlette request on the outer agent-server.
-        workspace: The :class:`DockerWorkspace` for the target container.
+        workspace: The proxy target for the target container.
         upstream_path: Path (including any query string) on the inner
             agent-server to forward to. Typically the same path the outer
             server received, since the inner agent-server exposes the same
@@ -140,7 +144,7 @@ async def proxy_http(
 
 async def bridge_websocket(
     client_ws: WebSocket,
-    workspace: DockerWorkspace,
+    workspace: ProxyTarget,
     *,
     upstream_path: str,
 ) -> None:

@@ -1,15 +1,9 @@
 """Per-conversation Docker container registry.
 
-A thin async wrapper around :class:`DockerWorkspace`. The workspace owns
-the heavy lifting (port allocation, ``docker run``, health checks, ``docker
-stop`` on cleanup, optional log streaming, pause/resume); this class just
-hands out one workspace per conversation id and serializes concurrent
-start/stop calls.
-
 The outer agent-server and every sub-container share the same on-disk
 persistence directories (``conversations_path`` and the sibling
 ``.openhands`` settings dir) via bind-mounts. Each sub-container only
-sees its OWN conversation subdirectory under the shared
+sees its own conversation subdirectory under the shared
 ``conversations_path``, so leases never collide. The outer never claims
 a lease — it reads metadata off disk and proxies all mutations.
 """
@@ -18,15 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
+import socket
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
-from uuid import UUID
+from urllib.request import urlopen
+from uuid import UUID, uuid4
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.persistence.store import _get_persistence_dir
 from openhands.sdk.logger import get_logger
-from openhands.sdk.workspace import PlatformType
-from openhands.workspace.docker.workspace import DockerWorkspace
+from openhands.sdk.utils.command import execute_command
 
 
 logger = get_logger(__name__)
@@ -39,66 +36,146 @@ _CONTAINER_CONV_DIR = "/var/openhands/conversations"
 _CONTAINER_PERSIST_DIR = "/var/openhands/.openhands"
 
 
+@dataclass(slots=True)
+class RunningConversationContainer:
+    """Container connection details used by the docker-runtime proxy."""
+
+    host: str
+    api_key: str | None
+    container_id: str | None
+    image: str
+
+    def cleanup(self) -> None:
+        if self.container_id is None:
+            return
+        container_id = self.container_id
+        self.container_id = None
+        logger.info("Stopping conversation container: %s", container_id)
+        result = execute_command(["docker", "stop", container_id])
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to stop conversation container %s: %s",
+                container_id,
+                result.stderr,
+            )
+
+
 class DockerConversationRegistry:
-    """Hand out one :class:`DockerWorkspace` per conversation id.
+    """Hand out one Docker container per conversation id.
 
     The registry is in-memory: restarting the outer agent-server forgets
-    every running container. That's deliberate — sub-containers are
-    short-lived agent-server processes whose canonical state lives on the
-    shared persistence volume, so any restart can re-claim them by spawning
-    fresh containers against the same on-disk state.
+    every running container. That's deliberate for this first docker-runtime
+    mode; the persisted conversation state remains on disk, while container
+    re-attachment/reclaiming can be added later.
     """
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._workspaces: dict[UUID, DockerWorkspace] = {}
+        self._containers: dict[UUID, RunningConversationContainer] = {}
+        self._starts: dict[UUID, asyncio.Task[RunningConversationContainer]] = {}
         self._lock = asyncio.Lock()
 
     @property
     def config(self) -> Config:
         return self._config
 
-    def get(self, conversation_id: UUID) -> DockerWorkspace | None:
-        return self._workspaces.get(conversation_id)
+    def get(self, conversation_id: UUID) -> RunningConversationContainer | None:
+        return self._containers.get(conversation_id)
 
-    def items(self) -> list[tuple[UUID, DockerWorkspace]]:
-        return list(self._workspaces.items())
+    def items(self) -> list[tuple[UUID, RunningConversationContainer]]:
+        return list(self._containers.items())
 
     async def get_or_create(
         self, conversation_id: UUID
-    ) -> tuple[DockerWorkspace, bool]:
+    ) -> tuple[RunningConversationContainer, bool]:
         """Idempotently spawn the container for ``conversation_id``.
 
-        Returns ``(workspace, is_new)``. Callers that need to clean up on a
-        failed startup must gate the teardown on ``is_new`` so retried
-        requests don't tear down a live conversation.
+        Starts for different conversations are allowed to proceed concurrently,
+        while concurrent starts for the same id share the same task. Returns
+        ``(container, is_new)`` so callers can clean up only containers they
+        just created when the initial proxied request fails.
         """
         async with self._lock:
-            existing = self._workspaces.get(conversation_id)
+            existing = self._containers.get(conversation_id)
             if existing is not None:
                 return existing, False
 
-            ws = await asyncio.to_thread(self._build_workspace, conversation_id)
-            self._workspaces[conversation_id] = ws
-            return ws, True
+            task = self._starts.get(conversation_id)
+            is_new = task is None
+            if task is None:
+                task = asyncio.create_task(
+                    asyncio.to_thread(self._build_container, conversation_id)
+                )
+                self._starts[conversation_id] = task
+
+        try:
+            container = await task
+        except Exception:
+            async with self._lock:
+                if self._starts.get(conversation_id) is task:
+                    self._starts.pop(conversation_id, None)
+            raise
+
+        async with self._lock:
+            existing = self._containers.get(conversation_id)
+            if existing is not None:
+                return existing, False
+            if self._starts.get(conversation_id) is not task:
+                should_cleanup = True
+            else:
+                should_cleanup = False
+                self._starts.pop(conversation_id, None)
+                self._containers[conversation_id] = container
+
+        if should_cleanup:
+            await asyncio.to_thread(container.cleanup)
+            raise RuntimeError(
+                f"Conversation container startup was cancelled: {conversation_id}"
+            )
+        return container, is_new
 
     async def stop(self, conversation_id: UUID) -> bool:
         async with self._lock:
-            ws = self._workspaces.pop(conversation_id, None)
-        if ws is None:
-            return False
-        await asyncio.to_thread(ws.cleanup)
-        return True
+            container = self._containers.pop(conversation_id, None)
+            start_task = self._starts.pop(conversation_id, None)
+
+        stopped = False
+        if container is not None:
+            await asyncio.to_thread(container.cleanup)
+            stopped = True
+        if start_task is not None:
+            try:
+                started = await start_task
+            except Exception:
+                return stopped
+            await asyncio.to_thread(started.cleanup)
+            stopped = True
+        return stopped
 
     async def shutdown(self) -> None:
-        """Stop every tracked container. Best-effort: a single broken
-        container must not block the rest from being cleaned up."""
+        """Stop every tracked container.
+
+        Best-effort: a single broken container must not block the rest from
+        being cleaned up. In-flight starts are awaited and then stopped so a
+        shutdown racing with ``docker run`` does not leak the new container.
+        """
         async with self._lock:
-            wss = list(self._workspaces.values())
-            self._workspaces.clear()
-        for ws in wss:
+            containers = list(self._containers.values())
+            start_tasks = list(self._starts.values())
+            self._containers.clear()
+            self._starts.clear()
+
+        for task in start_tasks:
             try:
-                await asyncio.to_thread(ws.cleanup)
+                containers.append(await task)
+            except Exception:
+                logger.exception(
+                    "Conversation container startup failed during shutdown"
+                )
+
+        for container in containers:
+            try:
+                await asyncio.to_thread(container.cleanup)
             except Exception:
                 logger.exception(
                     "Failed to stop conversation container during shutdown"
@@ -106,20 +183,12 @@ class DockerConversationRegistry:
 
     # -- internals ---------------------------------------------------------
 
-    def _build_workspace(self, conversation_id: UUID) -> DockerWorkspace:
-        """Construct the :class:`DockerWorkspace` for one conversation.
-
-        Blocking: spawns the container and waits for the inner
-        agent-server's ``/health`` to come up. Must be called from a worker
-        thread.
-        """
+    def _build_container(self, conversation_id: UUID) -> RunningConversationContainer:
+        """Spawn one conversation container and wait for its health check."""
         cfg = self._config
         host_conv_dir = cfg.conversations_path.resolve()
         host_persist_dir = _get_persistence_dir(cfg).resolve()
 
-        # Per-cid bind-mount: the sub-container can only see ITS OWN
-        # conversation subdirectory under the shared dir. The outer server
-        # sees every subdirectory and reads metadata off disk for listings.
         host_cid_dir = host_conv_dir / conversation_id.hex
         host_cid_dir.mkdir(parents=True, exist_ok=True)
         container_cid_dir = f"{_CONTAINER_CONV_DIR}/{conversation_id.hex}"
@@ -128,64 +197,185 @@ class DockerConversationRegistry:
             f"{host_cid_dir}:{container_cid_dir}",
             f"{host_persist_dir}:{_CONTAINER_PERSIST_DIR}",
         ]
-
-        # Point the inner agent-server at the canonical in-container paths.
-        # Mirrors how the outer server resolves them via ``Config`` /
-        # ``_get_persistence_dir(config)``.
-        extra_env = {
-            "OH_CONVERSATIONS_PATH": _CONTAINER_CONV_DIR,
-            "OH_PERSISTENCE_DIR": _CONTAINER_PERSIST_DIR,
-        }
+        env = self._container_env()
 
         logger.info(
             "Spawning conversation container: cid=%s image=%s",
             conversation_id,
             cfg.conversation_image,
         )
-        # The reverse-proxy needs an ``X-Session-API-Key`` to authenticate
-        # with the inner agent-server. Outer and inner share that key by
-        # default via ``conversation_container_forward_env`` (see
-        # :attr:`Config.conversation_container_forward_env`), so read it
-        # straight out of the outer's env. None means "no auth required",
-        # which matches the inner's behavior when the env is unset.
         shared_session_key = os.environ.get(V1_SESSION_API_KEY_ENV)
-
-        ws = DockerWorkspace(
-            server_image=cfg.conversation_image,
-            api_key=shared_session_key,
-            # The agent's tool workspace ("where bash/file ops execute")
-            # is separate from the conversation persistence directory we
-            # bind-mount above. Leave it at the container default.
-            working_dir="/workspace",
-            # Loopback-only: the outer reaches the inner over 127.0.0.1.
-            # Any other binding would let other hosts on the network talk
-            # to the inner agent-server, bypassing outer auth.
-            bind_host="127.0.0.1",
-            # ``Config.conversation_container_platform`` is a plain ``str`` so
-            # users can plug in any platform Docker accepts; DockerWorkspace
-            # narrows that to a ``Literal``. Trust the user's choice here.
-            platform=cast(PlatformType, cfg.conversation_container_platform),
-            health_check_timeout=cfg.conversation_container_startup_timeout,
+        container = self._run_container(
+            image=cfg.conversation_image,
+            platform=cfg.conversation_container_platform,
             volumes=volumes,
+            env=env,
             network=cfg.conversation_container_network,
-            forward_env=list(cfg.conversation_container_forward_env),
-            extra_env=extra_env,
-            # The outer doesn't manage image lifecycle; whoever produced
-            # the image is responsible for its retention.
-            cleanup_image=False,
-            # Each container hosts only one conversation; no need to expose
-            # the auxiliary VSCode/VNC ports outwards. The catch-all proxy
-            # forwards conversation-scoped HTTP via ``ws.host`` which is
-            # plenty.
-            extra_ports=False,
-            detach_logs=False,
+            api_key=shared_session_key,
         )
+        try:
+            self._wait_for_health(
+                container,
+                timeout=cfg.conversation_container_startup_timeout,
+            )
+        except Exception:
+            container.cleanup()
+            raise
         logger.info(
             "Conversation container ready: cid=%s host=%s",
             conversation_id,
-            ws.host,
+            container.host,
         )
-        return ws
+        return container
+
+    def _container_env(self) -> dict[str, str]:
+        cfg = self._config
+        env = {
+            key: os.environ[key]
+            for key in cfg.conversation_container_forward_env
+            if key in os.environ
+        }
+        env.update(
+            {
+                "OH_CONVERSATIONS_PATH": _CONTAINER_CONV_DIR,
+                "OH_PERSISTENCE_DIR": _CONTAINER_PERSIST_DIR,
+                "OH_CONVERSATION_RUNTIME": "local",
+            }
+        )
+        return env
+
+    def _run_container(
+        self,
+        *,
+        image: str,
+        platform: str,
+        volumes: list[str],
+        env: dict[str, str],
+        network: str | None,
+        api_key: str | None,
+    ) -> RunningConversationContainer:
+        port = find_available_tcp_port()
+        if port < 0:
+            raise RuntimeError("No available TCP port found for conversation container")
+
+        docker_ver = execute_command(["docker", "version"]).returncode
+        if docker_ver != 0:
+            raise RuntimeError(
+                "Docker is not available. Please install and start Docker."
+            )
+
+        docker_env = dict(os.environ)
+        flags: list[str] = []
+        for key, value in env.items():
+            docker_env[key] = value
+            flags += ["-e", key]
+        for volume in volumes:
+            flags += ["-v", volume]
+            logger.info("Adding conversation container volume mount: %s", volume)
+        if network:
+            flags += ["--network", network]
+
+        host = f"http://127.0.0.1:{port}"
+        run_cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--platform",
+            platform,
+            "--rm",
+            "--ulimit",
+            "nofile=65536:65536",
+            "--name",
+            f"agent-server-conversation-{uuid4()}",
+            "-p",
+            f"127.0.0.1:{port}:8000",
+            *flags,
+            image,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ]
+        proc = execute_command(run_cmd, env=docker_env)
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to run docker container: {proc.stderr}")
+
+        container_id = proc.stdout.strip()
+        logger.info("Started conversation container: %s", container_id)
+        return RunningConversationContainer(
+            host=host,
+            api_key=api_key,
+            container_id=container_id,
+            image=image,
+        )
+
+    def _wait_for_health(
+        self, container: RunningConversationContainer, *, timeout: float
+    ) -> None:
+        start = time.time()
+        health_url = f"{container.host}/health"
+
+        while time.time() - start < timeout:
+            try:
+                with urlopen(health_url, timeout=1.0) as resp:
+                    if 200 <= getattr(resp, "status", 200) < 300:
+                        return
+            except Exception:
+                pass
+
+            if container.container_id is not None:
+                ps = execute_command(
+                    [
+                        "docker",
+                        "inspect",
+                        "-f",
+                        "{{.State.Running}}",
+                        container.container_id,
+                    ]
+                )
+                if ps.stdout.strip() != "true":
+                    logs = execute_command(["docker", "logs", container.container_id])
+                    msg = (
+                        "Conversation container stopped unexpectedly. Logs:\n"
+                        f"{logs.stdout}\n{logs.stderr}"
+                    )
+                    raise RuntimeError(msg)
+            time.sleep(1)
+        raise RuntimeError("Conversation container failed to become healthy in time")
+
+
+_INTERFACE_HOST = "0.0.0.0"
+_MIN_PORT = 30000
+_MAX_PORT = 39999
+_MAX_PORT_ATTEMPTS = 50
+
+
+def check_port_available(port: int) -> bool:
+    """Check if a port is available for binding."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((_INTERFACE_HOST, port))
+        return True
+    except OSError:
+        time.sleep(0.1)
+        return False
+    finally:
+        sock.close()
+
+
+def find_available_tcp_port(
+    min_port: int = _MIN_PORT,
+    max_port: int = _MAX_PORT,
+    max_attempts: int = _MAX_PORT_ATTEMPTS,
+) -> int:
+    """Find an available TCP port in the docker workspace range."""
+    ports = list(range(min_port, max_port + 1))
+    random.SystemRandom().shuffle(ports)
+
+    for port in ports[:max_attempts]:
+        if check_port_available(port):
+            return port
+    return -1
 
 
 def container_persist_dir() -> str:

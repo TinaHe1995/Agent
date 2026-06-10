@@ -17,7 +17,7 @@ work, the outer only reads metadata and proxies mutations.
 
 Submodules:
 
-* :mod:`.registry` — per-conversation :class:`DockerWorkspace` registry.
+* :mod:`.registry` — per-conversation Docker container registry.
 * :mod:`.proxy` — low-level HTTP and WebSocket forwarding helpers.
 * :mod:`.routers` — FastAPI routes that intercept conversation-mutation
   paths in docker mode (POST create, per-cid catch-all proxy, WS bridge).
