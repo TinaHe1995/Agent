@@ -38,6 +38,9 @@ from openhands.sdk.context.agent_context import AgentContext
 from openhands.sdk.conversation.request import SendMessageRequest
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.utils.openhands_provider import (
+    canonicalize_openhands_llm_payload,
+)
 from openhands.sdk.logger import get_logger
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.subagent.schema import AgentDefinition
@@ -551,7 +554,7 @@ def _default_llm_settings() -> LLM:
 
 _RequestT = TypeVar("_RequestT")
 
-AGENT_SETTINGS_SCHEMA_VERSION = 3
+AGENT_SETTINGS_SCHEMA_VERSION = 4
 CONVERSATION_SETTINGS_SCHEMA_VERSION = 1
 
 
@@ -698,6 +701,15 @@ def _migrate_agent_settings_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def _migrate_agent_settings_v3_to_v4(payload: dict[str, Any]) -> dict[str, Any]:
+    migrated = dict(payload)
+    llm = migrated.get("llm")
+    if isinstance(llm, dict):
+        migrated["llm"] = canonicalize_openhands_llm_payload(llm)
+    migrated["schema_version"] = 4
+    return migrated
+
+
 def _migrate_conversation_settings_v0_to_v1(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -710,6 +722,7 @@ _AGENT_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_agent_settings_v0_to_v1,
     1: _migrate_agent_settings_v1_to_v2,
     2: _migrate_agent_settings_v2_to_v3,
+    3: _migrate_agent_settings_v3_to_v4,
 }
 _CONVERSATION_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_conversation_settings_v0_to_v1,
@@ -994,6 +1007,23 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             ).model_dump()
         },
     )
+    tool_concurrency_limit: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Maximum number of tool calls to execute concurrently per agent step. "
+            "1 = sequential (default). Values > 1 enable parallel tool calls; "
+            "concurrent tools share the conversation object, filesystem, and "
+            "working directory, so mutations to shared state may race."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Parallel tool calls",
+                prominence=SettingProminence.MAJOR,
+                variant="openhands",
+            ).model_dump()
+        },
+    )
 
     mcp_config: MCPConfig | None = Field(
         default=None,
@@ -1090,6 +1120,7 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             agent_context=self.agent_context,
             condenser=self.build_condenser(self.llm),
             critic=self.build_critic(),
+            tool_concurrency_limit=self.tool_concurrency_limit,
         )
 
     def build_condenser(self, llm: LLM) -> CondenserBase | None:
@@ -1304,10 +1335,15 @@ class ACPAgentSettings(AgentSettingsBase):
     acp_prompt_timeout: float = Field(
         default=1800.0,
         gt=0,
-        description="Timeout (seconds) for a single ACP prompt() round-trip.",
+        description=(
+            "Inactivity timeout (seconds) for a single ACP prompt() round-trip. "
+            "The deadline resets on every update from the ACP server, so a "
+            "steadily-progressing agent keeps running; the prompt is only "
+            "aborted after this many seconds with no activity at all."
+        ),
         json_schema_extra={
             SETTINGS_METADATA_KEY: SettingsFieldMetadata(
-                label="ACP prompt timeout (seconds)",
+                label="ACP prompt inactivity timeout (seconds)",
                 prominence=SettingProminence.MINOR,
             ).model_dump(),
             SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
@@ -1541,6 +1577,19 @@ class ACPAgentSettings(AgentSettingsBase):
         package, *extra_args = rest
         return package, extra_args
 
+    @staticmethod
+    def _npm_package_name(package: str) -> str:
+        """Strip any ``@version`` specifier from an npm package spec.
+
+        ``@scope/pkg@1.2.3`` → ``@scope/pkg``; ``pkg@1.2.3`` → ``pkg``; an
+        unversioned spec is returned unchanged. The version separator is the
+        ``@`` *after* the name — for scoped specs that is the second ``@`` (the
+        first introduces the scope), so a leading ``@`` is skipped.
+        """
+        start = 1 if package.startswith("@") else 0
+        at = package.find("@", start)
+        return package[:at] if at != -1 else package
+
     def _prefer_pinned_binary(self, command: list[str]) -> list[str]:
         """Swap an ``npx -y <pkg>`` command for the provider's pinned binary.
 
@@ -1551,6 +1600,12 @@ class ACPAgentSettings(AgentSettingsBase):
         downloading npm-latest. Returned unchanged otherwise: no pinned binary
         (custom server), a non-matching/non-npx command, or the binary not on
         ``PATH`` (local dev).
+
+        Package matching ignores any ``@version`` suffix: the registry default
+        is version-pinned (so the native fallback can't drift to npm ``latest``),
+        but a client may still send the bare or a differently-pinned package
+        name. In the image the pinned binary stands in for the provider's package
+        regardless of the requested version, so the rewrite compares names only.
         """
         info = get_acp_provider(self.acp_server)
         if info is None or info.binary_name is None:
@@ -1563,7 +1618,10 @@ class ACPAgentSettings(AgentSettingsBase):
 
         default_pkg, _ = default_parsed
         actual_pkg, extra = actual_parsed
-        if actual_pkg != default_pkg or shutil.which(info.binary_name) is None:
+        same_package = self._npm_package_name(actual_pkg) == self._npm_package_name(
+            default_pkg
+        )
+        if not same_package or shutil.which(info.binary_name) is None:
             return command
 
         return [info.binary_name, *extra]

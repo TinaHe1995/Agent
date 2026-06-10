@@ -1,9 +1,10 @@
 import json
 import shutil
+from typing import Any
 
 import pytest
 from fastmcp.mcp_config import MCPConfig
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from openhands.agent_server.models import StartConversationRequest
 from openhands.sdk import (
@@ -68,6 +69,7 @@ def test_llm_agent_settings_export_schema_groups_sections() -> None:
         "tools",
         "enable_sub_agents",
         "enable_switch_llm_tool",
+        "tool_concurrency_limit",
         "mcp_config",
     }
     assert general_fields["agent"].default == "CodeActAgent"
@@ -82,6 +84,11 @@ def test_llm_agent_settings_export_schema_groups_sections() -> None:
     assert general_fields["enable_switch_llm_tool"].default is True
     assert (
         general_fields["enable_switch_llm_tool"].prominence is SettingProminence.MINOR
+    )
+    assert general_fields["tool_concurrency_limit"].value_type == "integer"
+    assert general_fields["tool_concurrency_limit"].default == 1
+    assert (
+        general_fields["tool_concurrency_limit"].prominence is SettingProminence.MAJOR
     )
 
     # -- llm section --
@@ -318,6 +325,7 @@ def test_export_agent_settings_schema_emits_variant_tagged_sections() -> None:
         "tools",
         "enable_sub_agents",
         "enable_switch_llm_tool",
+        "tool_concurrency_limit",
         "mcp_config",
     }
     # No agent_kind field — each variant has its own settings page and
@@ -404,7 +412,7 @@ def test_validate_agent_settings_migrates_v0_llm_payload() -> None:
     settings = validate_agent_settings({"llm": {"model": "test-model"}})
 
     assert isinstance(settings, OpenHandsAgentSettings)
-    assert settings.schema_version == 3
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
     assert settings.agent_kind == "openhands"
     assert settings.llm.model == "test-model"
 
@@ -420,8 +428,8 @@ def test_validate_agent_settings_dispatches_current_acp_payload() -> None:
     )
 
     assert isinstance(settings, ACPAgentSettings)
-    # v1 → v2 → v3 keeps ACP payloads intact while bumping schema_version.
-    assert settings.schema_version == 3
+    # Migrations keep ACP payloads intact while bumping schema_version.
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
     assert settings.acp_command == ["npx", "-y", "claude-agent-acp"]
 
 
@@ -437,7 +445,7 @@ def test_validate_agent_settings_canonicalizes_legacy_llm_kind() -> None:
     )
 
     assert isinstance(settings, OpenHandsAgentSettings)
-    assert settings.schema_version == 3
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
     assert settings.agent_kind == "openhands"
     assert settings.llm.model == "legacy-model"
 
@@ -456,16 +464,39 @@ def test_validate_agent_settings_drops_legacy_verification_fields() -> None:
     )
 
     assert isinstance(settings, OpenHandsAgentSettings)
-    assert settings.schema_version == 3
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
     verification = settings.verification.model_dump(mode="json")
     assert verification["critic_enabled"] is True
     assert "confirmation_mode" not in verification
     assert "security_analyzer" not in verification
 
 
+def test_validate_agent_settings_migrates_legacy_openhands_proxy_llm() -> None:
+    settings = validate_agent_settings(
+        {
+            "schema_version": 3,
+            "agent_kind": "openhands",
+            "llm": {
+                "model": "litellm_proxy/claude-opus-4-8",
+                "base_url": "https://llm-proxy.app.all-hands.dev/",
+            },
+        }
+    )
+
+    assert isinstance(settings, OpenHandsAgentSettings)
+    assert settings.schema_version == AGENT_SETTINGS_SCHEMA_VERSION
+    assert settings.llm.model == "openhands/claude-opus-4-8"
+    assert settings.llm.base_url is None
+
+
 def test_validate_agent_settings_rejects_newer_schema_version() -> None:
-    with pytest.raises(ValueError, match="newer than supported version 3"):
-        validate_agent_settings({"schema_version": 4, "llm": {"model": "m"}})
+    with pytest.raises(
+        ValueError,
+        match=f"newer than supported version {AGENT_SETTINGS_SCHEMA_VERSION}",
+    ):
+        validate_agent_settings(
+            {"schema_version": AGENT_SETTINGS_SCHEMA_VERSION + 1, "llm": {"model": "m"}}
+        )
 
 
 def test_conversation_settings_from_persisted_migrates_v0_payload() -> None:
@@ -493,6 +524,70 @@ def test_llm_create_agent_uses_settings_llm_and_tools() -> None:
     assert isinstance(agent, Agent)
     assert agent.llm is llm
     assert agent.tools == tools
+
+
+def test_llm_create_agent_defaults_tool_concurrency_limit_to_one() -> None:
+    agent = OpenHandsAgentSettings(llm=LLM(model="test-model")).create_agent()
+    assert agent.tool_concurrency_limit == 1
+
+
+def test_tool_concurrency_limit_defaults_to_one_when_omitted_from_payload() -> None:
+    # Backward compatibility: payloads persisted before the field existed must
+    # still load and fall back to the sequential default.
+    settings = OpenHandsAgentSettings.model_validate({"agent_kind": "openhands"})
+    assert settings.tool_concurrency_limit == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (1, 1),  # sequential default, explicit
+        (2, 2),
+        (8, 8),
+        (32, 32),
+        (1000, 1000),  # no upper cap — large values are accepted
+        ("4", 4),  # lax string -> int coercion
+        (4.0, 4),  # whole-number float coercion
+        (True, 1),  # bool is an int subclass; True -> 1 (>= 1, so valid)
+    ],
+)
+def test_tool_concurrency_limit_valid_values_round_trip(
+    raw: Any, expected: int
+) -> None:
+    settings = OpenHandsAgentSettings(
+        llm=LLM(model="test-model"), tool_concurrency_limit=raw
+    )
+    assert settings.tool_concurrency_limit == expected
+    assert type(settings.tool_concurrency_limit) is int
+
+    # The value must survive a JSON serialization round-trip...
+    reloaded = OpenHandsAgentSettings.model_validate(settings.model_dump(mode="json"))
+    assert reloaded.tool_concurrency_limit == expected
+
+    # ...and propagate to the constructed Agent.
+    agent = settings.create_agent()
+    assert agent.tool_concurrency_limit == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        0,  # below ge=1
+        -1,  # negative
+        -100,
+        False,  # bool False -> 0, below ge=1
+        4.5,  # non-integral float
+        "abc",  # unparseable string
+        None,  # not Optional
+        [1],  # wrong type entirely
+    ],
+)
+def test_tool_concurrency_limit_invalid_values_rejected(raw: Any) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        OpenHandsAgentSettings(llm=LLM(model="test-model"), tool_concurrency_limit=raw)
+    assert any(
+        err["loc"] == ("tool_concurrency_limit",) for err in exc_info.value.errors()
+    )
 
 
 def test_llm_agent_settings_validates_mcp_config_as_typed_model() -> None:
@@ -771,7 +866,7 @@ def test_acp_create_agent_uses_server_default_command(
     assert agent.acp_command == [
         "npx",
         "-y",
-        "@agentclientprotocol/claude-agent-acp",
+        "@agentclientprotocol/claude-agent-acp@0.30.0",
     ]
     assert agent.acp_model == "claude-opus-4-6"
 
@@ -887,16 +982,40 @@ def test_acp_resolve_command_rewrites_explicit_npx_command(
     assert settings.resolve_acp_command() == ["codex-acp", "--verbose"]
 
 
+def test_acp_resolve_command_rewrites_versioned_npx_to_pinned_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b') Matching is version-agnostic: an ``npx`` command for the provider's
+    package at *any* version (bare, the pinned default, or a drifted pin a client
+    sends) rewrites to the pinned binary on PATH — in the image we always stand
+    the reviewed binary in for the provider's package."""
+    monkeypatch.setattr(shutil, "which", _which_returning("codex-acp"))
+    for pkg in (
+        "@zed-industries/codex-acp",
+        "@zed-industries/codex-acp@0.15.0",
+        "@zed-industries/codex-acp@0.11.1",
+    ):
+        settings = ACPAgentSettings(
+            acp_server="codex",
+            acp_command=["npx", "-y", pkg],
+        )
+        assert settings.resolve_acp_command() == ["codex-acp"], pkg
+
+
 def test_acp_resolve_command_keeps_npx_when_binary_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """(c) Binary not on PATH (local dev) → the ``npx`` command is unchanged."""
+    """(c) Binary not on PATH (local dev) → the ``npx`` command is unchanged.
+
+    The default is version-pinned, so the native fallback launches the reviewed
+    version rather than npm ``latest``.
+    """
     monkeypatch.setattr(shutil, "which", lambda _: None)
     settings = ACPAgentSettings(acp_server="codex")
     assert settings.resolve_acp_command() == [
         "npx",
         "-y",
-        "@zed-industries/codex-acp",
+        "@zed-industries/codex-acp@0.15.0",
     ]
 
 
