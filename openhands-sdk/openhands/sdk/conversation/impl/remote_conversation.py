@@ -1251,15 +1251,19 @@ class RemoteConversation(BaseConversation):
             return False
         if status == ConversationExecutionStatus.ERROR.value:
             detail = self._get_last_error_detail()
+            if detail and "maximum iterations" in detail.lower():
+                logger.warning(
+                    "Agent reached maximum iterations limit – treating as completed: %s",
+                    detail,
+                )
+                return True
             raise ConversationRunError(
                 self._id,
                 RuntimeError(detail or "Remote conversation ended with error"),
             )
         if status == ConversationExecutionStatus.STUCK.value:
-            raise ConversationRunError(
-                self._id,
-                RuntimeError("Remote conversation got stuck"),
-            )
+            logger.warning("Remote conversation got stuck – treating as completed.")
+            return True
         return True
 
     def _handle_poll_exception(self, exc: Exception) -> None:
