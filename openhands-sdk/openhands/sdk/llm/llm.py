@@ -2440,12 +2440,17 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 f"Unable to load chat-template tokenizer for {identifier!r}."
             ) from exc
 
-        if hasattr(tokenizer, "apply_chat_template"):
-            return tokenizer
-        raise ValueError(
-            f"Tokenizer {identifier!r} does not support apply_chat_template; "
-            "custom_tokenizer requires chat-template token counting."
-        )
+        if not hasattr(tokenizer, "apply_chat_template"):
+            raise ValueError(
+                f"Tokenizer {identifier!r} does not support apply_chat_template; "
+                "custom_tokenizer requires chat-template token counting."
+            )
+        if not getattr(tokenizer, "chat_template", None):
+            raise ValueError(
+                f"Tokenizer {identifier!r} does not define a chat template; "
+                "custom_tokenizer requires chat-template token counting."
+            )
+        return tokenizer
 
     @classmethod
     def from_persisted(cls, data: Any, *, context: dict[str, Any] | None = None) -> LLM:
