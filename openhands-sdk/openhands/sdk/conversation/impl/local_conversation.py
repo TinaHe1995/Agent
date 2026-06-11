@@ -151,8 +151,8 @@ class LocalConversation(BaseConversation):
         cipher: Cipher | None = None,
         tags: dict[str, str] | None = None,
         user_id: str | None = None,
-        prompt_cache_key: str | None = None,
         client_tools: list[ClientToolSpec] | None = None,
+        prompt_cache_key: str | None = None,
         **_: object,
     ):
         """Initialize the conversation.
@@ -194,14 +194,14 @@ class LocalConversation(BaseConversation):
                    (lost) on serialization.
             tags: Optional key-value tags for the conversation. Keys must be
                   lowercase alphanumeric, values up to 256 characters.
-            prompt_cache_key: Override for the prompt-cache shard key. Defaults
-                to the conversation's own ID. Sub-conversations set this to
-                the parent's ID to share the same cache shard.
             client_tools: Optional list of client-defined tool specs. Each spec
                   is registered and injected into the agent so it can call the
                   tool; the executor returns an acknowledgment and the real
                   execution is expected to be handled by a callback/consumer
                   (e.g. a frontend) observing the emitted ActionEvent.
+            prompt_cache_key: Override for the prompt-cache shard key. Defaults
+                to the conversation's own ID. Sub-conversations set this to
+                the parent's ID to share the same cache shard.
         """
         super().__init__()  # Initialize with span tracking
         # Mark cleanup as initiated as early as possible to avoid races or partially
