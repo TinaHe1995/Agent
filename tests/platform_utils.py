@@ -16,7 +16,9 @@ def symlink_or_skip(source: Path, link_name: Path) -> None:
 
 
 def require_case_sensitive_fs(tmp_path: Path) -> None:
-    """Skip when ``tmp_path`` is on a case-insensitive filesystem (no collisions)."""
+    """Collision tests need a case-sensitive ``tmp_path`` to verify the
+    deterministic winner; skip on case-insensitive filesystems where the
+    collision cannot occur."""
     probe = tmp_path / "CaseProbe.tmp"
     probe.write_text("x")
     try:

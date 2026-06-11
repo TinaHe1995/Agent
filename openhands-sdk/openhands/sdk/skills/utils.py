@@ -47,7 +47,7 @@ def find_skill_md(skill_dir: Path) -> Path | None:
     """
     if not skill_dir.is_dir():
         return None
-    # sorted() so a SKILL.md/skill.md case-collision picks a deterministic winner.
+    # sorted() ensures deterministic case-collision winner (SKILL.md < skill.md).
     for item in sorted(skill_dir.iterdir()):
         if item.is_file() and item.name.lower() == "skill.md":
             return item
