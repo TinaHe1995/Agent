@@ -38,6 +38,7 @@ from openhands.sdk.context.agent_context import AgentContext
 from openhands.sdk.conversation.request import SendMessageRequest
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.llm_profile_store import PROFILE_NAME_PATTERN
 from openhands.sdk.llm.utils.openhands_provider import (
     canonicalize_openhands_llm_payload,
 )
@@ -1007,6 +1008,21 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             ).model_dump()
         },
     )
+    oracle_llm_profile: str | None = Field(
+        default=None,
+        pattern=PROFILE_NAME_PATTERN,
+        description=(
+            "Saved LLM profile name to use for the ask_oracle tool. When set, "
+            "the tool is available to consult this profile for a second opinion."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Oracle LLM profile",
+                prominence=SettingProminence.MINOR,
+                variant="openhands",
+            ).model_dump()
+        },
+    )
     tool_concurrency_limit: int = Field(
         default=1,
         ge=1,
@@ -1100,7 +1116,11 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             agent = settings.create_agent()
         """
         from openhands.sdk.agent import Agent
-        from openhands.sdk.tool.builtins import BUILT_IN_TOOLS, SwitchLLMTool
+        from openhands.sdk.tool.builtins import (
+            BUILT_IN_TOOLS,
+            AskOracleTool,
+            SwitchLLMTool,
+        )
 
         # Bypass ``_serialize_mcp_config``: MCP servers need real env/headers.
         mcp_config = (
@@ -1112,9 +1132,20 @@ class OpenHandsAgentSettings(AgentSettingsBase):
         if self.enable_switch_llm_tool:
             include_default_tools.append(SwitchLLMTool.__name__)
 
+        tools = list(self.tools)
+        if self.oracle_llm_profile and not any(
+            tool.name == AskOracleTool.name for tool in tools
+        ):
+            tools.append(
+                Tool(
+                    name=AskOracleTool.name,
+                    params={"profile_name": self.oracle_llm_profile},
+                )
+            )
+
         return Agent(
             llm=self.llm,
-            tools=self.tools,
+            tools=tools,
             mcp_config=mcp_config,
             include_default_tools=include_default_tools,
             agent_context=self.agent_context,
