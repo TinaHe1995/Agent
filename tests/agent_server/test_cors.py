@@ -194,6 +194,45 @@ def test_non_workspace_routes_reject_unlisted_origin(tmp_path):
     assert "access-control-allow-origin" not in resp.headers
 
 
+def test_non_workspace_regex_echoes_http_origin_on_actual_response(tmp_path):
+    """Regex origin matches must remain credential-compatible.
+
+    Starlette's regex path echoes the concrete origin instead of emitting a
+    literal wildcard, so browsers accept the response together with
+    ``Access-Control-Allow-Credentials: true``.
+    """
+    client = _build_client(
+        tmp_path,
+        conversation_id=uuid4(),
+        config=Config(
+            session_api_keys=[SESSION_KEY],
+            allow_cors_origin_regex=r"https?://.+",
+        ),
+    )
+
+    resp = client.get("/server_info", headers={"Origin": OTHER_ORIGIN})
+
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == OTHER_ORIGIN
+    assert resp.headers["access-control-allow-credentials"] == "true"
+    assert "Origin" in resp.headers.get("vary", "")
+
+
+def test_non_workspace_regex_rejects_null_origin(tmp_path):
+    client = _build_client(
+        tmp_path,
+        conversation_id=uuid4(),
+        config=Config(
+            session_api_keys=[SESSION_KEY],
+            allow_cors_origin_regex=r"https?://.+",
+        ),
+    )
+
+    resp = _preflight(client, "/api/conversations", origin="null")
+
+    assert "access-control-allow-origin" not in resp.headers
+
+
 def test_workspace_wildcard_does_not_bleed_into_other_api(tmp_path):
     client = _build_client(
         tmp_path, conversation_id=uuid4(), config=Config(session_api_keys=[SESSION_KEY])

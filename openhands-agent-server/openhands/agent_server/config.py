@@ -126,6 +126,15 @@ class Config(BaseModel):
             "``middleware.py``."
         ),
     )
+    allow_cors_origin_regex: str | None = Field(
+        default=None,
+        description=(
+            "Regular expression matching additional CORS origins permitted by "
+            "this server. Localhost / 127.0.0.1 and ``DOCKER_HOST_ADDR`` are "
+            "always allowed. Does not apply to the workspace cookie routes, "
+            "which accept any origin — see ``middleware.py``."
+        ),
+    )
     conversations_path: Path = Field(
         default=Path("workspace/conversations"),
         description=(
