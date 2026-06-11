@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import contextlib
 import copy
+import json
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -69,6 +70,7 @@ from openhands.sdk.subagent import (
     register_file_agents,
     register_plugin_agents,
 )
+from openhands.sdk.tool.client_tool import ClientToolSpec
 from openhands.sdk.tool.schema import Action, Observation
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
@@ -150,6 +152,7 @@ class LocalConversation(BaseConversation):
         tags: dict[str, str] | None = None,
         user_id: str | None = None,
         prompt_cache_key: str | None = None,
+        client_tools: list[ClientToolSpec] | None = None,
         **_: object,
     ):
         """Initialize the conversation.
@@ -194,6 +197,11 @@ class LocalConversation(BaseConversation):
             prompt_cache_key: Override for the prompt-cache shard key. Defaults
                 to the conversation's own ID. Sub-conversations set this to
                 the parent's ID to share the same cache shard.
+            client_tools: Optional list of client-defined tool specs. Each spec
+                  is registered and injected into the agent so it can call the
+                  tool; the executor returns an acknowledgment and the real
+                  execution is expected to be handled by a callback/consumer
+                  (e.g. a frontend) observing the emitted ActionEvent.
         """
         super().__init__()  # Initialize with span tracking
         # Mark cleanup as initiated as early as possible to avoid races or partially
@@ -212,6 +220,32 @@ class LocalConversation(BaseConversation):
         self._pending_hook_config = hook_config  # Will be combined with plugin hooks
         self._agent_ready = False  # Agent initialized lazily after plugins loaded
 
+        # Create-or-resume: factory inspects BASE_STATE to decide
+        desired_id = conversation_id or uuid.uuid4()
+
+        # Resolve client-defined tools, then register them and inject the matching
+        # Tool specs into the agent so the agent can call them. Execution is
+        # deferred to a consumer of the emitted ActionEvent (e.g. a frontend); the
+        # executor only acks. Specs come either from the caller (`client_tools`)
+        # or, when resuming a persisted conversation without re-supplying them,
+        # from the persisted agent's tool specs — mirroring the server resume
+        # path so a fresh process can re-register the dynamic tools.
+        resolved_client_tools = list(client_tools or [])
+        if not resolved_client_tools and persistence_dir is not None:
+            resolved_client_tools = self._recover_persisted_client_tools(
+                persistence_dir, desired_id
+            )
+        if resolved_client_tools:
+            from openhands.sdk.tool.client_tool import register_client_tools
+
+            client_tool_specs = register_client_tools(resolved_client_tools)
+            existing_names = {t.name for t in agent.tools}
+            new_tools = [
+                ts for ts in client_tool_specs if ts.name not in existing_names
+            ]
+            if new_tools:
+                agent = agent.model_copy(update={"tools": [*agent.tools, *new_tools]})
+
         self.agent = agent
         if isinstance(workspace, (str, Path)):
             # LocalWorkspace accepts both str and Path via BeforeValidator
@@ -223,9 +257,6 @@ class LocalConversation(BaseConversation):
         ws_path = Path(self.workspace.working_dir)
         if not ws_path.exists():
             ws_path.mkdir(parents=True, exist_ok=True)
-
-        # Create-or-resume: factory inspects BASE_STATE to decide
-        desired_id = conversation_id or uuid.uuid4()
         self._state = ConversationState.create(
             id=desired_id,
             agent=agent,
@@ -349,6 +380,44 @@ class LocalConversation(BaseConversation):
         atexit.register(self.close)
         self._start_observability_span(str(desired_id), user_id=user_id)
         self.delete_on_close = delete_on_close
+
+    def _recover_persisted_client_tools(
+        self,
+        persistence_base_dir: str | Path,
+        conversation_id: ConversationID,
+    ) -> list[ClientToolSpec]:
+        """Recover client tool specs from a persisted conversation's base state.
+
+        When a persisted conversation is resumed in a fresh process, the dynamic
+        client tools are absent from the global registry and the caller may not
+        re-supply ``client_tools``. Without recovery, the persisted agent's
+        client tools would appear "removed" and resume would fail. We read the
+        persisted agent tool specs and pull out the embedded ``ClientToolSpec``s
+        so they can be re-registered and re-injected. Returns an empty list when
+        there is no persisted state yet (fresh conversation).
+        """
+        from pydantic import ValidationError
+
+        from openhands.sdk.conversation.persistence_const import BASE_STATE
+        from openhands.sdk.tool.client_tool import extract_client_tool_specs
+        from openhands.sdk.tool.spec import Tool
+
+        base_path = (
+            Path(self.get_persistence_dir(persistence_base_dir, conversation_id))
+            / BASE_STATE
+        )
+        try:
+            data = json.loads(base_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        raw_tools = (data.get("agent") or {}).get("tools") or []
+        tools: list[Tool] = []
+        for raw_tool in raw_tools:
+            try:
+                tools.append(Tool.model_validate(raw_tool))
+            except ValidationError:
+                continue
+        return extract_client_tool_specs(tools)
 
     @property
     def id(self) -> ConversationID:
@@ -1810,7 +1879,7 @@ class LocalConversation(BaseConversation):
         )
 
         messages = prepare_llm_messages(
-            self.state.events, additional_messages=[user_message]
+            self.state.view, additional_messages=[user_message]
         )
 
         # Get or create the specialized ask-agent LLM
