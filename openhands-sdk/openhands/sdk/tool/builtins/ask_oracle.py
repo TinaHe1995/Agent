@@ -74,15 +74,13 @@ class AskOracleObservation(Observation):
 
 
 _DESCRIPTION_TEMPLATE = (
-    "Ask the Oracle for a second opinion. The Oracle is a configured, saved LLM "
-    "profile intended to be more capable for difficult reasoning.\n\n"
+    "Ask the Oracle for a second opinion. The Oracle is a smart model "
+    "intended to be your help. It is capable for difficult reasoning.\n\n"
     "Use this when you are stuck, uncertain, comparing approaches, or need a "
     "higher-quality recommendation before proceeding. The Oracle receives the "
-    "current conversation context plus your question, but this consultation does "
-    "not switch the active LLM profile.\n\n"
+    "current conversation context plus your question.\n\n"
     "Treat the Oracle's response as strong guidance and follow its recommendation "
     "unless you have a clear reason not to.\n\n"
-    "Configured Oracle profile: {profile_name}"
 )
 
 _ORACLE_PROMPT_TEMPLATE = """\
