@@ -155,12 +155,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    
+
     # Skip validation for Dependabot PRs
     if args.event_path is not None and is_dependabot_pr(args.event_path):
         print("Skipping PR description validation for Dependabot PR.")
         return 0
-    
+
     if args.body_file is not None:
         body = args.body_file.read_text()
     elif args.event_path is not None:
