@@ -134,7 +134,12 @@ def test_is_dependabot_pr_returns_true_for_dependabot_pr(tmp_path: Path):
     event_path = tmp_path / "event.json"
     event_path.write_text(
         json.dumps(
-            {"pull_request": {"body": DEPENDBOT_BODY, "user": {"login": "dependabot[bot]"}}}
+            {
+                "pull_request": {
+                    "body": DEPENDBOT_BODY,
+                    "user": {"login": "dependabot[bot]"},
+                }
+            }
         )
     )
 
@@ -144,9 +149,7 @@ def test_is_dependabot_pr_returns_true_for_dependabot_pr(tmp_path: Path):
 def test_is_dependabot_pr_returns_false_for_regular_pr(tmp_path: Path):
     event_path = tmp_path / "event.json"
     event_path.write_text(
-        json.dumps(
-            {"pull_request": {"body": VALID_BODY, "user": {"login": "octocat"}}}
-        )
+        json.dumps({"pull_request": {"body": VALID_BODY, "user": {"login": "octocat"}}})
     )
 
     assert is_dependabot_pr(event_path) is False
