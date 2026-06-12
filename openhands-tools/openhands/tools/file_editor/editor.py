@@ -469,41 +469,58 @@ class FileEditor:
     def _atomic_write(self, path: Path, file_text: str, encoding: str) -> None:
         """Write file_text to path atomically, never leaving a truncated file.
 
-        The content is written to a temporary file in the same directory and then
-        moved into place with os.replace, so a failed write can never destroy the
+        The content is written to a temporary file in the same directory which is
+        then Path.replace'd into place, so a failed write can never destroy the
         original file. If the file's detected encoding cannot represent the new
         content, fall back to UTF-8 so an edit may add characters (arrows, emoji,
         CJK, ...) the original single-byte encoding lacks, instead of failing and
-        truncating the file.
+        truncating the file. Note that the fallback transcodes the whole file to
+        UTF-8.
         """
-        write_encoding = encoding
+        default = self._encoding_manager.default_encoding
+        tmp_path: Path | None = None
         try:
-            file_text.encode(encoding)
-        except UnicodeEncodeError:
-            write_encoding = self._encoding_manager.default_encoding
-            if encoding.lower().replace("_", "-") not in ("utf-8", "utf8"):
+            try:
+                tmp_path = self._write_temp_file(path, file_text, encoding)
+            except UnicodeEncodeError:
+                if encoding == default:
+                    raise
                 logger.warning(
                     f"Detected encoding '{encoding}' cannot represent the new "
-                    f"content for {path}; writing as '{write_encoding}' instead."
+                    f"content for {path}; writing as '{default}' instead."
                 )
+                tmp_path = self._write_temp_file(path, file_text, default)
 
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-        )
-        os.close(fd)
-        try:
             # Preserve the original file's permission bits when it already exists.
             if path.exists():
-                os.chmod(tmp_name, os.stat(path).st_mode & 0o7777)
-            with open(tmp_name, "w", encoding=write_encoding) as f:
-                f.write(file_text)
-            os.replace(tmp_name, path)
+                os.chmod(tmp_path, os.stat(path).st_mode & 0o7777)
+            Path.replace(tmp_path, path)
         except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
             raise
+
+    def _write_temp_file(self, path: Path, file_text: str, encoding: str) -> Path:
+        """Write file_text to a fresh temp file beside path and return its Path.
+
+        On any failure the partially written temp file is removed before the error
+        is re-raised, so a failed encode never leaves a stray file behind.
+        """
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            encoding=encoding,
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            try:
+                tmp.write(file_text)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        return tmp_path
 
     @with_encoding
     def insert(
