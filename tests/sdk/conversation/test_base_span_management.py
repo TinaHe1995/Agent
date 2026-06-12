@@ -7,6 +7,7 @@ from uuid import UUID
 
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.conversation_stats import ConversationStats
+from openhands.sdk.conversation.types import TraceMetadataValue
 from openhands.sdk.llm.llm import LLM
 from openhands.sdk.tool.schema import Action, Observation
 
@@ -94,7 +95,12 @@ def test_base_conversation_span_management():
         # Start span
         conversation._start_observability_span("test-session-id")
         mock_start_span.assert_called_once_with(
-            "conversation", session_id="test-session-id", user_id=None
+            "conversation",
+            session_id="test-session-id",
+            user_id=None,
+            metadata=None,
+            tags=None,
+            attributes=None,
         )
         assert conversation._span_ended is False
         assert conversation._observability_root_span is fake_root
@@ -116,30 +122,37 @@ def test_base_conversation_span_management():
         assert conversation._span_ended is True
 
 
-def test_base_conversation_span_includes_tag_attributes():
-    """Conversation tags are attached to the root span for trace filtering."""
+def test_base_conversation_passes_observability_metadata_and_tag_attributes():
+    """Conversation metadata, span tags, and conversation tags reach the root span."""
     conversation = MockConversation()
 
     with (
         patch(
-            "openhands.sdk.conversation.base.should_enable_observability"
-        ) as mock_should_enable,
+            "openhands.sdk.conversation.base.should_enable_observability",
+            return_value=True,
+        ),
         patch("openhands.sdk.conversation.base.start_root_span") as mock_start_span,
     ):
-        mock_should_enable.return_value = True
-        fake_root = MagicMock(name="root-span")
-        mock_start_span.return_value = fake_root
+        metadata: dict[str, TraceMetadataValue] = {
+            "repo_name": "OpenHands/software-agent-sdk"
+        }
+        span_tags = ["repo:OpenHands/software-agent-sdk"]
+        conversation_tags = {"automationid": "auto-1", "automationrunid": "run-1"}
 
         conversation._start_observability_span(
             "test-session-id",
             user_id="user-42",
-            tags={"automationid": "auto-1", "automationrunid": "run-1"},
+            metadata=metadata,
+            tags=span_tags,
+            conversation_tags=conversation_tags,
         )
 
         mock_start_span.assert_called_once_with(
             "conversation",
             session_id="test-session-id",
             user_id="user-42",
+            metadata=metadata,
+            tags=span_tags,
             attributes={
                 "conversation.tags.automationid": "auto-1",
                 "conversation.tags.automationrunid": "run-1",

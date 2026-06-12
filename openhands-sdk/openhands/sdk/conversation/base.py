@@ -10,6 +10,7 @@ from openhands.sdk.conversation.types import (
     ConversationCallbackType,
     ConversationID,
     ConversationTokenCallbackType,
+    TraceMetadataValue,
 )
 from openhands.sdk.llm.llm import LLM
 from openhands.sdk.llm.message import Message
@@ -139,32 +140,32 @@ class BaseConversation(ABC):
         self,
         session_id: str,
         user_id: str | None = None,
-        tags: Mapping[str, str] | None = None,
+        metadata: dict[str, TraceMetadataValue] | None = None,
+        tags: list[str] | None = None,
+        conversation_tags: Mapping[str, str] | None = None,
     ) -> None:
         """Start a per-conversation observability root span.
 
         Args:
             session_id: The session ID to associate with the trace
             user_id: Optional user ID to associate with the trace
-            tags: Optional conversation tags to add as root span attributes
+            metadata: Optional trace-level metadata to attach to observability backends
+            tags: Optional span tags to attach to the conversation root span
+            conversation_tags: Optional conversation tags to add as root span attributes
         """
         if not should_enable_observability():
             return
         if self._observability_root_span is not None:
             # Idempotent: never start two roots for one conversation.
             return
-        attributes = _conversation_tag_attributes(tags)
-        if attributes:
-            self._observability_root_span = start_root_span(
-                "conversation",
-                session_id=session_id,
-                user_id=user_id,
-                attributes=attributes,
-            )
-        else:
-            self._observability_root_span = start_root_span(
-                "conversation", session_id=session_id, user_id=user_id
-            )
+        self._observability_root_span = start_root_span(
+            "conversation",
+            session_id=session_id,
+            user_id=user_id,
+            metadata=metadata,
+            tags=tags,
+            attributes=_conversation_tag_attributes(conversation_tags),
+        )
 
     def _end_observability_span(self) -> None:
         """End the observability span if it hasn't been ended already."""
