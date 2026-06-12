@@ -560,9 +560,7 @@ async def _maybe_set_session_model(
         return False
     provider = detect_acp_provider_by_agent_name(agent_name)
     try:
-        return await _apply_acp_model_selection(
-            conn, provider, agent_name, session_id, acp_model
-        )
+        return await _apply_acp_model(conn, provider, agent_name, session_id, acp_model)
     except ACPRequestError as e:
         if provider is not None:
             raise
@@ -576,7 +574,7 @@ async def _maybe_set_session_model(
         return False
 
 
-async def _apply_acp_model_selection(
+async def _apply_acp_model(
     conn: ClientSideConnection,
     provider: ACPProviderInfo | None,
     agent_name: str,
@@ -655,9 +653,7 @@ async def _reapply_session_model_on_resume(
     if provider is not None and not provider.supports_runtime_model_switch:
         return False
     try:
-        return await _apply_acp_model_selection(
-            conn, provider, agent_name, session_id, acp_model
-        )
+        return await _apply_acp_model(conn, provider, agent_name, session_id, acp_model)
     except ACPRequestError as e:
         logger.warning(
             "Could not reapply model %r on resumed session %s (%s); the live "
