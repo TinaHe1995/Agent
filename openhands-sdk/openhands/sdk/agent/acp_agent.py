@@ -602,8 +602,8 @@ async def _apply_acp_model_selection(
             return True
         return False
 
-    # For unknown/custom providers, try the generic set_config_option method
-    # which is a standard ACP protocol method for setting configuration options.
+    # For unknown/custom providers, try set_config_option as a best-effort
+    # standard ACP configuration method. Some custom servers may still reject it.
     await conn.set_config_option(
         config_id="model",
         value=acp_model,
