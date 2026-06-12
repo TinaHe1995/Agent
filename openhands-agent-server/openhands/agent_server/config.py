@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from openhands.agent_server.env_parser import (
     MISSING,
     _get_default_parsers,
+    from_env,  # noqa: F401 - compatibility re-export
     get_env_parser,
     merge,
 )
