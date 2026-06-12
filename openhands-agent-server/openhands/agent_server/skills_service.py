@@ -366,8 +366,9 @@ def load_all_skills(
                     f"Failed to load organization skills for {org_name}: {e}"
                 )
         org_skills = merge_skills(per_repo_skills)
-        if org_skills:
-            logger.info(f"Loaded {len(org_skills)} organization skills")
+        # Always log the count (including 0) so a failed/empty org load is
+        # visible when org loading was requested.
+        logger.info(f"Loaded {len(org_skills)} organization skills")
     sources["org"] = len(org_skills)
     skill_lists.append(org_skills)
 

@@ -108,9 +108,10 @@ class SkillsRequest(BaseModel):
     )
     org_config: OrgConfig | None = Field(
         default=None,
+        deprecated=True,
         description=(
-            "Deprecated single organization skills configuration. Kept for "
-            "backward compatibility; prefer org_configs."
+            "Deprecated since v1.28.0 and scheduled for removal in v1.33.0. "
+            "Single organization skills configuration; prefer org_configs."
         ),
     )
     sandbox_config: SandboxConfig | None = Field(
@@ -281,7 +282,7 @@ def get_skills(request: SkillsRequest) -> SkillsResponse:
     org_repos: list[tuple[str, str]] = []
     if request.org_configs:
         org_repos = [(c.org_repo_url, c.org_name) for c in request.org_configs]
-    elif request.org_config:
+    elif "org_config" in request.model_fields_set and request.org_config:
         org_repos = [(request.org_config.org_repo_url, request.org_config.org_name)]
 
     # Call the service
