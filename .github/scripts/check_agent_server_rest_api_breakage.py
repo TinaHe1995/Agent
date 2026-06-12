@@ -574,6 +574,7 @@ _RESPONSE_ENUM_VALUE_ADDED_IDS = frozenset(
 _EXTENSIBLE_DISCRIMINATOR_PROPERTY_RE = re.compile(
     r"HookConfig\b.*\bhooks/items/type\b"
 )
+_ACCEPTED_CLOUD_PROXY_PATH_REMOVAL_ID = "api-path-removed-without-deprecation"
 _ACCEPTED_CLOUD_PROXY_REMOVAL_PATH = "/api/cloud-proxy"
 _ACCEPTED_CLOUD_PROXY_REMOVAL_METHOD = "post"
 _ACCEPTED_CLOUD_PROXY_REMOVAL_OPERATION_ID = "cloud_proxy_api_cloud_proxy_post"
@@ -593,7 +594,7 @@ def _is_accepted_cloud_proxy_removal(operation: dict) -> bool:
 def _is_accepted_cloud_proxy_path_removal(change: dict) -> bool:
     """Return True for oasdiff's accepted /api/cloud-proxy path-removal shape."""
     return (
-        str(change.get("id", "")) == "api-path-removed-without-deprecation"
+        str(change.get("id", "")) == _ACCEPTED_CLOUD_PROXY_PATH_REMOVAL_ID
         and str(change.get("path", "")) == _ACCEPTED_CLOUD_PROXY_REMOVAL_PATH
         and str(change.get("operation", "")).lower()
         == _ACCEPTED_CLOUD_PROXY_REMOVAL_METHOD
