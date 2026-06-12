@@ -29,8 +29,14 @@ jobs:
               run: uv sync --frozen --group dev
 
             - name: Install oasdiff
+              env:
+                  # Keep this explicit so the installer does not query GitHub for
+                  # the latest release at runtime, which can fail under API/network
+                  # pressure before the actual REST breakage check runs.
+                  OASDIFF_VERSION: 1.18.6
+                  OASDIFF_INSTALL_DIR: /usr/local/bin
               run: |
-                  curl -L https://raw.githubusercontent.com/oasdiff/oasdiff/main/install.sh | sh -s -- -b /usr/local/bin
+                  curl -fsSL https://raw.githubusercontent.com/oasdiff/oasdiff/main/install.sh | version="${OASDIFF_VERSION}" INSTALL_DIR="${OASDIFF_INSTALL_DIR}" sh
                   oasdiff --version
 
             - name: Run agent server REST API breakage check
