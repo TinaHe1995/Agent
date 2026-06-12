@@ -177,9 +177,15 @@ class LLMSummarizingCondenser(RollingCondenser):
 
         # Do not pass extra_body explicitly. The LLM handles forwarding
         # litellm_extra_body only when it is non-empty.
-        llm_response = self.llm.completion(
-            messages=messages,
-        )
+        try:
+            llm_response = self.llm.completion(
+                messages=messages,
+            )
+        except Exception as e:
+            raise NoCondensationAvailableException(
+                f"Summarization LLM call failed: {e}"
+            ) from e
+
         # Extract summary from the LLMResponse message
         summary = None
         if llm_response.message.content:
@@ -338,3 +344,112 @@ class LLMSummarizingCondenser(RollingCondenser):
             forgotten_events=forgotten_events,
             summary_offset=summary_offset,
         )
+
+    # ------------------------------------------------------------------
+    # Async variants
+    # ------------------------------------------------------------------
+
+    async def _agenerate_condensation(
+        self,
+        forgotten_events: Sequence[LLMConvertibleEvent],
+        summary_offset: int,
+        max_event_str_length: int | None = None,
+    ) -> Condensation:
+        """Async variant of :meth:`_generate_condensation`."""
+        assert len(forgotten_events) > 0, "No events to condense."
+
+        event_strings = [
+            maybe_truncate(str(fe), truncate_after=max_event_str_length)
+            for fe in forgotten_events
+        ]
+
+        prompt = render_template(
+            os.path.join(os.path.dirname(__file__), "prompts"),
+            "summarizing_prompt.j2",
+            events=event_strings,
+        )
+
+        messages = [Message(role="user", content=[TextContent(text=prompt)])]
+        try:
+            llm_response = await self.llm.acompletion(messages=messages)
+        except Exception as e:
+            raise NoCondensationAvailableException(
+                f"Summarization LLM call failed: {e}"
+            ) from e
+
+        summary = None
+        if llm_response.message.content:
+            first_content = llm_response.message.content[0]
+            if isinstance(first_content, TextContent):
+                summary = first_content.text
+
+        return Condensation(
+            forgotten_event_ids={event.id for event in forgotten_events},
+            summary=summary,
+            summary_offset=summary_offset,
+            llm_response_id=llm_response.id,
+        )
+
+    async def aget_condensation(
+        self, view: View, agent_llm: LLM | None = None
+    ) -> Condensation:
+        """Async variant of :meth:`get_condensation`."""
+        try:
+            forgotten_events, summary_offset = self._get_forgotten_events(
+                view, agent_llm=agent_llm
+            )
+        except ValueError as e:
+            raise NoCondensationAvailableException(
+                "Unable to compute forgotten events"
+            ) from e
+
+        if not forgotten_events:
+            raise NoCondensationAvailableException(
+                "Cannot condense 0 events. This typically occurs when a tool loop "
+                "spans almost the entire view, leaving no valid range for "
+                "forgetting events. Consider adjusting keep_first or max_size "
+                "parameters."
+            )
+
+        if len(forgotten_events) < len(view) * self.minimum_progress:
+            raise NoCondensationAvailableException(
+                "Cannot apply condensation: events forgotten below minimum "
+                "progress threshold."
+            )
+
+        return await self._agenerate_condensation(
+            forgotten_events=forgotten_events,
+            summary_offset=summary_offset,
+        )
+
+    async def ahard_context_reset(
+        self,
+        view: View,
+        agent_llm: LLM | None = None,  # noqa: ARG002
+    ) -> Condensation | None:
+        """Async variant of :meth:`hard_context_reset`."""
+        max_event_str_length: int | None = None
+        attempts_remaining: int = self.hard_context_reset_max_retries
+
+        while attempts_remaining > 0:
+            try:
+                return await self._agenerate_condensation(
+                    forgotten_events=view.events,
+                    summary_offset=0,
+                    max_event_str_length=max_event_str_length,
+                )
+            except Exception as e:
+                if max_event_str_length is None:
+                    max_event_str_length = max(len(str(ev)) for ev in view.events)
+                assert max_event_str_length is not None
+                max_event_str_length = int(
+                    max_event_str_length * self.hard_context_reset_context_scaling
+                )
+                logger.warning(
+                    f"Hard context reset summarization failed: {e}. "
+                    f"Reducing max event size to {max_event_str_length}."
+                )
+            attempts_remaining -= 1
+
+        logger.error("Hard context reset summarization failed after multiple attempts.")
+        return None

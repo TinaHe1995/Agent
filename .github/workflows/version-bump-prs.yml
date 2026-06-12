@@ -23,9 +23,15 @@ jobs:
 
             - name: Get version from release or input
               id: get_version
+              env:
+                  VERSION_INPUT: ${{ github.event.inputs.version }}
               run: |
-                  VERSION="${{ github.event.inputs.version }}"
-                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  VERSION="$VERSION_INPUT"
+                  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "❌ Invalid version format. Expected: X.Y.Z (e.g., 1.2.3)"
+                    exit 1
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
                   echo "📦 Version: $VERSION"
 
             - name: Validate version
@@ -39,7 +45,7 @@ jobs:
                   echo "📦 Creating version bump PRs for version: $VERSION"
 
             - name: Install uv
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
               with:
                   version: latest
                   python-version: '3.12'
@@ -383,7 +389,7 @@ jobs:
 
             - name: Notify Slack
               if: env.SLACK_BOT_TOKEN != ''
-              uses: slackapi/slack-github-action@v3.0.3
+              uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
               with:
                   method: chat.postMessage
                   token: ${{ env.SLACK_BOT_TOKEN }}

@@ -248,18 +248,26 @@ class RootSpan:
     traces with no ``session_id``), so we switched to the recommended pattern.
     """
 
-    def __init__(self, name: str, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         from lmnr import Laminar
 
         # ``start_span`` returns a span without attaching it as the current
         # OTel context; we'll restore it on every entry point via ``use_span``.
         self.span = Laminar.start_span(name)
-        if session_id:
-            # ``set_trace_session_id`` requires an active span; briefly enter
-            # the span context to apply the session id to the trace metadata.
+        if session_id or user_id:
+            # ``set_trace_session_id`` / ``set_trace_user_id`` require an
+            # active span; briefly enter the span context to apply them.
             with contextlib.suppress(Exception):
                 with Laminar.use_span(self.span):
-                    Laminar.set_trace_session_id(session_id)
+                    if session_id:
+                        Laminar.set_trace_session_id(session_id)
+                    if user_id:
+                        Laminar.set_trace_user_id(user_id)
         self._ended = False
 
     def end(self) -> None:
@@ -273,7 +281,11 @@ class RootSpan:
             logger.debug("Error ending observability root span", exc_info=True)
 
 
-def start_root_span(name: str, session_id: str | None = None) -> RootSpan | None:
+def start_root_span(
+    name: str,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> RootSpan | None:
     """Create a long-lived root span for an owning object.
 
     Returns ``None`` if observability is not enabled.
@@ -281,7 +293,7 @@ def start_root_span(name: str, session_id: str | None = None) -> RootSpan | None
     if not should_enable_observability():
         return None
     try:
-        return RootSpan(name, session_id=session_id)
+        return RootSpan(name, session_id=session_id, user_id=user_id)
     except Exception:
         logger.debug("Failed to create observability root span", exc_info=True)
         return None
@@ -337,141 +349,6 @@ def _root_span_from_args(args: tuple[Any, ...]) -> RootSpan | None:
     if isinstance(candidate, RootSpan):
         return candidate
     return None
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compat shims (deprecated).
-# ---------------------------------------------------------------------------
-#
-# Deprecation schedule: deprecated in 1.22.0, scheduled for removal in 1.27.0.
-# This matches the SDK's existing 5-minor-version grace window — see
-# ``VerificationSettings.confirmation_mode`` (deprecated 1.17.0, removed
-# 1.22.0). New code should use ``start_root_span`` / ``end_root_span`` (or
-# ``BaseConversation._start_observability_span`` /
-# ``_end_observability_span``).
-#
-# An audit on 2026-05-07 found no callers of these symbols outside the SDK
-# itself: 0 hits in OpenHands/OpenHands, 0 in OpenHands/agent-canvas, 0 in
-# OpenHands/codescout (only ``maybe_init_laminar`` is used), and 0 elsewhere
-# in the OpenHands org via GitHub code search. The shims are kept solely to
-# protect any unaudited private/external consumer; they emit a
-# ``DeprecationWarning`` so any straggler is alerted before removal.
-
-
-class SpanManager:
-    """Deprecated single-stack span manager.
-
-    .. deprecated:: 1.22.0
-        Will be removed in 1.27.0. The SDK no longer relies on a global stack:
-        each ``BaseConversation`` owns its own ``RootSpan``, which avoids
-        cross-conversation collisions when multiple conversations are alive
-        concurrently. Use ``start_root_span`` / ``end_root_span`` (or
-        ``BaseConversation._start_observability_span`` /
-        ``_end_observability_span``) instead.
-    """
-
-    def __init__(self) -> None:
-        self._stack: list[RootSpan] = []
-
-    def start_active_span(self, name: str, session_id: str | None = None) -> None:
-        # Literal version strings are required by .github/scripts/check_deprecations.py
-        from openhands.sdk.utils.deprecation import warn_deprecated
-
-        warn_deprecated(
-            "SpanManager.start_active_span",
-            deprecated_in="1.22.0",
-            removed_in="1.27.0",
-            details=(
-                "Use openhands.sdk.observability.laminar.start_root_span and "
-                "store the returned RootSpan on the owning object."
-            ),
-        )
-        root = start_root_span(name, session_id=session_id)
-        if root is not None:
-            self._stack.append(root)
-
-    def end_active_span(self) -> None:
-        from openhands.sdk.utils.deprecation import warn_deprecated
-
-        warn_deprecated(
-            "SpanManager.end_active_span",
-            deprecated_in="1.22.0",
-            removed_in="1.27.0",
-            details="Use openhands.sdk.observability.laminar.end_root_span.",
-        )
-        if not self._stack:
-            logger.warning("Attempted to end active span, but stack is empty")
-            return
-        end_root_span(self._stack.pop())
-
-
-_span_manager: SpanManager | None = None
-
-
-def _get_span_manager() -> SpanManager:
-    """Internal accessor for the deprecated module-level SpanManager.
-
-    Bypasses ``SpanManager.__init__`` so wiring up the legacy shims doesn't
-    itself trigger a deprecation warning.
-    """
-    global _span_manager
-    if _span_manager is None:
-        _span_manager = SpanManager.__new__(SpanManager)
-        _span_manager._stack = []
-    return _span_manager
-
-
-def start_active_span(name: str, session_id: str | None = None) -> None:
-    """Deprecated: use ``start_root_span`` with a per-conversation owner.
-
-    .. deprecated:: 1.22.0
-        Will be removed in 1.27.0.
-    """
-    from openhands.sdk.utils.deprecation import warn_deprecated
-
-    warn_deprecated(
-        "openhands.sdk.observability.laminar.start_active_span",
-        deprecated_in="1.22.0",
-        removed_in="1.27.0",
-        details=(
-            "Use openhands.sdk.observability.laminar.start_root_span and "
-            "store the returned RootSpan on the owning object (e.g. a "
-            "Conversation). The @observe decorator will then re-attach the "
-            "span as the parent of nested calls automatically. The previous "
-            "global LIFO stack could not safely support multiple concurrent "
-            "conversations."
-        ),
-    )
-    # Inline the work to avoid triggering SpanManager's own deprecation warning.
-    mgr = _get_span_manager()
-    root = start_root_span(name, session_id=session_id)
-    if root is not None:
-        mgr._stack.append(root)
-
-
-def end_active_span() -> None:
-    """Deprecated: paired with the deprecated ``start_active_span``.
-
-    .. deprecated:: 1.22.0
-        Will be removed in 1.27.0.
-    """
-    from openhands.sdk.utils.deprecation import warn_deprecated
-
-    warn_deprecated(
-        "openhands.sdk.observability.laminar.end_active_span",
-        deprecated_in="1.22.0",
-        removed_in="1.27.0",
-        details="Use openhands.sdk.observability.laminar.end_root_span.",
-    )
-    try:
-        mgr = _get_span_manager()
-        if not mgr._stack:
-            logger.warning("Attempted to end active span, but stack is empty")
-            return
-        end_root_span(mgr._stack.pop())
-    except Exception:
-        logger.debug("Error ending active span")
-        pass
 
 
 def init_laminar_for_external():

@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -42,6 +42,7 @@ from openhands.sdk.event import MessageEvent
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.git.utils import run_git_command, validate_git_repository
+from openhands.sdk.tool.client_tool import register_client_tools
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
 
@@ -245,12 +246,69 @@ def _compose_conversation_info(
     # Use mode='json' so SecretStr in nested structures (e.g. LookupSecret.headers,
     # agent.agent_context.secrets) serialize to strings. Without it, validation
     # fails because ConversationInfo expects dict[str, str] but receives SecretStr.
+    #
+    # ACP model state is lifted onto top-level ConversationInfo fields because
+    # the agent holds it in PrivateAttrs (ACPAgent is frozen) which don't survive
+    # ``model_dump``. ``getattr`` keeps non-ACP agents a no-op. We read the live
+    # agent (fresh within a session) and fall back to ``state.agent_state`` —
+    # persisted to ``base_state.json`` by ``ACPAgent._init`` (and kept in sync by
+    # ``switch_acp_model``) — so cold list reads, where PrivateAttrs are still
+    # empty because ``init_state`` hasn't fired, still surface the last-known
+    # state. Persisted ``acp_available_models`` is a list of dicts that
+    # ``ConversationInfo`` coerces back into ``ACPModelInfo``.
+    agent_state = getattr(state, "agent_state", {}) or {}
+    agent = state.agent
+    # current_model_id: live PrivateAttr (fresh after a runtime switch) → the
+    # persisted hint → the authoritative ``acp_model`` the agent runs on resume.
+    #
+    # The ``acp_model`` fallback is gated on the agent NOT being a live,
+    # initialized one. Once ``init_state`` has fired, ``current_model_id`` is the
+    # authoritative resolved value — including ``None`` when an override couldn't
+    # be applied (unknown provider, or a resume whose ``set_session_model`` the
+    # server rejected) — so falling back to ``acp_model`` there would re-assert an
+    # override the live session isn't actually running. The fallback is only for
+    # *cold* reads (``init_state`` hasn't fired, PrivateAttrs still empty), where
+    # the serialized ``acp_model`` is the best last-known hint. The persisted
+    # ``acp_current_model_id`` hint is kept honest by ``ACPAgent.init_state`` (it
+    # clears the value whenever the override wasn't applied), so it's safe in
+    # both cases.
+    agent_initialized = bool(getattr(agent, "_initialized", False))
+    current_model_id = (
+        getattr(agent, "current_model_id", None)
+        or agent_state.get("acp_current_model_id")
+        or (None if agent_initialized else getattr(agent, "acp_model", None))
+    )
+    # available_models: the property returns ``[]`` (never ``None``) for *both* a
+    # cold-read agent (PrivateAttr default, init_state hasn't fired) and a live
+    # agent that genuinely has no models, so an ``is None`` check can't tell them
+    # apart — and would drop the persisted picker payload on every cold list
+    # read. The ``or`` chain is deliberate: an empty live list falls back to the
+    # persisted snapshot, which is exactly right on cold reads (surface the
+    # last-known list) and benign for a live empty session (the persisted value
+    # is itself empty/absent there).
+    available_models = (
+        getattr(agent, "available_models", None)
+        or agent_state.get("acp_available_models")
+        or []
+    )
+    # Static provider capability. Unlike the two fields above it has no
+    # meaningful live-vs-persisted distinction — it's derived from the stable
+    # provider identity and written once at session init — so we read the
+    # persisted value directly. Defaults False for non-ACP agents and
+    # conversations that haven't started a session.
+    supports_runtime_model_switch = bool(
+        agent_state.get("acp_supports_runtime_model_switch", False)
+    )
     return ConversationInfo(
         **state.model_dump(mode="json"),
         title=stored.title,
         metrics=stored.metrics,
         created_at=stored.created_at,
         updated_at=stored.updated_at,
+        current_model_id=current_model_id,
+        available_models=available_models,
+        supports_runtime_model_switch=supports_runtime_model_switch,
+        client_tools=stored.client_tools,
     )
 
 
@@ -582,6 +640,22 @@ class ConversationService:
                     conversation_id,
                 )
 
+        # Register client-defined tools (JSON specs, no Python code). The
+        # ClientTool *class* is registered statelessly; each tool's schema
+        # travels with the conversation via the returned Tool.params, so
+        # concurrent conversations never clobber each other's schemas.
+        if request.client_tools:
+            client_tool_specs = register_client_tools(request.client_tools)
+            # Inject Tool specs into the agent so _initialize() resolves them
+            existing_names = {t.name for t in request.agent.tools}
+            new_tools = [
+                ts for ts in client_tool_specs if ts.name not in existing_names
+            ]
+            if new_tools:
+                request.agent = request.agent.model_copy(
+                    update={"tools": [*request.agent.tools, *new_tools]}
+                )
+
         # Register subagent definitions forwarded from the client
         if request.agent_definitions:
             _register_agent_definitions(
@@ -642,6 +716,25 @@ class ConversationService:
         if event_service:
             await event_service.pause()
             # Notify conversation webhooks about the paused conversation
+            state = await event_service.get_state()
+            conversation_info = _compose_webhook_conversation_info(
+                event_service.stored, state
+            )
+            await self._notify_conversation_webhooks(conversation_info)
+        return bool(event_service)
+
+    async def interrupt_conversation(self, conversation_id: UUID) -> bool:
+        """Immediately cancel an in-flight LLM call for a conversation.
+
+        Unlike :meth:`pause_conversation`, which waits for the current
+        LLM request to finish, this cancels the running ``arun()`` task
+        so the interruption takes effect mid-stream.
+        """
+        if self._event_services is None:
+            raise ValueError("inactive_service")
+        event_service = self._event_services.get(conversation_id)
+        if event_service:
+            await event_service.interrupt()
             state = await event_service.get_state()
             conversation_info = _compose_webhook_conversation_info(
                 event_service.stored, state
@@ -844,11 +937,25 @@ class ConversationService:
         fork_conv.close()
 
         # _start_event_service will resume from the persisted fork directory.
-        fork_stored = StoredConversation(
-            id=fork_conv_id,
-            agent=fork_agent,
-            workspace=fork_workspace,
-        )
+        # Copy the source's stored metadata so request-level configuration
+        # (client_tools, tool_module_qualnames, agent_definitions, plugins,
+        # secrets, ...) is preserved on the fork, then override only the
+        # fork-specific fields. Without this, e.g. a fork of a client-tool
+        # conversation would lose ``client_tools`` in meta.json and be unable
+        # to re-register its tools after a server restart.
+        fork_overrides: dict[str, Any] = {
+            "id": fork_conv_id,
+            "agent": fork_agent,
+            "workspace": fork_workspace,
+            "title": title,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+        }
+        if reset_metrics:
+            fork_overrides["metrics"] = None
+        if tags is not None:
+            fork_overrides["tags"] = tags
+        fork_stored = source_service.stored.model_copy(update=fork_overrides)
         # If the service fails to start, clean up the orphaned persistence
         # directory so we don't leave stale state on disk.
         fork_dir = self.conversations_dir / fork_conv_id.hex
@@ -909,6 +1016,11 @@ class ConversationService:
                             f"resuming conversation {stored.id}: "
                             f"{list(stored.tool_module_qualnames.keys())}"
                         )
+                # Re-register client-defined tools when resuming. The agent's
+                # persisted tool specs already carry each schema via params, so
+                # we only need to (re-)register the ClientTool class per name.
+                if stored.client_tools:
+                    register_client_tools(stored.client_tools)
                 # Register agent definitions when resuming
                 if stored.agent_definitions:
                     _register_agent_definitions(
@@ -1181,9 +1293,15 @@ class WebhookSubscriber(Subscriber):
         if self.session_api_key:
             headers["X-Session-API-Key"] = self.session_api_key
 
-        # Convert events to serializable format
+        # Convert events to a JSON-serializable format. mode="json" is required
+        # so types like set and SecretStr become JSON-safe primitives; without
+        # it httpx's encoder raises "Object of type set/SecretStr is not JSON
+        # serializable", every retry fails identically, and the events are
+        # dropped. (Mirrors ConversationWebhookSubscriber.post_conversation_info.)
         event_data = [
-            event.model_dump() if hasattr(event, "model_dump") else event.__dict__
+            event.model_dump(mode="json")
+            if hasattr(event, "model_dump")
+            else event.__dict__
             for event in events_to_post
         ]
 

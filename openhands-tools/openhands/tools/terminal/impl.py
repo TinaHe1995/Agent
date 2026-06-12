@@ -15,8 +15,10 @@ if TYPE_CHECKING:
     from openhands.sdk.conversation import LocalConversation
 from openhands.tools.terminal.constants import CMD_OUTPUT_PS1_END
 from openhands.tools.terminal.definition import (
+    _LITERAL_ARG_HINT_TEMPLATE,
     TerminalAction,
     TerminalObservation,
+    looks_like_python_literal_argument,
 )
 from openhands.tools.terminal.terminal.factory import (
     _is_tmux_available,
@@ -538,10 +540,53 @@ class TerminalExecutor(ToolExecutor[TerminalAction, TerminalObservation]):
         if action.reset and action.is_input:
             raise ValueError("Cannot use reset=True with is_input=True")
 
+        # Short-circuit obvious tool-call malformation: Python/JSON literals
+        # passed where the model should have sent a shell command. The shell
+        # would otherwise echo a confusing `command not found` and the model
+        # rarely self-corrects without a structured hint. Skip the check when
+        # `is_input=True` because that path forwards raw bytes (e.g. keystrokes
+        # like `C-c`) to a running process and is not a fresh shell command.
+        if not action.is_input:
+            literal_kind = looks_like_python_literal_argument(action.command)
+            if literal_kind is not None:
+                head = action.command.lstrip()[:60]
+                logger.warning(
+                    "Rejected terminal call: command argument looks like a "
+                    "Python/JSON %s (head=%r). Returning structured hint to "
+                    "the model instead of executing.",
+                    literal_kind,
+                    head,
+                )
+                return TerminalObservation.from_text(
+                    _LITERAL_ARG_HINT_TEMPLATE.format(
+                        literal_kind=literal_kind,
+                        head=head,
+                    ),
+                    is_error=True,
+                    command=action.command,
+                    exit_code=None,
+                )
+
         if self._pool is not None:
             return self._execute_pooled(action, conversation)
         else:
             return self._execute_single_session(action, conversation)
+
+    def interrupt(self) -> None:
+        """Send Ctrl+C to all active terminal sessions.
+
+        Called from a different thread when the conversation is
+        interrupted, so the blocking ``session.execute()`` poll loop
+        sees the command terminate and the worker thread can exit.
+        """
+        if self._pool is not None:
+            with self._sessions_lock:
+                for session in self._sessions.values():
+                    with suppress(Exception):
+                        session.interrupt()
+        elif self._session is not None:
+            with suppress(Exception):
+                self._session.interrupt()
 
     def close(self) -> None:
         """Close the terminal session and clean up resources."""
