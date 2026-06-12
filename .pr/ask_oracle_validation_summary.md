@@ -6,7 +6,7 @@ This directory is temporary PR evidence for the `ask_oracle` tool implementation
 
 - Added `ask_oracle`, a read-only built-in SDK tool that loads a saved LLM profile and asks it for stateless second-opinion advice.
 - Added `OpenHandsAgentSettings.oracle_llm_profile`; setting this saved profile name makes the tool available on the standard OpenHands agent.
-- The active conversation LLM is not switched. The Oracle call uses the profile only for that consultation.
+- The active conversation LLM is not switched. The Oracle call sends only the Oracle system prompt plus the agent's question and optional context, without forwarding conversation history or tools.
 
 ## Live validation
 
@@ -48,10 +48,11 @@ uv run pytest \
   tests/sdk/tool/test_ask_oracle.py \
   tests/sdk/tool/test_builtins.py \
   tests/sdk/test_settings.py::test_llm_agent_settings_export_schema_groups_sections \
+  tests/sdk/test_settings.py::test_export_agent_settings_schema_emits_variant_tagged_sections \
   tests/examples/test_examples.py::test_directory_example_is_discovered
 ```
 
-Result: `11 passed`.
+Result: `12 passed`.
 
 ### Example execution
 

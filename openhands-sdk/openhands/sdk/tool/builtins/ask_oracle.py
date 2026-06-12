@@ -51,10 +51,9 @@ class AskOracleAction(Action):
 class AskOracleObservation(Observation):
     """Observation returned by the Oracle consultation."""
 
-    profile_name: str = Field(description="LLM profile used for the Oracle call.")
-    oracle_model: str | None = Field(
-        default=None,
-        description="Model configured by the Oracle profile, when available.",
+    response: str = Field(
+        default="",
+        description="Text response returned by the Oracle.",
     )
 
     @property
@@ -64,34 +63,30 @@ class AskOracleObservation(Observation):
             content.append("Oracle consultation failed", style="bold red")
         else:
             content.append("Oracle recommendation", style="bold green")
-        content.append(f": {self.profile_name}")
-        if self.oracle_model:
-            content.append(f" ({self.oracle_model})")
         if self.text:
             content.append("\n")
             content.append(self.text)
         return content
 
 
-_DESCRIPTION_TEMPLATE = (
-    "Ask the Oracle for a second opinion. The Oracle is a smart model "
-    "intended to be your help. It is capable for difficult reasoning.\n\n"
+_DESCRIPTION = (
+    "Ask the Oracle for a second opinion. The Oracle is a smart model intended "
+    "to help with difficult reasoning.\n\n"
     "Use this when you are stuck, uncertain, comparing approaches, or need a "
-    "higher-quality recommendation before proceeding. The Oracle receives the "
-    "current conversation context plus your question.\n\n"
+    "higher-quality recommendation before proceeding.\n\n"
     "Treat the Oracle's response as strong guidance and follow its recommendation "
-    "unless you have a clear reason not to.\n\n"
+    "unless you have a clear reason not to."
 )
 
-_ORACLE_PROMPT_TEMPLATE = """\
+_ORACLE_SYSTEM_PROMPT = """\
 You are the Oracle: a highly capable reviewer giving a second opinion to an \
 OpenHands agent.
 
-The agent is working in an existing conversation. Use the conversation context you \
-receive to answer the agent's question. Do not call tools. Do not perform work \
+Answer the agent's question directly. Do not call tools. Do not perform work \
 directly. Give a concrete recommendation the agent can follow, including important \
-risks or caveats.
+risks or caveats."""
 
+_ORACLE_USER_PROMPT_TEMPLATE = """\
 Question:
 {question}
 {context_section}"""
@@ -109,105 +104,79 @@ class AskOracleExecutor(ToolExecutor[AskOracleAction, AskOracleObservation]):
     ) -> AskOracleObservation:
         if not self.profile_name:
             return AskOracleObservation.from_text(
-                text="No Oracle LLM profile is configured.",
+                text="The Oracle is not configured.",
                 is_error=True,
-                profile_name="",
-            )
-        if conversation is None:
-            return AskOracleObservation.from_text(
-                text="Cannot ask Oracle without an active conversation.",
-                is_error=True,
-                profile_name=self.profile_name,
             )
 
+        cipher = conversation._cipher if conversation is not None else None
         try:
             oracle_llm = LLMProfileStore(self.profile_store_dir).load(
-                self.profile_name, cipher=conversation._cipher
+                self.profile_name, cipher=cipher
             )
         except FileNotFoundError:
             return AskOracleObservation.from_text(
-                text=f"Oracle LLM profile '{self.profile_name}' was not found.",
+                text=(
+                    "The Oracle is not available because its configured profile "
+                    "was not found."
+                ),
                 is_error=True,
-                profile_name=self.profile_name,
             )
         except ValueError as exc:
             return AskOracleObservation.from_text(
-                text=str(exc),
+                text=f"The Oracle is not available: {exc}",
                 is_error=True,
-                profile_name=self.profile_name,
             )
         except Exception as exc:
             return AskOracleObservation.from_text(
-                text=(
-                    f"Failed to load Oracle LLM profile '{self.profile_name}': "
-                    f"{type(exc).__name__}: {exc}"
-                ),
+                text=f"The Oracle is not available: {type(exc).__name__}: {exc}",
                 is_error=True,
-                profile_name=self.profile_name,
             )
 
-        # Lazy import avoids a startup cycle while built-in tools are registered.
-        from openhands.sdk.agent.utils import (
-            make_llm_completion,
-            prepare_llm_messages,
-        )
+        from openhands.sdk.agent.utils import make_llm_completion
         from openhands.sdk.llm import Message, TextContent
 
-        conversation._ensure_agent_ready()
         context_section = (
             f"\nAdditional context from the agent:\n{action.context}\n"
             if action.context
             else ""
         )
-        oracle_prompt = _ORACLE_PROMPT_TEMPLATE.format(
+        user_prompt = _ORACLE_USER_PROMPT_TEMPLATE.format(
             question=action.question,
             context_section=context_section,
         )
-        user_message = Message(
-            role="user",
-            content=[TextContent(text=oracle_prompt)],
-        )
-        messages = prepare_llm_messages(
-            conversation.state.view, additional_messages=[user_message]
-        )
+        messages = [
+            Message(
+                role="system",
+                content=[TextContent(text=_ORACLE_SYSTEM_PROMPT)],
+            ),
+            Message(role="user", content=[TextContent(text=user_prompt)]),
+        ]
 
         try:
-            response = make_llm_completion(
-                oracle_llm.model_copy(
-                    update={"usage_id": f"oracle-profile:{self.profile_name}"},
-                    deep=True,
-                ),
-                messages,
-                tools=list(conversation.agent.tools_map.values()),
-            )
+            llm_response = make_llm_completion(oracle_llm, messages)
         except Exception as exc:
             return AskOracleObservation.from_text(
                 text=(
-                    f"Oracle LLM profile '{self.profile_name}' failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    "The Oracle encountered an error and did not return a "
+                    f"response: {type(exc).__name__}: {exc}"
                 ),
                 is_error=True,
-                profile_name=self.profile_name,
-                oracle_model=oracle_llm.model,
             )
 
         oracle_text = "".join(
             content.text
-            for content in response.message.content
+            for content in llm_response.message.content
             if isinstance(content, TextContent)
         ).strip()
         if not oracle_text:
             return AskOracleObservation.from_text(
-                text="Oracle did not return a text recommendation.",
+                text="The Oracle did not return a response.",
                 is_error=True,
-                profile_name=self.profile_name,
-                oracle_model=oracle_llm.model,
             )
 
         return AskOracleObservation.from_text(
             text=oracle_text,
-            profile_name=self.profile_name,
-            oracle_model=oracle_llm.model,
+            response=oracle_text,
         )
 
 
@@ -233,10 +202,9 @@ class AskOracleTool(ToolDefinition[AskOracleAction, AskOracleObservation]):
                 "letters, digits, '.', '_', or '-'."
             )
 
-        profile_display = profile_name or "not configured"
         return [
             cls(
-                description=_DESCRIPTION_TEMPLATE.format(profile_name=profile_display),
+                description=_DESCRIPTION,
                 action_type=AskOracleAction,
                 observation_type=AskOracleObservation,
                 executor=AskOracleExecutor(profile_name, profile_store_dir),

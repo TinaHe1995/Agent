@@ -1,6 +1,6 @@
 {
-  "started_at": "2026-06-11T20:40:20.866050+00:00",
-  "finished_at": "2026-06-11T20:40:29.750538+00:00",
+  "started_at": "2026-06-12T00:04:04.460387+00:00",
+  "finished_at": "2026-06-12T00:04:11.102035+00:00",
   "issue": "https://github.com/OpenHands/software-agent-sdk/issues/3672",
   "primary_profile": {
     "model": "openai/gpt-5-nano",
@@ -23,8 +23,7 @@
       "think"
     ],
     "observation_is_error": false,
-    "observation_profile_name": "oracle",
-    "observation_oracle_model": "litellm_proxy/openai/gpt-5-mini",
-    "observation_text": "- I am the Oracle profile (gpt-5-mini via the eval LiteLLM proxy), available as a second-opinion reviewer.  \n- Ask for a second opinion to surface alternative approaches and hidden blind spots (e.g., different assumptions, edge cases, or failure modes you overlooked); caveat \u2014 provide clear context and the approaches you\u2019ve tried so the Oracle can give targeted, non-redundant guidance."
+    "observation_response": "- I am the Oracle profile: gpt-5-mini accessed via the eval LiteLLM proxy.  \n- Ask for a second opinion because it can expose model blind spots or hallucinations and suggest alternative strategies; caveat \u2014 validate the second opinion against facts/constraints and avoid sharing sensitive data.",
+    "observation_text": "- I am the Oracle profile: gpt-5-mini accessed via the eval LiteLLM proxy.  \n- Ask for a second opinion because it can expose model blind spots or hallucinations and suggest alternative strategies; caveat \u2014 validate the second opinion against facts/constraints and avoid sharing sensitive data."
   }
 }

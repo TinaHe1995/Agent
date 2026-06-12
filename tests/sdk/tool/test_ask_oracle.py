@@ -1,18 +1,54 @@
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import PrivateAttr, ValidationError
 
 from openhands.sdk import LLM, LocalConversation, OpenHandsAgentSettings, Tool
 from openhands.sdk.agent import Agent
 from openhands.sdk.llm import Message, TextContent, llm_profile_store
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.testing import TestLLM
+from openhands.sdk.tool import ToolDefinition
 from openhands.sdk.tool.builtins import (
     AskOracleAction,
     AskOracleObservation,
     AskOracleTool,
 )
+
+
+class CapturingTestLLM(TestLLM):
+    _last_messages: list[Message] = PrivateAttr(default_factory=list)
+    _last_tools: Sequence[ToolDefinition] | None = PrivateAttr(default=None)
+
+    @property
+    def last_messages(self) -> list[Message]:
+        return self._last_messages
+
+    @property
+    def last_tools(self) -> Sequence[ToolDefinition] | None:
+        return self._last_tools
+
+    def completion(
+        self,
+        messages: list[Message],
+        tools: Sequence[ToolDefinition] | None = None,
+        _return_metrics: bool = False,
+        add_security_risk_prediction: bool = False,
+        on_token: Any = None,
+        **kwargs: Any,
+    ):
+        self._last_messages = list(messages)
+        self._last_tools = tools
+        return super().completion(
+            messages=messages,
+            tools=tools,
+            _return_metrics=_return_metrics,
+            add_security_risk_prediction=add_security_risk_prediction,
+            on_token=on_token,
+            **kwargs,
+        )
 
 
 def _make_llm(model: str, usage_id: str) -> LLM:
@@ -21,6 +57,12 @@ def _make_llm(model: str, usage_id: str) -> LLM:
 
 def _assistant_message(text: str) -> Message:
     return Message(role="assistant", content=[TextContent(text=text)])
+
+
+def _message_text(message: Message) -> str:
+    return "".join(
+        content.text for content in message.content if isinstance(content, TextContent)
+    )
 
 
 def _make_conversation(profile_name: str = "oracle") -> LocalConversation:
@@ -36,11 +78,11 @@ def _make_conversation(profile_name: str = "oracle") -> LocalConversation:
     )
 
 
-def test_ask_oracle_tool_description_names_configured_profile() -> None:
+def test_ask_oracle_tool_description_guides_second_opinion_usage() -> None:
     tool = AskOracleTool.create(profile_name="oracle")[0]
 
     assert "Ask the Oracle for a second opinion" in tool.description
-    assert "Configured Oracle profile: oracle" in tool.description
+    assert "Treat the Oracle's response as strong guidance" in tool.description
 
 
 def test_ask_oracle_tool_validates_profile_name() -> None:
@@ -84,10 +126,13 @@ def test_agent_settings_rejects_invalid_oracle_profile_name() -> None:
 def test_ask_oracle_tool_returns_oracle_recommendation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    oracle_llm = TestLLM.from_messages(
-        [_assistant_message("Prefer the smaller, typed settings field.")],
-        model="oracle-model",
-        usage_id="oracle",
+    oracle_llm = cast(
+        CapturingTestLLM,
+        CapturingTestLLM.from_messages(
+            [_assistant_message("Prefer the smaller, typed settings field.")],
+            model="oracle-model",
+            usage_id="oracle",
+        ),
     )
 
     def load_profile(
@@ -112,10 +157,18 @@ def test_ask_oracle_tool_returns_oracle_recommendation(
 
     assert isinstance(observation, AskOracleObservation)
     assert not observation.is_error
-    assert observation.profile_name == "oracle"
-    assert observation.oracle_model == "oracle-model"
+    assert observation.response == "Prefer the smaller, typed settings field."
     assert observation.text == "Prefer the smaller, typed settings field."
     assert "Prefer the smaller" in observation.visualize.plain
+    assert [message.role for message in oracle_llm.last_messages] == ["system", "user"]
+    assert "You are the Oracle" in _message_text(oracle_llm.last_messages[0])
+    assert "Should I add one setting or two?" in _message_text(
+        oracle_llm.last_messages[1]
+    )
+    assert "The tool needs an Oracle profile name." in _message_text(
+        oracle_llm.last_messages[1]
+    )
+    assert oracle_llm.last_tools == []
     assert conversation.agent.llm.model == "default-model"
     assert conversation.state.agent.llm.model == "default-model"
 
@@ -136,8 +189,8 @@ def test_ask_oracle_tool_reports_missing_profile(
 
     assert isinstance(observation, AskOracleObservation)
     assert observation.is_error
-    assert observation.profile_name == "missing"
-    assert "was not found" in observation.text
+    assert observation.response == ""
+    assert "not available" in observation.text
 
 
 def test_ask_oracle_tool_reports_empty_oracle_response(
@@ -167,5 +220,5 @@ def test_ask_oracle_tool_reports_empty_oracle_response(
 
     assert isinstance(observation, AskOracleObservation)
     assert observation.is_error
-    assert observation.oracle_model == "oracle-model"
-    assert "did not return a text recommendation" in observation.text
+    assert observation.response == ""
+    assert "did not return a response" in observation.text

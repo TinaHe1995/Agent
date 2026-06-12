@@ -113,8 +113,7 @@ try:
         "ask_oracle_tool": {
             "registered_tool_names": sorted(agent.tools_map),
             "observation_is_error": observation.is_error,
-            "observation_profile_name": observation.profile_name,
-            "observation_oracle_model": observation.oracle_model,
+            "observation_response": observation.response,
             "observation_text": observation.text,
         },
     }
