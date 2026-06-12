@@ -127,6 +127,12 @@ _ACP_PROMPT_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)  # seconds
 # Exception types that indicate transient connection issues worth retrying
 _RETRIABLE_CONNECTION_ERRORS = (OSError, ConnectionError, BrokenPipeError, EOFError)
 
+# ``npm run`` exports package/lifecycle configuration into descendants. ACP
+# providers launched through ``npx`` must not inherit that context, otherwise npm
+# can try to resolve against the parent package instead of the requested one.
+_INHERITED_NPM_ENV_EXACT: frozenset[str] = frozenset({"INIT_CWD"})
+_INHERITED_NPM_ENV_PREFIXES: tuple[str, ...] = ("npm_", "NPM_")
+
 # JSON-RPC error codes from the ACP server that are transient and worth
 # retrying.  These map to server-side failures (HTTP 500 equivalents) where
 # the session state is still valid but the request failed.
@@ -187,6 +193,15 @@ def _fingerprint_session_id(session_id: str | None) -> str:
     if len(session_id) <= _SESSION_ID_LOG_SUFFIX_LEN:
         return "<short>"
     return f"...{session_id[-_SESSION_ID_LOG_SUFFIX_LEN:]}"
+
+
+def _strip_inherited_npm_env(env: dict[str, str]) -> None:
+    """Remove npm lifecycle/config variables inherited from the parent stack."""
+    for key in list(env):
+        if key in _INHERITED_NPM_ENV_EXACT or key.startswith(
+            _INHERITED_NPM_ENV_PREFIXES
+        ):
+            env.pop(key, None)
 
 
 # Limit for asyncio.StreamReader buffers used by the ACP subprocess pipes.
@@ -400,6 +415,26 @@ def _extract_session_models(
 _ACPMcpServer = HttpMcpServer | SseMcpServer | McpServerStdio
 
 
+def _remote_mcp_headers(spec: dict[str, Any], name: str) -> list[HttpHeader]:
+    """Convert remote MCP headers/auth into ACP's header-only representation."""
+    raw_headers = spec.get("headers") or {}
+    headers = [HttpHeader(name=str(k), value=str(v)) for k, v in raw_headers.items()]
+
+    auth = spec.get("auth")
+    has_authorization = any(h.name.lower() == "authorization" for h in headers)
+    if auth and not has_authorization:
+        if isinstance(auth, str) and auth != "oauth":
+            headers.append(HttpHeader(name="Authorization", value=f"Bearer {auth}"))
+        else:
+            logger.warning(
+                "ACP MCP server %r uses unsupported remote MCP auth type %r; "
+                "only explicit headers or string bearer tokens can be forwarded",
+                name,
+                type(auth).__name__,
+            )
+    return headers
+
+
 def _mcp_config_to_acp_servers(
     mcp_config: dict[str, Any],
     mcp_capabilities: Any,
@@ -427,7 +462,9 @@ def _mcp_config_to_acp_servers(
     A remote server whose transport the ACP server does not advertise is dropped
     with a warning rather than failing init — one misconfigured server should
     not sink the whole conversation.  ``env`` / ``headers`` maps are converted
-    to the protocol's ``[{name, value}]`` list form; their values were already
+    to the protocol's ``[{name, value}]`` list form; string ``auth`` values are
+    forwarded as bearer ``Authorization`` headers when no explicit
+    ``Authorization`` header is already present.  Their values were already
     decrypted by :class:`AgentBase`'s ``mcp_config`` validator.
     """
     servers = mcp_config.get("mcpServers")
@@ -456,10 +493,7 @@ def _mcp_config_to_acp_servers(
                 )
             )
         elif url:
-            headers = [
-                HttpHeader(name=str(k), value=str(v))
-                for k, v in (spec.get("headers") or {}).items()
-            ]
+            headers = _remote_mcp_headers(spec, str(name))
             is_sse = str(spec.get("transport") or "http").lower() == "sse"
             if not (sse_ok if is_sse else http_ok):
                 logger.warning(
@@ -2094,6 +2128,7 @@ class ACPAgent(AgentBase):
         # provider credentials (keyed by the provider's env var name).
         env = default_environment()
         env.update(os.environ)
+        _strip_inherited_npm_env(env)
         if self.acp_env:
             warn_deprecated(
                 "ACPAgent.acp_env",
