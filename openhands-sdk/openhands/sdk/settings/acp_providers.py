@@ -238,17 +238,6 @@ class ACPProviderInfo:
     signature break; the built-in providers set it explicitly.
     """
 
-    model_selection_method: Literal["set_session_model", "set_config_option"] = (
-        "set_session_model"
-    )
-    """Protocol method used to apply model selection for this provider.
-
-    ``"set_session_model"`` issues ACP ``session/set_model``. ``"set_config_option"``
-    issues ACP ``session/set_config_option`` with ``configId="model"``. The
-    default preserves the historical behavior for external callers constructing
-    this dataclass positionally.
-    """
-
     file_secrets: tuple[ACPFileSecretSpec, ...] = field(default=(), compare=False)
     """Reserved file-content credential secrets this provider authenticates from.
 
@@ -288,6 +277,17 @@ class ACPProviderInfo:
     ``None`` for providers with no known relocation lever, which then skip
     isolation. Consumed by
     :attr:`~openhands.sdk.agent.ACPAgent.acp_isolate_data_dir`.
+    """
+
+    model_selection_method: Literal["set_session_model", "set_config_option"] = (
+        "set_session_model"
+    )
+    """Protocol method used to apply model selection for this provider.
+
+    ``"set_session_model"`` issues ACP ``session/set_model``. ``"set_config_option"``
+    issues ACP ``session/set_config_option`` with ``configId="model"``. The
+    default preserves the historical behavior for external callers constructing
+    this dataclass positionally.
     """
 
 
