@@ -41,7 +41,7 @@ __all__ = ["build_default_registry"]
 
 def build_default_registry() -> PromptRegistry:
     r = PromptRegistry()
-    # static tier -- ported verbatim from system_prompt.j2 (#3610)
+    # static tier
     r.register(SoulSection())
     r.register(RoleSection())
     r.register(MemorySection())
@@ -60,7 +60,7 @@ def build_default_registry() -> PromptRegistry:
     r.register(TroubleshootingSection())
     r.register(ProcessManagementSection())
     r.register(ModelSpecificSection())  # guard: model_family resolved
-    # dynamic tier -- ported from system_message_suffix.j2 (#3610)
+    # dynamic tier
     r.register(DateTimeSection())
     r.register(RepoContextSection())  # guard: gated repo skills present
     r.register(AvailableSkillsSection())  # guard: available_skills_prompt
