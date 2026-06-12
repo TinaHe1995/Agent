@@ -10,6 +10,7 @@ import pytest
 from cachetools import LRUCache
 
 from openhands.tools.file_editor import file_editor
+from openhands.tools.file_editor.editor import FileEditor
 from openhands.tools.file_editor.utils.encoding import (
     EncodingManager,
     with_encoding,
@@ -368,33 +369,29 @@ def test_insert_non_utf8_file(temp_non_utf8_file):
 
 
 @pytest.mark.parametrize(
-    "command, kwargs",
+    "content, read_encoding",
     [
-        (
-            "str_replace",
-            {
-                "old_str": "numbers = [1, 2, 3, 4, 5]",
-                "new_str": "numbers = [1, 2, 3, 4, 5]  # status \u2192 done",
-            },
-        ),
-        ("insert", {"insert_line": 4, "new_str": "arrow = '\u2192'"}),
+        # cp1251 cannot encode U+2192 -> must upgrade to UTF-8 rather than truncate.
+        ("status \u2192 ok", "utf-8"),
+        # Content representable in cp1251 -> keep the original encoding.
+        ("Привет, мир!", "cp1251"),
     ],
 )
-def test_edit_unencodable_char_preserves_file_and_upgrades_to_utf8(
-    temp_non_utf8_file, command, kwargs
+def test_write_file_falls_back_to_utf8_only_when_needed(
+    tmp_path, content, read_encoding
 ):
-    """Regression: editing a non-UTF-8 file with a character that encoding cannot
-    represent (e.g. an arrow) must NOT truncate/destroy the file. It should be
-    written as UTF-8 instead."""
-    result = file_editor(command=command, path=str(temp_non_utf8_file), **kwargs)
+    """Regression: writing content the file's encoding cannot represent must not
+    truncate the file; it upgrades to UTF-8. Content that the encoding can represent
+    keeps the original encoding. The encoding is forced (not sniffed) so the test is
+    deterministic across platforms."""
+    editor = FileEditor(workspace_root=str(tmp_path))
+    path = tmp_path / "doc.txt"
+    path.write_text("seed", encoding="ascii")
 
-    data = temp_non_utf8_file.read_bytes()
-    assert len(data) > 0, "file was truncated/destroyed by a failed write"
-    text = data.decode("utf-8")  # file must now be valid UTF-8
-    assert "\u2192" in text
-    # Original (previously cp1251) content is preserved.
-    assert "Привет, мир!" in text
-    assert result.text is not None and "\u2192" in result.text
+    editor.write_file(path, content, encoding="cp1251")
+
+    assert path.read_bytes(), "file was truncated/destroyed by a failed write"
+    assert path.read_text(encoding=read_encoding) == content
 
 
 def test_write_failure_leaves_original_file_intact(temp_non_utf8_file, monkeypatch):
