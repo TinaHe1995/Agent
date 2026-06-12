@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import libtmux
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -383,7 +384,7 @@ def _setup_static_files(app: FastAPI, config: Config) -> None:
             return RedirectResponse(url="/static/", status_code=302)
 
 
-def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
+def _sanitize_validation_errors(errors: Sequence[Any]) -> list[Any]:
     """Sanitize validation error details to remove sensitive input values.
 
     FastAPI's default 422 response includes the raw request ``input`` in each
@@ -391,11 +392,17 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
     (e.g. ``agent.llm.api_key``, ``agent.acp_env``), those values would be
     echoed back to the caller.  This helper redacts them.
 
+    The result is passed through :func:`jsonable_encoder` because Pydantic's
+    error dicts can include non-JSON-serializable objects (e.g. the original
+    ``ValueError`` instance under ``ctx['error']`` for ``value_error`` types,
+    surfaced by models that use ``@model_validator(mode='before')``).
+
     Args:
         errors: The list of error dicts produced by ``exc.errors()``.
 
     Returns:
-        A new list with ``input`` values sanitized through ``sanitize_dict``.
+        A JSON-safe list with ``input`` values sanitized through
+        ``sanitize_dict``.
     """
     sanitized: list[dict] = []
     for error in errors:
@@ -403,7 +410,7 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
         if "input" in error:
             error["input"] = sanitize_dict(error["input"])
         sanitized.append(error)
-    return sanitized
+    return jsonable_encoder(sanitized)
 
 
 def _add_exception_handlers(api: FastAPI) -> None:
