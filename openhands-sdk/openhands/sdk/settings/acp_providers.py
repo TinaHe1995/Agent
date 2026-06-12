@@ -42,6 +42,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+ModelSelectionMethod = Literal["set_session_model", "set_config_option"]
+
+
 @dataclass(frozen=True)
 class ACPModelOption:
     """One selectable model for a built-in ACP provider's model picker."""
@@ -281,9 +284,7 @@ class ACPProviderInfo:
     :attr:`~openhands.sdk.agent.ACPAgent.acp_isolate_data_dir`.
     """
 
-    model_selection_method: Literal["set_session_model", "set_config_option"] = (
-        "set_session_model"
-    )
+    model_selection_method: ModelSelectionMethod = "set_session_model"
     """Protocol method used to apply model selection for this provider.
 
     ``"set_session_model"`` issues ACP ``session/set_model``. ``"set_config_option"``
