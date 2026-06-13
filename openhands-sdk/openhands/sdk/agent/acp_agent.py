@@ -595,10 +595,11 @@ async def _apply_acp_model(
                 provider.key,
             )
             return True
-        if provider.supports_set_session_model:
+        elif provider.supports_set_session_model:
             await conn.set_session_model(model_id=acp_model, session_id=session_id)
             return True
-        return False
+        else:
+            return False
 
     # For unknown/custom providers, try set_config_option as a best-effort
     # standard ACP configuration method. Some custom servers may still reject it.
