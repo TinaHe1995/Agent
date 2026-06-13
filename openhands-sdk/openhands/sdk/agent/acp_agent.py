@@ -357,6 +357,33 @@ def _codex_base_url_overrides(
     return ["-c", f'openai_base_url="{base_url}"']
 
 
+_CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
+    {"low", "medium", "high", "xhigh"}
+)
+
+
+def _codex_model_config_options(acp_model: str) -> tuple[tuple[str, str], ...]:
+    """Map Canvas Codex model IDs to codex-acp config options.
+
+    codex-acp 0.16 exposes base model and reasoning effort as separate config
+    options. Agent Canvas keeps a single stable model id such as
+    ``gpt-5.5/high``. Sending that combined id as the raw ``model`` option is
+    accepted at config time but fails the next prompt for ChatGPT-auth sessions.
+    """
+    base_model, sep, effort = acp_model.rpartition("/")
+    if sep and base_model and effort in _CODEX_REASONING_EFFORTS:
+        return (("model", base_model), ("reasoning_effort", effort))
+    return (("model", acp_model),)
+
+
+def _model_config_options(
+    provider: ACPProviderInfo | None, acp_model: str
+) -> tuple[tuple[str, str], ...]:
+    if provider is not None and provider.key == "codex":
+        return _codex_model_config_options(acp_model)
+    return (("model", acp_model),)
+
+
 def _write_secret_file(path: Path, value: str) -> None:
     """Write ``value`` to ``path`` as a ``0600`` file.
 
@@ -584,11 +611,12 @@ async def _apply_acp_model(
     """Apply a model with the provider's configured ACP model-selection method."""
     if provider is not None:
         if provider.model_selection_method == "set_config_option":
-            await conn.set_config_option(
-                config_id="model",
-                value=acp_model,
-                session_id=session_id,
-            )
+            for config_id, value in _model_config_options(provider, acp_model):
+                await conn.set_config_option(
+                    config_id=config_id,
+                    value=value,
+                    session_id=session_id,
+                )
             logger.info(
                 "Set model %r on ACP provider %s via set_config_option",
                 acp_model,
@@ -3467,9 +3495,18 @@ class ACPAgent(AgentBase):
             provider is not None
             and provider.model_selection_method == "set_config_option"
         ):
-            model_selection_call = self._conn.set_config_option(
-                config_id="model", value=model, session_id=self._session_id
-            )
+
+            async def _set_config_options() -> None:
+                assert self._conn is not None
+                assert self._session_id is not None
+                for config_id, value in _model_config_options(provider, model):
+                    await self._conn.set_config_option(
+                        config_id=config_id,
+                        value=value,
+                        session_id=self._session_id,
+                    )
+
+            model_selection_call = _set_config_options()
         else:
             model_selection_call = self._conn.set_session_model(
                 model_id=model, session_id=self._session_id

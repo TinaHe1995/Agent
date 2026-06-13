@@ -10,7 +10,7 @@ from base64 import urlsafe_b64encode
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
@@ -22,6 +22,7 @@ from openhands.sdk.agent.acp_agent import (
     _classify_acp_init_error,
     _codex_auth_file,
     _codex_base_url_overrides,
+    _codex_model_config_options,
     _estimate_cost_from_tokens,
     _extract_session_models,
     _extract_token_usage,
@@ -4419,6 +4420,20 @@ class TestCodexBaseUrlOverrides:
         )
 
 
+class TestCodexModelConfigOptions:
+    def test_splits_combined_model_and_reasoning_effort(self):
+        assert _codex_model_config_options("gpt-5.5/high") == (
+            ("model", "gpt-5.5"),
+            ("reasoning_effort", "high"),
+        )
+
+    def test_leaves_base_or_custom_model_id_unchanged(self):
+        assert _codex_model_config_options("gpt-5.5") == (("model", "gpt-5.5"),)
+        assert _codex_model_config_options("custom/provider/model") == (
+            ("model", "custom/provider/model"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # ACP model overrides
 # ---------------------------------------------------------------------------
@@ -4426,17 +4441,23 @@ class TestCodexBaseUrlOverrides:
 
 class TestMaybeSetSessionModel:
     @pytest.mark.asyncio
-    async def test_codex_agent_uses_config_option_model_override(self):
+    async def test_codex_agent_splits_model_and_reasoning_effort(self):
         conn = AsyncMock()
         applied = await _maybe_set_session_model(
-            conn, "codex-acp", "session-1", "gpt-5.4"
+            conn, "codex-acp", "session-1", "gpt-5.4/low"
         )
         conn.set_session_model.assert_not_called()
-        conn.set_config_option.assert_awaited_once_with(
-            config_id="model",
-            value="gpt-5.4",
-            session_id="session-1",
+        conn.set_config_option.assert_has_awaits(
+            [
+                call(config_id="model", value="gpt-5.4", session_id="session-1"),
+                call(
+                    config_id="reasoning_effort",
+                    value="low",
+                    session_id="session-1",
+                ),
+            ]
         )
+        assert conn.set_config_option.await_count == 2
         # The override was actually pushed to the server via the protocol call.
         assert applied is True
 
@@ -4525,11 +4546,17 @@ class TestReapplySessionModelOnResume:
             conn, "codex-acp", "sess-1", "gpt-5.4/low"
         )
         conn.set_session_model.assert_not_called()
-        conn.set_config_option.assert_awaited_once_with(
-            config_id="model",
-            value="gpt-5.4/low",
-            session_id="sess-1",
+        conn.set_config_option.assert_has_awaits(
+            [
+                call(config_id="model", value="gpt-5.4", session_id="sess-1"),
+                call(
+                    config_id="reasoning_effort",
+                    value="low",
+                    session_id="sess-1",
+                ),
+            ]
         )
+        assert conn.set_config_option.await_count == 2
         assert applied is True
 
     @pytest.mark.asyncio
@@ -4623,10 +4650,18 @@ class TestSetACPModel:
     @staticmethod
     def _wire(agent: ACPAgent, agent_name: str) -> ACPAgent:
         agent._conn = MagicMock()
+        agent._conn.set_config_option = AsyncMock()
+        agent._conn.set_session_model = AsyncMock()
         agent._session_id = "sess-1"
         agent._agent_name = agent_name
+
+        def run_async(awaitable, timeout=None):
+            if asyncio.iscoroutine(awaitable):
+                return asyncio.run(awaitable)
+            return awaitable
+
         executor = MagicMock()
-        executor.run_async = MagicMock()
+        executor.run_async = MagicMock(side_effect=run_async)
         agent._executor = executor
         return agent
 
@@ -4634,11 +4669,17 @@ class TestSetACPModel:
         agent = self._wire(_make_agent(), "codex-acp")
         agent.set_acp_model("gpt-5.4/low")
         agent._conn.set_session_model.assert_not_called()
-        agent._conn.set_config_option.assert_called_once_with(
-            config_id="model",
-            value="gpt-5.4/low",
-            session_id="sess-1",
+        agent._conn.set_config_option.assert_has_awaits(
+            [
+                call(config_id="model", value="gpt-5.4", session_id="sess-1"),
+                call(
+                    config_id="reasoning_effort",
+                    value="low",
+                    session_id="sess-1",
+                ),
+            ]
         )
+        assert agent._conn.set_config_option.await_count == 2
         agent._executor.run_async.assert_called_once()
         # Sentinel LLM + metrics reflect the live model for cost/token tracking.
         assert agent.llm.model == "gpt-5.4/low"
@@ -4648,7 +4689,7 @@ class TestSetACPModel:
         agent = self._wire(_make_agent(), "claude-agent-acp")
         agent.set_acp_model("claude-haiku-4-5-20251001")
         agent._conn.set_session_model.assert_not_called()
-        agent._conn.set_config_option.assert_called_once_with(
+        agent._conn.set_config_option.assert_awaited_once_with(
             config_id="model",
             value="claude-haiku-4-5-20251001",
             session_id="sess-1",
@@ -4659,7 +4700,7 @@ class TestSetACPModel:
         # the call; the ACP layer errors if it isn't actually supported.
         agent = self._wire(_make_agent(), "some-custom-acp")
         agent.set_acp_model("whatever")
-        agent._conn.set_session_model.assert_called_once()
+        agent._conn.set_session_model.assert_awaited_once()
 
     def test_rejects_empty_model(self):
         agent = self._wire(_make_agent(), "codex-acp")
@@ -4701,9 +4742,13 @@ class TestSetACPModel:
         # or an invalid model id) must surface as a ValueError — not leak as a
         # raw acp.exceptions.RequestError — so the agent-server maps it to 400.
         agent = self._wire(_make_agent(), "codex-acp")
-        agent._executor.run_async.side_effect = ACPRequestError(
-            code=-32601, message="method not found"
-        )
+
+        def reject(awaitable, timeout=None):
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
+            raise ACPRequestError(code=-32601, message="method not found")
+
+        agent._executor.run_async.side_effect = reject
         with pytest.raises(ValueError, match="rejected model switch"):
             agent.set_acp_model("bogus-model")
         # The sentinel LLM must not be mutated when the switch fails.
@@ -4715,9 +4760,13 @@ class TestSetACPModel:
         # than be mislabeled as a 400-class ValueError, mirroring the retriable
         # handling on the prompt path.
         agent = self._wire(_make_agent(), "codex-acp")
-        agent._executor.run_async.side_effect = ACPRequestError(
-            code=-32603, message="internal error"
-        )
+
+        def fail_internal(awaitable, timeout=None):
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
+            raise ACPRequestError(code=-32603, message="internal error")
+
+        agent._executor.run_async.side_effect = fail_internal
         with pytest.raises(ACPRequestError):
             agent.set_acp_model("some-model")
         # The sentinel LLM must not be mutated when the switch fails.
