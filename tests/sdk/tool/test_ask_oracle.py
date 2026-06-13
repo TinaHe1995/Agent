@@ -106,6 +106,29 @@ def test_agent_settings_adds_ask_oracle_tool_when_profile_is_configured() -> Non
     assert "ask_oracle" in agent.tools_map
 
 
+def test_agent_settings_configured_profile_updates_existing_ask_oracle_tool() -> None:
+    agent = OpenHandsAgentSettings(
+        llm=_make_llm("default-model", "default"),
+        oracle_llm_profile="oracle",
+        tools=[
+            Tool(
+                name=AskOracleTool.name,
+                params={
+                    "profile_name": "stale",
+                    "profile_store_dir": "/tmp/profiles",
+                },
+            )
+        ],
+    ).create_agent()
+
+    oracle_tools = [tool for tool in agent.tools if tool.name == AskOracleTool.name]
+    assert len(oracle_tools) == 1
+    assert oracle_tools[0].params == {
+        "profile_name": "oracle",
+        "profile_store_dir": "/tmp/profiles",
+    }
+
+
 def test_agent_settings_omits_ask_oracle_tool_without_profile() -> None:
     agent = OpenHandsAgentSettings(
         llm=_make_llm("default-model", "default"),

@@ -1151,10 +1151,24 @@ class OpenHandsAgentSettings(AgentSettingsBase):
         if self.enable_switch_llm_tool:
             include_default_tools.append(SwitchLLMTool.__name__)
 
-        tools = list(self.tools)
-        if self.oracle_llm_profile and not any(
-            tool.name == AskOracleTool.name for tool in tools
-        ):
+        tools = []
+        has_oracle_tool = False
+        for tool in self.tools:
+            if self.oracle_llm_profile and tool.name == AskOracleTool.name:
+                has_oracle_tool = True
+                tools.append(
+                    tool.model_copy(
+                        update={
+                            "params": {
+                                **tool.params,
+                                "profile_name": self.oracle_llm_profile,
+                            }
+                        }
+                    )
+                )
+            else:
+                tools.append(tool)
+        if self.oracle_llm_profile and not has_oracle_tool:
             tools.append(
                 Tool(
                     name=AskOracleTool.name,
