@@ -400,6 +400,10 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
         error = dict(error)  # shallow copy so we don't mutate the original
         if "input" in error:
             error["input"] = sanitize_dict(error["input"])
+        if isinstance(error.get("ctx"), dict) and isinstance(
+            error["ctx"].get("error"), Exception
+        ):
+            error["ctx"] = {**error["ctx"], "error": str(error["ctx"]["error"])}
         sanitized.append(error)
     return sanitized
 
@@ -552,7 +556,11 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     _add_api_routes(app, config)
     _setup_static_files(app, config)
-    app.add_middleware(CORSDispatcher, allow_origins=config.allow_cors_origins)
+    app.add_middleware(
+        CORSDispatcher,
+        allow_origins=config.allow_cors_origins,
+        allow_origin_regex=config.allow_cors_origin_regex,
+    )
     _add_exception_handlers(app)
 
     return app
