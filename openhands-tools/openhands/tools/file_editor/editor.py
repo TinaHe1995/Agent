@@ -503,9 +503,7 @@ class FileEditor:
             Path.replace(tmp_path, path)
 
     @contextmanager
-    def _temp_file(
-        self, path: Path, file_text: str, encoding: str
-    ) -> Iterator[Path]:
+    def _temp_file(self, path: Path, file_text: str, encoding: str) -> Iterator[Path]:
         """Write file_text to a fresh temp file beside path and yield its Path.
 
         The temp file is removed on any failure (write, chmod or replace), so the
