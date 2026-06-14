@@ -19,7 +19,6 @@ from starlette.requests import Request
 from openhands.agent_server.auth_router import auth_router
 from openhands.agent_server.bash_router import bash_router
 from openhands.agent_server.bash_service import get_default_bash_event_service
-from openhands.agent_server.cloud_proxy_router import cloud_proxy_router
 from openhands.agent_server.config import (
     Config,
     get_default_config,
@@ -317,7 +316,6 @@ def _add_api_routes(app: FastAPI, config: Config) -> None:
     api_router.include_router(settings_router)
     api_router.include_router(workspaces_router)
     api_router.include_router(profiles_router)
-    api_router.include_router(cloud_proxy_router)
     # /api/auth/* mints workspace cookies and requires the header to bootstrap,
     # so it lives under the header-only auth group.
     api_router.include_router(auth_router)
@@ -402,6 +400,10 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
         error = dict(error)  # shallow copy so we don't mutate the original
         if "input" in error:
             error["input"] = sanitize_dict(error["input"])
+        if isinstance(error.get("ctx"), dict) and isinstance(
+            error["ctx"].get("error"), Exception
+        ):
+            error["ctx"] = {**error["ctx"], "error": str(error["ctx"]["error"])}
         sanitized.append(error)
     return sanitized
 
@@ -508,8 +510,7 @@ def _add_exception_handlers(api: FastAPI) -> None:
         # Log 5xx errors at error level. HTTPException is intentionally
         # raised flow control — the route picked this status and detail
         # on purpose — so a stack trace adds no information beyond
-        # `exc.detail` and makes routine upstream blips (e.g. a 502 from
-        # /api/cloud-proxy when the cloud is unreachable) look
+        # `exc.detail` and makes routine upstream blips look
         # indistinguishable from a process crash. Unhandled exceptions
         # still get a full traceback via _unhandled_exception_handler
         # above. Include the traceback only when DEBUG is on, as an
@@ -555,7 +556,11 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     _add_api_routes(app, config)
     _setup_static_files(app, config)
-    app.add_middleware(CORSDispatcher, allow_origins=config.allow_cors_origins)
+    app.add_middleware(
+        CORSDispatcher,
+        allow_origins=config.allow_cors_origins,
+        allow_origin_regex=config.allow_cors_origin_regex,
+    )
     _add_exception_handlers(app)
 
     return app
