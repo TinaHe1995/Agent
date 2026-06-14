@@ -971,9 +971,10 @@ class TestTaskIndexPersistence:
         task = m._create_task(subagent_type="general-purpose", description=None)
 
         assert m._persists is True
-        assert m._index_path is not None and m._index_path.name == _INDEX_FILENAME
-        assert m._index_path.exists()
-        entries = json.loads(m._index_path.read_text())
+        index_path = m._index_path
+        assert index_path is not None and index_path.name == _INDEX_FILENAME
+        assert index_path.exists()
+        entries = json.loads(index_path.read_text())
         assert any(e["id"] == task.id for e in entries)
 
     def test_no_index_when_parent_not_persisting(self, tmp_path):
@@ -1022,7 +1023,9 @@ class TestTaskIndexPersistence:
         task = m._create_task(subagent_type="general-purpose", description=None)
         task.set_result("done")
         m._evict_task(task)
-        entries = json.loads(m._index_path.read_text())
+        index_path = m._index_path
+        assert index_path is not None
+        entries = json.loads(index_path.read_text())
         entry = next(e for e in entries if e["id"] == task.id)
         assert entry["status"] == TaskStatus.COMPLETED.value
 
@@ -1036,7 +1039,9 @@ class TestTaskIndexPersistence:
         m1._ensure_parent(self._parent(persist, work, pcid))
         m1._create_task(subagent_type="general-purpose", description=None)
         # Corrupt the index, then load from a fresh manager — must not raise.
-        m1._index_path.write_text("{not valid json")
+        index_path = m1._index_path
+        assert index_path is not None
+        index_path.write_text("{not valid json")
         m2 = TaskManager()
         m2._ensure_parent(self._parent(persist, work, pcid))  # _load_index runs here
         assert m2._tasks == {}
