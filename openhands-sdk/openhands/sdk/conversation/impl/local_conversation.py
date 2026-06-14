@@ -2,13 +2,15 @@ import asyncio
 import atexit
 import contextlib
 import copy
+import json
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.context.condenser import CondenserBase, LLMSummarizingCondenser
 from openhands.sdk.context.prompts.prompt import render_template
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.conversation.cancellation import CancellationToken
@@ -26,6 +28,7 @@ from openhands.sdk.conversation.types import (
     ConversationID,
     ConversationTokenCallbackType,
     StuckDetectionThresholds,
+    TraceMetadataValue,
 )
 from openhands.sdk.conversation.visualizer import (
     ConversationVisualizerBase,
@@ -46,6 +49,7 @@ from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.hooks import HookConfig, HookEventProcessor, create_hook_callback
 from openhands.sdk.io import LocalFileStore
 from openhands.sdk.llm import LLM, Message, TextContent, content_to_str
+from openhands.sdk.llm.auth.openai import create_subscription_llm_from_config
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.llm.llm_registry import LLMRegistry
 from openhands.sdk.logger import get_logger
@@ -68,6 +72,7 @@ from openhands.sdk.subagent import (
     register_file_agents,
     register_plugin_agents,
 )
+from openhands.sdk.tool.client_tool import ClientToolSpec
 from openhands.sdk.tool.schema import Action, Observation
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.workspace import LocalWorkspace
@@ -92,6 +97,11 @@ def _is_acp_prompt_message(event: Event) -> TypeGuard[MessageEvent]:
         part.startswith(ACP_STOP_HOOK_FEEDBACK_PREFIX)
         for part in content_to_str(event.llm_message.content)
     )
+
+
+def _copy_event_for_fork(event: Event) -> Event:
+    # Mirrors persisted event loading and skips runtime-only fields like executors.
+    return Event.model_validate_json(event.model_dump_json(exclude_none=True))
 
 
 class LocalConversation(BaseConversation):
@@ -119,6 +129,7 @@ class LocalConversation(BaseConversation):
     _resolved_plugins: list[ResolvedPluginSource] | None
     _plugins_loaded: bool
     _pending_hook_config: HookConfig | None  # Hook config to combine with plugin hooks
+    _subscription_disabled_condenser: Any | None
 
     def __init__(
         self,
@@ -143,6 +154,9 @@ class LocalConversation(BaseConversation):
         cipher: Cipher | None = None,
         tags: dict[str, str] | None = None,
         user_id: str | None = None,
+        client_tools: list[ClientToolSpec] | None = None,
+        observability_metadata: dict[str, TraceMetadataValue] | None = None,
+        observability_tags: list[str] | None = None,
         **_: object,
     ):
         """Initialize the conversation.
@@ -184,6 +198,14 @@ class LocalConversation(BaseConversation):
                    (lost) on serialization.
             tags: Optional key-value tags for the conversation. Keys must be
                   lowercase alphanumeric, values up to 256 characters.
+            user_id: Optional user ID to associate with observability traces
+            client_tools: Optional list of client-defined tool specs. Each spec
+                  is registered and injected into the agent so it can call the
+                  tool; the executor returns an acknowledgment and the real
+                  execution is expected to be handled by a callback/consumer
+                  (e.g. a frontend) observing the emitted ActionEvent.
+            observability_metadata: Optional trace metadata for observability backends.
+            observability_tags: Optional root span tags for observability backends.
         """
         super().__init__()  # Initialize with span tracking
         # Mark cleanup as initiated as early as possible to avoid races or partially
@@ -200,6 +222,33 @@ class LocalConversation(BaseConversation):
         self._plugins_loaded = False
         self._pending_hook_config = hook_config  # Will be combined with plugin hooks
         self._agent_ready = False  # Agent initialized lazily after plugins loaded
+        self._subscription_disabled_condenser = None
+
+        # Create-or-resume: factory inspects BASE_STATE to decide
+        desired_id = conversation_id or uuid.uuid4()
+
+        # Resolve client-defined tools, then register them and inject the matching
+        # Tool specs into the agent so the agent can call them. Execution is
+        # deferred to a consumer of the emitted ActionEvent (e.g. a frontend); the
+        # executor only acks. Specs come either from the caller (`client_tools`)
+        # or, when resuming a persisted conversation without re-supplying them,
+        # from the persisted agent's tool specs — mirroring the server resume
+        # path so a fresh process can re-register the dynamic tools.
+        resolved_client_tools = list(client_tools or [])
+        if not resolved_client_tools and persistence_dir is not None:
+            resolved_client_tools = self._recover_persisted_client_tools(
+                persistence_dir, desired_id
+            )
+        if resolved_client_tools:
+            from openhands.sdk.tool.client_tool import register_client_tools
+
+            client_tool_specs = register_client_tools(resolved_client_tools)
+            existing_names = {t.name for t in agent.tools}
+            new_tools = [
+                ts for ts in client_tool_specs if ts.name not in existing_names
+            ]
+            if new_tools:
+                agent = agent.model_copy(update={"tools": [*agent.tools, *new_tools]})
 
         self.agent = agent
         if isinstance(workspace, (str, Path)):
@@ -212,9 +261,6 @@ class LocalConversation(BaseConversation):
         ws_path = Path(self.workspace.working_dir)
         if not ws_path.exists():
             ws_path.mkdir(parents=True, exist_ok=True)
-
-        # Create-or-resume: factory inspects BASE_STATE to decide
-        desired_id = conversation_id or uuid.uuid4()
         self._state = ConversationState.create(
             id=desired_id,
             agent=agent,
@@ -336,8 +382,52 @@ class LocalConversation(BaseConversation):
             self.update_secrets(secret_values)
 
         atexit.register(self.close)
-        self._start_observability_span(str(desired_id), user_id=user_id)
+        self._start_observability_span(
+            str(desired_id),
+            user_id=user_id,
+            metadata=observability_metadata,
+            tags=observability_tags,
+            conversation_tags=tags,
+        )
         self.delete_on_close = delete_on_close
+
+    def _recover_persisted_client_tools(
+        self,
+        persistence_base_dir: str | Path,
+        conversation_id: ConversationID,
+    ) -> list[ClientToolSpec]:
+        """Recover client tool specs from a persisted conversation's base state.
+
+        When a persisted conversation is resumed in a fresh process, the dynamic
+        client tools are absent from the global registry and the caller may not
+        re-supply ``client_tools``. Without recovery, the persisted agent's
+        client tools would appear "removed" and resume would fail. We read the
+        persisted agent tool specs and pull out the embedded ``ClientToolSpec``s
+        so they can be re-registered and re-injected. Returns an empty list when
+        there is no persisted state yet (fresh conversation).
+        """
+        from pydantic import ValidationError
+
+        from openhands.sdk.conversation.persistence_const import BASE_STATE
+        from openhands.sdk.tool.client_tool import extract_client_tool_specs
+        from openhands.sdk.tool.spec import Tool
+
+        base_path = (
+            Path(self.get_persistence_dir(persistence_base_dir, conversation_id))
+            / BASE_STATE
+        )
+        try:
+            data = json.loads(base_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        raw_tools = (data.get("agent") or {}).get("tools") or []
+        tools: list[Tool] = []
+        for raw_tool in raw_tools:
+            try:
+                tools.append(Tool.model_validate(raw_tool))
+            except ValidationError:
+                continue
+        return extract_client_tool_specs(tools)
 
     @property
     def id(self) -> ConversationID:
@@ -456,10 +546,8 @@ class LocalConversation(BaseConversation):
                 tags=tags,
             )
 
-            # Deep-copy events from source → fork so the source stays
-            # immutable.
             for event in self._state.events:
-                fork_conv._state.events.append(event.model_copy(deep=True))
+                fork_conv._state.events.append(_copy_event_for_fork(event))
             # Full rebuild: the copied events may need property enforcement
             # (same posture as cold load).
             fork_conv._state.rebuild_view()
@@ -774,6 +862,34 @@ class LocalConversation(BaseConversation):
                 **existing,
             }
 
+    def _condenser_for_switched_llm(
+        self,
+        current_llm: LLM,
+        new_llm: LLM,
+    ) -> CondenserBase | None:
+        condenser = self.agent.condenser
+        if not isinstance(condenser, LLMSummarizingCondenser):
+            return condenser
+
+        current_config = current_llm.model_dump(
+            mode="json",
+            context={"expose_secrets": True},
+            exclude={"usage_id"},
+        )
+        condenser_config = condenser.llm.model_dump(
+            mode="json",
+            context={"expose_secrets": True},
+            exclude={"usage_id"},
+        )
+        if condenser_config != current_config:
+            return condenser
+
+        condenser_llm = new_llm.model_copy(
+            update={"usage_id": condenser.llm.usage_id},
+        )
+        condenser_llm.reset_metrics()
+        return condenser.model_copy(update={"llm": condenser_llm})
+
     def switch_llm(self, llm: LLM) -> None:
         """Swap the agent's LLM to the given object.
 
@@ -788,7 +904,7 @@ class LocalConversation(BaseConversation):
         try:
             new_llm = self.llm_registry.get(llm.usage_id)
         except KeyError:
-            new_llm = llm
+            new_llm = create_subscription_llm_from_config(llm)
             self.llm_registry.add(new_llm)
         # A switch_llm tool runs on a worker thread while run()/arun() holds the
         # state lock across the agent step on another thread, blocked awaiting
@@ -801,7 +917,23 @@ class LocalConversation(BaseConversation):
         skip_lock = self._step_holds_state_lock and not self._state.owned()
         lock = contextlib.nullcontext() if skip_lock else self._state
         with lock:
-            self.agent = self.agent.model_copy(update={"llm": new_llm})
+            update: dict[str, object] = {"llm": new_llm}
+            if new_llm.is_subscription:
+                if self.agent.condenser is not None:
+                    self._subscription_disabled_condenser = self.agent.condenser
+                update["condenser"] = None
+            elif (
+                self.agent.condenser is None
+                and self._subscription_disabled_condenser is not None
+            ):
+                update["condenser"] = self._subscription_disabled_condenser
+                self._subscription_disabled_condenser = None
+            else:
+                update["condenser"] = self._condenser_for_switched_llm(
+                    self.agent.llm,
+                    new_llm,
+                )
+            self.agent = self.agent.model_copy(update=update)
             self._state.agent = self.agent
             self._pin_prompt_cache_key()
             self._pin_session_affinity_header(new_llm)
@@ -1795,7 +1927,7 @@ class LocalConversation(BaseConversation):
         )
 
         messages = prepare_llm_messages(
-            self.state.events, additional_messages=[user_message]
+            self.state.view, additional_messages=[user_message]
         )
 
         # Get or create the specialized ask-agent LLM

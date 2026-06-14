@@ -23,7 +23,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import Awaitable, Callable, Generator
 from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
@@ -127,6 +127,12 @@ _ACP_PROMPT_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)  # seconds
 # Exception types that indicate transient connection issues worth retrying
 _RETRIABLE_CONNECTION_ERRORS = (OSError, ConnectionError, BrokenPipeError, EOFError)
 
+# ``npm run`` exports package/lifecycle configuration into descendants. ACP
+# providers launched through ``npx`` must not inherit that context, otherwise npm
+# can try to resolve against the parent package instead of the requested one.
+_INHERITED_NPM_ENV_EXACT: frozenset[str] = frozenset({"INIT_CWD"})
+_INHERITED_NPM_ENV_PREFIXES: tuple[str, ...] = ("npm_", "NPM_")
+
 # JSON-RPC error codes from the ACP server that are transient and worth
 # retrying.  These map to server-side failures (HTTP 500 equivalents) where
 # the session state is still valid but the request failed.
@@ -142,15 +148,21 @@ MAX_ACP_CONTENT_CHARS: int = 30_000
 # Env vars that must be removed from the subprocess environment when a
 # particular "dominant" env var is present.
 #
-# Rationale: some auth mechanisms are mutually exclusive and their env vars
-# conflict.  For example, CLAUDE_CONFIG_DIR activates Claude Code's OAuth
-# credential-file flow.  If ANTHROPIC_API_KEY or ANTHROPIC_BASE_URL are
-# also present they redirect requests to a different endpoint (e.g. a proxy)
-# that doesn't support OAuth bearer tokens, breaking authentication silently.
-# When CLAUDE_CONFIG_DIR is detected we strip the conflicting vars so the
-# subprocess can reach api.anthropic.com with its own OAuth token.
+# Rationale: Claude Code's subscription auth uses CLAUDE_CODE_OAUTH_TOKEN, a
+# bearer validated against api.anthropic.com. A co-present ANTHROPIC_API_KEY
+# would take precedence over the token (silently bypassing the subscription),
+# and an ANTHROPIC_BASE_URL would route the bearer to a proxy that rejects it —
+# either silently breaks the intended OAuth auth. When the OAuth token is the
+# active credential we strip both so the subprocess authenticates with the
+# token against api.anthropic.com.
+#
+# Keyed on the credential itself (CLAUDE_CODE_OAUTH_TOKEN), NOT on
+# CLAUDE_CONFIG_DIR: the config dir is a *location* lever (data-dir isolation,
+# #1019) that is orthogonal to which credential is active. Keying the strip on
+# it wrongly fired during API-key isolation and missed the conflict when the
+# token arrived via env without isolation (#3588).
 _ENV_CONFLICT_MAP: dict[str, frozenset[str]] = {
-    "CLAUDE_CONFIG_DIR": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
+    "CLAUDE_CODE_OAUTH_TOKEN": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
 }
 
 # Number of trailing characters of an ACP session id retained in log lines
@@ -181,6 +193,15 @@ def _fingerprint_session_id(session_id: str | None) -> str:
     if len(session_id) <= _SESSION_ID_LOG_SUFFIX_LEN:
         return "<short>"
     return f"...{session_id[-_SESSION_ID_LOG_SUFFIX_LEN:]}"
+
+
+def _strip_inherited_npm_env(env: dict[str, str]) -> None:
+    """Remove npm lifecycle/config variables inherited from the parent stack."""
+    for key in list(env):
+        if key in _INHERITED_NPM_ENV_EXACT or key.startswith(
+            _INHERITED_NPM_ENV_PREFIXES
+        ):
+            env.pop(key, None)
 
 
 # Limit for asyncio.StreamReader buffers used by the ACP subprocess pipes.
@@ -394,6 +415,26 @@ def _extract_session_models(
 _ACPMcpServer = HttpMcpServer | SseMcpServer | McpServerStdio
 
 
+def _remote_mcp_headers(spec: dict[str, Any], name: str) -> list[HttpHeader]:
+    """Convert remote MCP headers/auth into ACP's header-only representation."""
+    raw_headers = spec.get("headers") or {}
+    headers = [HttpHeader(name=str(k), value=str(v)) for k, v in raw_headers.items()]
+
+    auth = spec.get("auth")
+    has_authorization = any(h.name.lower() == "authorization" for h in headers)
+    if auth and not has_authorization:
+        if isinstance(auth, str) and auth != "oauth":
+            headers.append(HttpHeader(name="Authorization", value=f"Bearer {auth}"))
+        else:
+            logger.warning(
+                "ACP MCP server %r uses unsupported remote MCP auth type %r; "
+                "only explicit headers or string bearer tokens can be forwarded",
+                name,
+                type(auth).__name__,
+            )
+    return headers
+
+
 def _mcp_config_to_acp_servers(
     mcp_config: dict[str, Any],
     mcp_capabilities: Any,
@@ -421,7 +462,9 @@ def _mcp_config_to_acp_servers(
     A remote server whose transport the ACP server does not advertise is dropped
     with a warning rather than failing init — one misconfigured server should
     not sink the whole conversation.  ``env`` / ``headers`` maps are converted
-    to the protocol's ``[{name, value}]`` list form; their values were already
+    to the protocol's ``[{name, value}]`` list form; string ``auth`` values are
+    forwarded as bearer ``Authorization`` headers when no explicit
+    ``Authorization`` header is already present.  Their values were already
     decrypted by :class:`AgentBase`'s ``mcp_config`` validator.
     """
     servers = mcp_config.get("mcpServers")
@@ -450,10 +493,7 @@ def _mcp_config_to_acp_servers(
                 )
             )
         elif url:
-            headers = [
-                HttpHeader(name=str(k), value=str(v))
-                for k, v in (spec.get("headers") or {}).items()
-            ]
+            headers = _remote_mcp_headers(spec, str(name))
             is_sse = str(spec.get("transport") or "http").lower() == "sse"
             if not (sse_ok if is_sse else http_ok):
                 logger.warning(
@@ -497,21 +537,25 @@ async def _maybe_set_session_model(
 
     This is the session-creation path only, gated on
     :attr:`~openhands.sdk.settings.acp_providers.ACPProviderInfo.supports_set_session_model`.
-    Providers that select their initial model via session ``_meta``
-    (claude-agent-acp, ``supports_set_session_model=False``) already received
-    the model in ``new_session()``, so this is a no-op for them. Providers that
-    use the protocol call for initial selection (codex-acp, gemini-cli) get a
-    one-shot ``set_session_model`` call here.
+    All built-in providers get a one-shot ``set_session_model`` call here.
+    claude-agent-acp used to be skipped on the assumption that it already
+    received the model via ``new_session()`` ``_meta``, but 0.30.0 silently
+    ignores that payload (#3654) — the protocol call is the only path that
+    both validates and applies the model.
+
+    For unknown/custom providers (e.g. Devin CLI), we fall back to the generic
+    ``set_config_option`` method with configId="model", which is a standard ACP
+    method that many custom ACP servers support.
 
     Runtime, mid-conversation switches go through
     :meth:`ACPAgent.set_acp_model` instead, which always uses
     ``set_session_model`` and is gated on the separate
     ``supports_runtime_model_switch`` capability flag.
 
-    Returns ``True`` only when this issued a ``set_session_model`` call — i.e.
+    Returns ``True`` only when this issued a model-setting call that succeeded — i.e.
     the override was actually pushed to the server via *this* path. ``False``
     when there is nothing to apply (no ``acp_model``) or the provider selects
-    its model another way (``_meta``) or not at all (unknown/custom server), so
+    its model another way (``_meta``) or the server rejected the call, so
     the caller can tell whether the live session is really running ``acp_model``.
     """
     if not acp_model:
@@ -520,6 +564,29 @@ async def _maybe_set_session_model(
     if provider is not None and provider.supports_set_session_model:
         await conn.set_session_model(model_id=acp_model, session_id=session_id)
         return True
+    # For unknown/custom providers, try the generic set_config_option method
+    # which is a standard ACP protocol method for setting configuration options
+    if provider is None:
+        try:
+            await conn.set_config_option(
+                config_id="model",
+                value=acp_model,
+                session_id=session_id,
+            )
+            logger.info(
+                "Set model %r on unknown/custom ACP server %s via set_config_option",
+                acp_model,
+                agent_name,
+            )
+            return True
+        except ACPRequestError as e:
+            logger.warning(
+                "Could not set model %r on unknown/custom ACP server %s via "
+                "set_config_option (%s); the session will use the server default",
+                acp_model,
+                agent_name,
+                e,
+            )
     return False
 
 
@@ -536,6 +603,10 @@ async def _reapply_session_model_on_resume(
     the ACP server's default. This issues ``set_session_model`` so the resumed
     live session matches the serialized ``acp_model``.
 
+    For unknown/custom providers (e.g. Devin CLI), we fall back to the generic
+    ``set_config_option`` method with configId="model", which is a standard ACP
+    method that many custom ACP servers support.
+
     The gating mirrors :meth:`ACPAgent.set_acp_model` (attempt for custom/unknown
     servers and known providers that support runtime switching; skip only known
     providers that don't), deliberately differing from the initial-selection
@@ -544,7 +615,7 @@ async def _reapply_session_model_on_resume(
     tolerated (logged) — like the ``load_session`` fallback above — so resume
     can't break; the session keeps the server default until the next switch.
 
-    Returns ``True`` only when ``set_session_model`` was issued and accepted, so
+    Returns ``True`` only when a model-setting call was issued and accepted, so
     the caller knows the resumed live session is actually running ``acp_model``.
     ``False`` when there is nothing to reapply, the provider doesn't support the
     switch, or the server rejected the call (swallowed) — in those cases the
@@ -557,7 +628,22 @@ async def _reapply_session_model_on_resume(
     if provider is not None and not provider.supports_runtime_model_switch:
         return False
     try:
-        await conn.set_session_model(model_id=acp_model, session_id=session_id)
+        if provider is not None:
+            # Known provider: use set_session_model
+            await conn.set_session_model(model_id=acp_model, session_id=session_id)
+        else:
+            # Unknown/custom provider: try set_config_option as fallback
+            await conn.set_config_option(
+                config_id="model",
+                value=acp_model,
+                session_id=session_id,
+            )
+            logger.info(
+                "Reapplied model %r on unknown/custom ACP server %s "
+                "via set_config_option",
+                acp_model,
+                agent_name,
+            )
         return True
     except ACPRequestError as e:
         logger.warning(
@@ -806,6 +892,11 @@ class _OpenHandsACPBridge:
         # event stream in cleartext. ``None`` ⇒ no-op (bridge used standalone).
         self.mask: Callable[[str], str] | None = None
         self._last_activity_signal: float = float("-inf")
+        # Monotonic timestamp of the most recent ``session_update``. Unlike the
+        # throttled ``_last_activity_signal``, updated on *every* update so the
+        # prompt idle-timeout watchdog sees real progress. Armed per turn via
+        # ``arm_activity_clock``.
+        self._last_activity_monotonic: float = float("-inf")
         # Telemetry state from UsageUpdate (persists across turns)
         self._last_cost: float = 0.0  # last cumulative cost seen
         self._last_cost_by_session: dict[str, float] = {}
@@ -831,6 +922,26 @@ class _OpenHandsACPBridge:
         self._usage_received.clear()
         # Note: telemetry state (_last_cost, _context_window, _last_activity_signal,
         # etc.) is intentionally NOT cleared — it accumulates across turns.
+
+    def arm_activity_clock(self) -> None:
+        """Mark "now" as the last activity for the idle-timeout watchdog.
+
+        Called at the start of each prompt (and each retry) so the idle
+        window is measured from the moment the prompt is sent rather than
+        from a stale value — a server that legitimately takes a while before
+        its first ``session_update`` must not be killed prematurely.
+        """
+        self._last_activity_monotonic = time.monotonic()
+
+    def seconds_since_last_activity(self) -> float:
+        """Seconds since the last ``session_update`` (or ``arm_activity_clock``).
+
+        Drives the prompt idle-timeout: any streamed token, thought, tool-call
+        start/progress, or usage update from the ACP server resets the clock,
+        so a steadily-progressing agent never trips the deadline while a
+        genuinely silent (hung) server still does.
+        """
+        return time.monotonic() - self._last_activity_monotonic
 
     def prepare_usage_sync(self, session_id: str) -> asyncio.Event:
         """Prepare per-turn UsageUpdate synchronization for a session."""
@@ -888,6 +999,12 @@ class _OpenHandsACPBridge:
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
         logger.debug("ACP session_update: type=%s", type(update).__name__)
+
+        # Any update — token, thought, tool-call start/progress, usage — is
+        # progress: reset the idle clock so the prompt's inactivity watchdog
+        # keeps a steadily-working agent alive (unthrottled, unlike the
+        # heartbeat in ``_maybe_signal_activity``).
+        self._last_activity_monotonic = time.monotonic()
 
         # Route fork session updates to the fork accumulator. ask_agent() joins
         # and returns this text to the caller (a UI/network sink), so mask it
@@ -1211,8 +1328,13 @@ class ACPAgent(AgentBase):
     acp_prompt_timeout: float = Field(
         default=1800.0,
         description=(
-            "Timeout in seconds for a single ACP prompt() call. "
-            "Prevents indefinite hangs when the ACP server fails to respond."
+            "Inactivity timeout in seconds for a single ACP prompt() call. "
+            "The deadline resets on every update from the ACP server (token, "
+            "thought, tool-call progress, usage), so a steadily-progressing "
+            "agent runs as long as it keeps making progress; the prompt is "
+            "only aborted after this many seconds with no activity at all. "
+            "Prevents indefinite hangs when the ACP server stops responding "
+            "without killing legitimately long-running work."
         ),
     )
     acp_model: str | None = Field(
@@ -1547,10 +1669,10 @@ class ACPAgent(AgentBase):
         """Whether a live, mid-conversation model switch will be attempted.
 
         Tells a client whether to offer the inline picker's live-switch control.
-        Kept in lockstep with :meth:`set_acp_model`, which refuses the switch
-        only for a *known* provider that declares no support and otherwise
-        attempts it optimistically — so a custom/unknown ACP server that does
-        support ``session/set_model`` isn't needlessly blocked from the picker.
+        ``True`` only for known providers that explicitly declare support for
+        ``session/set_model``. Unknown/custom providers use ``set_config_option``
+        for *initial* model selection but that RPC is a generic config write, not
+        a guaranteed live-switch primitive, so the picker is hidden for them.
         ``False`` before a session exists (nothing to switch yet).
 
         See
@@ -1559,7 +1681,7 @@ class ACPAgent(AgentBase):
         if self._session_id is None:
             return False
         provider = detect_acp_provider_by_agent_name(self._agent_name)
-        return provider is None or provider.supports_runtime_model_switch
+        return provider is not None and provider.supports_runtime_model_switch
 
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
@@ -1850,14 +1972,12 @@ class ACPAgent(AgentBase):
         highest precedence and is honoured as the materialisation target too), so
         leave it untouched.
 
-        Claude carve-out: ``CLAUDE_CONFIG_DIR`` also activates Claude Code's
-        OAuth credential-file flow, and :data:`_ENV_CONFLICT_MAP` then strips
-        ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL``. Relocating it while an API
-        key is the active credential (no OAuth token present) would delete a
-        working key + proxy URL and break auth, so skip Claude in that case;
-        codex/gemini have no such coupling. (Claude's transcripts are already
-        cwd-keyed, so the residual shared state is the mostly-inert global
-        config.)
+        Claude note: relocating ``CLAUDE_CONFIG_DIR`` is safe under either auth
+        mode. :data:`_ENV_CONFLICT_MAP` is keyed on the OAuth token
+        (``CLAUDE_CODE_OAUTH_TOKEN``), not on ``CLAUDE_CONFIG_DIR``, so setting
+        the config dir for isolation no longer strips a working
+        ``ANTHROPIC_API_KEY`` — API-key Claude gets the same per-conversation
+        isolation (and pause/resume continuity) as OAuth Claude (#3588).
 
         ``HOME`` (gemini-cli's only lever — it hard-codes ``~/.gemini`` and
         ignores ``XDG``) has a wider blast radius than the surgical
@@ -1868,25 +1988,17 @@ class ACPAgent(AgentBase):
         need a narrower scope can pin ``HOME`` via ``acp_env`` (honoured below)
         or leave isolation off for Gemini.
 
-        Ordering contract: this runs *after* the ``secret_registry`` injection
-        and the ``acp_env`` update in :meth:`_start_acp_server`, so the
-        credential vars it inspects (``ANTHROPIC_API_KEY`` /
-        ``CLAUDE_CODE_OAUTH_TOKEN``) are already hydrated into ``env``. Calling it
-        earlier would misread the active credential and wrongly relocate Claude.
+        Ordering: this runs *after* the ``secret_registry`` injection and the
+        ``acp_env`` update in :meth:`_start_acp_server` so an ``acp_env`` pin of
+        the data-dir var is visible and wins. Relocation is now credential-blind
+        (the auth-conflict strip is keyed on ``CLAUDE_CODE_OAUTH_TOKEN``, not on
+        the config dir), so the data-dir var it sets never affects auth.
         """
         provider = detect_acp_provider_by_command(self.acp_command)
         if provider is None or provider.data_dir_env_var is None:
             return
         env_var = provider.data_dir_env_var
         if env_var in self.acp_env:
-            return
-        # Relies on the ordering contract above: ANTHROPIC_API_KEY /
-        # CLAUDE_CODE_OAUTH_TOKEN must already be hydrated into env.
-        if (
-            env_var == "CLAUDE_CONFIG_DIR"
-            and env.get("ANTHROPIC_API_KEY")
-            and "CLAUDE_CODE_OAUTH_TOKEN" not in env
-        ):
             return
         data_dir = self._acp_file_secret_dir(state, provider.key)
         data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2013,9 +2125,10 @@ class ACPAgent(AgentBase):
         # agent_context.secrets are seeded into secret_registry at
         # LocalConversation.__init__ (lower priority than request.secrets), so
         # the registry is now the single channel for all secrets including
-        # provider credentials folded in by ACPAgentSettings.create_agent().
+        # provider credentials (keyed by the provider's env var name).
         env = default_environment()
         env.update(os.environ)
+        _strip_inherited_npm_env(env)
         if self.acp_env:
             warn_deprecated(
                 "ACPAgent.acp_env",
@@ -2055,18 +2168,16 @@ class ACPAgent(AgentBase):
 
         # Relocate the CLI's data/config root to a per-conversation directory so
         # sandbox-sharing conversations don't race on a shared HOME (#1019).
-        # Ordering is load-bearing — this must run AFTER the registry /
-        # registry injection and the acp_env update above (so the credential
-        # vars its Claude carve-out inspects — ANTHROPIC_API_KEY /
-        # CLAUDE_CODE_OAUTH_TOKEN — are already in env, and an acp_env pin wins)
-        # and BEFORE the conflict-strip below (so a CLAUDE_CONFIG_DIR it sets is
-        # still subject to the strip).
+        # Runs after the registry injection and the acp_env update above so an
+        # acp_env pin of the data-dir var wins. Independent of the strip below
+        # (keyed on the OAuth token, not the data-dir var), so ordering relative
+        # to it no longer matters for correctness.
         if self.acp_isolate_data_dir:
             self._isolate_acp_data_dir(state, env)
 
-        # Strip env vars that conflict with an active auth mechanism.
-        # E.g. CLAUDE_CONFIG_DIR (OAuth credential file) conflicts with
-        # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (API-key + proxy auth).
+        # Strip env vars that conflict with an active auth mechanism: an active
+        # CLAUDE_CODE_OAUTH_TOKEN must not coexist with ANTHROPIC_API_KEY (which
+        # takes precedence) or ANTHROPIC_BASE_URL (proxies the bearer). See #3588.
         for dominant, conflicts in _ENV_CONFLICT_MAP.items():
             if dominant in env:
                 for conflict in conflicts:
@@ -2377,6 +2488,9 @@ class ACPAgent(AgentBase):
         self._client.on_token = on_token
         self._client.on_event = on_event
         self._client.on_activity = self._on_activity
+        # Start the idle-timeout clock fresh for this attempt so the deadline
+        # is measured from the send (or retry), not from a stale value.
+        self._client.arm_activity_clock()
 
     def _cancel_inflight_tool_calls(self) -> None:
         """Emit a terminal ``failed`` ACPToolCallEvent for every tool call
@@ -2634,27 +2748,71 @@ class ACPAgent(AgentBase):
                 )
         return response
 
+    def _idle_timeout_message(self) -> str:
+        return (
+            f"ACP prompt timed out after {self.acp_prompt_timeout:.0f}s "
+            "with no activity from the ACP server"
+        )
+
+    async def _await_with_idle_deadline(
+        self,
+        awaitable: Awaitable[PromptResponse | None],
+        *,
+        cancel_on_exit: bool,
+    ) -> PromptResponse | None:
+        """Await *awaitable*, aborting only after a stretch of inactivity.
+
+        The deadline is an *idle* timeout, not a hard turn deadline: any
+        ``session_update`` from the ACP server (token, thought, tool-call
+        start/progress, usage) resets ``acp_prompt_timeout``, so a steadily-
+        progressing agent runs as long as it keeps making progress while a
+        genuinely silent (hung) server is still cut off after the idle window.
+        This is what keeps long-running ACP commands alive (issue
+        agent-canvas#1245).
+
+        ``asyncio.wait`` (not ``wait_for``) drives the polling so an idle-check
+        slice elapsing never cancels the underlying prompt — only a true idle
+        period raises ``TimeoutError``. ``cancel_on_exit`` controls cleanup:
+        the sync path passes ``True`` to cancel the prompt coroutine it owns;
+        the async path passes ``False`` because the portal task must survive
+        for ``astep``'s ``session/cancel`` + drain handler.
+        """
+        idle_limit = self.acp_prompt_timeout
+        fut = asyncio.ensure_future(awaitable)
+        try:
+            while True:
+                remaining = idle_limit - self._client.seconds_since_last_activity()
+                if remaining <= 0:
+                    raise TimeoutError(self._idle_timeout_message())
+                # wait() returns when the prompt finishes or the slice elapses,
+                # leaving fut untouched either way.
+                await asyncio.wait({fut}, timeout=remaining)
+                if fut.done():
+                    return fut.result()
+                # Slice elapsed: only give up if the server produced nothing in
+                # the meantime, otherwise the loop re-arms with a fresh window.
+                if self._client.seconds_since_last_activity() >= idle_limit:
+                    raise TimeoutError(self._idle_timeout_message())
+        finally:
+            if cancel_on_exit and not fut.done():
+                fut.cancel()
+
     async def _await_prompt_response_with_timeout(
         self,
         prompt_future: Future[PromptResponse | None],
     ) -> PromptResponse | None:
-        """Await an ACP prompt with a hard turn deadline.
+        """Await an ACP prompt with an idle (inactivity) turn deadline.
 
-        The terminal tool reports hard command timeouts back to the agent
-        instead of waiting forever for active commands. ACP prompts follow the
-        same rule: activity heartbeats keep the server alive, but they do not
-        extend this prompt deadline. The timeout handler sends ``session/cancel``
-        and closes any in-flight tool cards.
+        Wraps the portal-side prompt future in :meth:`_await_with_idle_deadline`
+        so the prompt is only abandoned after ``acp_prompt_timeout`` seconds
+        with no ACP activity. The timeout handler in ``astep`` sends
+        ``session/cancel`` and closes any in-flight tool cards.
         """
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(asyncio.wrap_future(prompt_future)),
-                timeout=self.acp_prompt_timeout,
-            )
-        except TimeoutError as exc:
-            raise TimeoutError(
-                f"ACP prompt timed out after {self.acp_prompt_timeout:.0f}s"
-            ) from exc
+        # cancel_on_exit=False: the portal task behind ``prompt_future`` must
+        # outlive an idle timeout / cancellation so astep's drain can observe it.
+        return await self._await_with_idle_deadline(
+            asyncio.wrap_future(prompt_future), cancel_on_exit=False
+        )
 
     @staticmethod
     def _prompt_response_was_cancelled(response: PromptResponse | None) -> bool:
@@ -2736,12 +2894,11 @@ class ACPAgent(AgentBase):
         state: ConversationState,
         on_event: ConversationCallbackType,
     ) -> None:
-        """Error path when ``conn.prompt`` exceeded ``acp_prompt_timeout``."""
+        """Error path when ``conn.prompt`` went idle past ``acp_prompt_timeout``."""
         logger.error(
-            "ACP prompt timed out after %.1fs (limit=%.0fs). "
-            "The ACP server may have completed its work but failed to "
-            "send the JSON-RPC response. Accumulated %d text chunks, "
-            "%d tool calls.",
+            "ACP prompt timed out after %.1fs with no activity for the last "
+            "%.0fs. The ACP server may have stalled or failed to send the "
+            "JSON-RPC response. Accumulated %d text chunks, %d tool calls.",
             elapsed,
             self.acp_prompt_timeout,
             len(self._client.accumulated_text),
@@ -2752,9 +2909,10 @@ class ACPAgent(AgentBase):
             content=[
                 TextContent(
                     text=(
-                        f"ACP prompt timed out after {elapsed:.0f}s. "
-                        "The agent may have completed its work but "
-                        "the response was not received."
+                        "ACP prompt timed out after "
+                        f"{self.acp_prompt_timeout:.0f}s with no activity from "
+                        "the agent. The agent may have stalled, or it may have "
+                        "completed its work but the response was not received."
                     )
                 )
             ],
@@ -2879,7 +3037,7 @@ class ACPAgent(AgentBase):
         t0 = time.monotonic()
         try:
             logger.info(
-                "Sending ACP prompt (timeout=%.0fs, blocks=%d)",
+                "Sending ACP prompt (idle_timeout=%.0fs, blocks=%d)",
                 self.acp_prompt_timeout,
                 len(prompt_blocks),
             )
@@ -2888,14 +3046,16 @@ class ACPAgent(AgentBase):
 
             async def _prompt() -> PromptResponse | None:
                 # Thin closure so existing mocks of ``_executor.run_async``
-                # that take a single positional callable keep working.
-                return await self._do_acp_prompt(prompt_blocks)
+                # that take a single positional callable keep working. The idle
+                # deadline is enforced inside (cancel_on_exit=True: this path
+                # owns the coroutine) rather than as a hard run_async timeout.
+                return await self._await_with_idle_deadline(
+                    self._do_acp_prompt(prompt_blocks), cancel_on_exit=True
+                )
 
             for attempt in range(max_retries + 1):
                 try:
-                    response = self._executor.run_async(
-                        _prompt, timeout=self.acp_prompt_timeout
-                    )
+                    response = self._executor.run_async(_prompt)
                     break
                 except TimeoutError:
                     raise
@@ -3020,7 +3180,7 @@ class ACPAgent(AgentBase):
         prompt_future: Future[PromptResponse | None] | None = None
         try:
             logger.info(
-                "Sending ACP prompt (timeout=%.0fs, blocks=%d, async)",
+                "Sending ACP prompt (idle_timeout=%.0fs, blocks=%d, async)",
                 self.acp_prompt_timeout,
                 len(prompt_blocks),
             )
