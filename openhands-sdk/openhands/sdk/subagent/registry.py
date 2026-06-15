@@ -207,6 +207,7 @@ def agent_definition_to_factory(
         from openhands.sdk.agent.agent import Agent
         from openhands.sdk.context.agent_context import AgentContext
         from openhands.sdk.context.condenser import default_condenser
+        from openhands.sdk.llm.llm import LLM
         from openhands.sdk.tool.registry import list_registered_tools
         from openhands.sdk.tool.spec import Tool
 
@@ -258,11 +259,25 @@ def agent_definition_to_factory(
         # top-level agent) so deep runs auto-compact instead of erroring on context
         # overflow. The condenser LLM needs a distinct usage_id or its tokens get
         # deduped out of conversation stats. A NoOpCondenser disables condensation.
-        condenser = (
-            agent_def.condenser
-            if agent_def.condenser is not None
-            else default_condenser(llm.model_copy(update={"usage_id": "condenser"}))
-        )
+        if agent_def.condenser is not None:
+            condenser = agent_def.condenser
+            cond_llm = getattr(condenser, "llm", None)
+            if isinstance(cond_llm, LLM):
+                # Freshen per spawn: a distinct LLM with its own metrics (so
+                # sub-agents don't share/double-count condenser cost) and a
+                # usage_id distinct from the agent's, else its tokens get deduped.
+                usage_id = (
+                    cond_llm.usage_id
+                    if cond_llm.usage_id != llm.usage_id
+                    else "condenser"
+                )
+                fresh_llm = cond_llm.model_copy(update={"usage_id": usage_id})
+                fresh_llm.reset_metrics()
+                condenser = condenser.model_copy(update={"llm": fresh_llm})
+        else:
+            condenser = default_condenser(
+                llm.model_copy(update={"usage_id": "condenser"})
+            )
 
         return Agent(
             llm=llm,
