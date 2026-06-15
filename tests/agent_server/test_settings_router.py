@@ -868,6 +868,97 @@ def test_deep_merge_non_null_still_wins():
     assert merged == {"a": 2, "b": {"x": 1, "y": 2}}
 
 
+# ── apply_agent_settings_diff parity (PersistedSettings.update) ─────────
+
+
+def test_update_agent_settings_same_kind_merge() -> None:
+    """Same-kind update deep-merges within the variant."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-4o"}}})
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_kind_switch_replaces_fresh() -> None:
+    """Kind switch starts from fresh variant; old fields are not carried."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-x"}}})
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "claude-code"}}
+    )
+
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_server == "claude-code"
+
+
+def test_update_agent_settings_switch_back_to_openhands() -> None:
+    """Switching back to openhands starts fresh; ACP fields are not leaked."""
+    from openhands.sdk.settings.model import OpenHandsAgentSettings
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "gemini-cli"}}
+    )
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "openhands", "llm": {"model": "gpt-4o"}}}
+    )
+
+    assert isinstance(settings.agent_settings, OpenHandsAgentSettings)
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_null_unsets_optional_field() -> None:
+    """A null value on an optional field resets it to default (RFC 7386 semantics)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_model": "claude-opus-4-8",
+            }
+        }
+    )
+    assert settings.agent_settings.acp_model == "claude-opus-4-8"
+
+    settings.update({"agent_settings_diff": {"acp_model": None}})
+    assert settings.agent_settings.acp_model is None
+
+
+def test_update_agent_settings_nested_null_removes_map_entry() -> None:
+    """A null inside a nested map removes that entry (acp_env key removal)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_env": {"KEEP": "yes", "DROP": "bye"},
+            }
+        }
+    )
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+
+    settings.update({"agent_settings_diff": {"acp_env": {"DROP": None}}})
+    assert settings.agent_settings.acp_env == {"KEEP": "yes"}
+
+
+def test_update_agent_settings_secret_survives_same_kind_merge() -> None:
+    """An existing api_key in agent_settings is preserved across a same-kind update."""
+    from pydantic import SecretStr
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"llm": {"model": "gpt-4o", "api_key": "sk-SECRET"}}}
+    )
+
+    settings.update({"agent_settings_diff": {"llm": {"temperature": 0.5}}})
+
+    assert isinstance(settings.agent_settings.llm.api_key, SecretStr)
+    assert settings.agent_settings.llm.api_key.get_secret_value() == "sk-SECRET"
+
+
 def _seed_acp_settings(persistence_dir: Path, acp_env: dict[str, str]) -> None:
     """Write a settings.json with an active ACP agent carrying ``acp_env``."""
     acp = ACPAgentSettings(acp_command=["echo", "hi"], acp_env=acp_env)
