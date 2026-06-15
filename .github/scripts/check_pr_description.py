@@ -141,7 +141,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-
     if args.body_file is not None:
         body = args.body_file.read_text()
     elif args.event_path is not None:
