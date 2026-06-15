@@ -31,9 +31,10 @@ logger = get_logger(__name__)
 
 
 # The init endpoint uses its own header (distinct from X-Session-API-Key)
-# because the session keys aren't known to the pool at warm-up time — they
-# arrive *inside* the /api/init body. The init key is the pool-bootstrap
-# credential.
+# because session keys aren't known to the pool at warm-up time — they
+# arrive *inside* the /api/init body. The value is checked against the
+# dormant server's ``secret_key``, which the orchestrator already holds
+# for encryption purposes and which will be overwritten by the init payload.
 _INIT_API_KEY_HEADER = APIKeyHeader(name="X-Init-API-Key", auto_error=False)
 
 
@@ -253,14 +254,15 @@ def check_init_api_key(
     request: Request,
     init_api_key: str | None = Depends(_INIT_API_KEY_HEADER),
 ) -> None:
-    """Auth gate for /api/init. Reads the *current* config off app state so the
-    expected key can be configured at startup time alongside other env vars."""
+    """Auth gate for /api/init. Uses the dormant server's ``secret_key`` as the
+    bootstrap credential — the orchestrator already holds it because it is
+    required for encryption. The key is replaced when /api/init delivers the
+    per-user runtime config."""
     config: Config | None = getattr(request.app.state, "config", None)
-    if config is None or config.init_api_key is None:
-        # No key configured → endpoint is open. Acceptable for dev, called
-        # out in the field docstring as not for production.
+    if config is None or config.secret_key is None:
+        # No key configured → endpoint is open. Acceptable for dev.
         return
-    expected = config.init_api_key.get_secret_value()
+    expected = config.secret_key.get_secret_value()
     if init_api_key != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 

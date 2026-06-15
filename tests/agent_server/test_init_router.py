@@ -28,7 +28,6 @@ def _clean_env(monkeypatch):
     null these out so each test starts from a clean slate."""
     for key in (
         "OH_DEFERRED_INIT",
-        "OH_INIT_API_KEY",
         "OH_WEB_URL",
         "RUNTIME_URL",
         "TMUX_TMPDIR",
@@ -56,12 +55,6 @@ class TestConfigDefaults:
         # The factory is only used when no env-parser flow is in play; for
         # programmatic Config() this still reads the env directly.
         assert Config().deferred_init is True
-
-    def test_init_api_key_reads_env(self, monkeypatch):
-        monkeypatch.setenv("OH_INIT_API_KEY", "pool-bootstrap-key")
-        cfg = Config()
-        assert cfg.init_api_key is not None
-        assert cfg.init_api_key.get_secret_value() == "pool-bootstrap-key"
 
 
 class TestBuildInitializedConfig:
@@ -263,7 +256,7 @@ class TestEndToEndOverLifespan:
         _reset_conversation_singleton()
         cfg = Config(
             deferred_init=True,
-            init_api_key=SecretStr("pool-key"),
+            secret_key=SecretStr("pool-key"),
             conversations_path=tmp_path / "convs",
             bash_events_dir=tmp_path / "bash",
         )
