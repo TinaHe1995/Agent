@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import ClassVar
+
 import pytest
 
 from openhands.sdk.agent import Agent
 from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.context.prompts.presets import create_registry
 from openhands.sdk.llm import LLM
 
 
 def _make_llm() -> LLM:
     return LLM(model="test-model", usage_id="test")
+
+
+class _CustomPromptDirAgent(Agent):
+    """Agent subclass whose ``prompt_dir`` points at a per-test directory."""
+
+    custom_prompt_dir: ClassVar[str] = ""
+
+    @property
+    def prompt_dir(self) -> str:
+        return type(self).custom_prompt_dir
 
 
 # --- construction ---
@@ -64,6 +78,32 @@ def test_system_prompt_with_default_filename_is_ok() -> None:
     )
     assert agent.system_prompt == "inline"
     assert agent.static_system_message == "inline"
+
+
+# --- custom prompt_dir escape hatch (registry cutover) ---
+
+
+def test_subclass_default_named_template_renders_through_jinja(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subclass shipping its own default-named template renders it, not the
+    registry prompt."""
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "system_prompt.j2").write_text(
+        "CUSTOM SUBCLASS PROMPT", encoding="utf-8"
+    )
+    monkeypatch.setattr(_CustomPromptDirAgent, "custom_prompt_dir", str(prompts))
+
+    agent = _CustomPromptDirAgent(llm=_make_llm(), tools=[])
+    assert agent.static_system_message == "CUSTOM SUBCLASS PROMPT"
+
+
+def test_builtin_default_prompt_uses_registry() -> None:
+    """The built-in prompt dir + default filename still routes through the registry."""
+    agent = Agent(llm=_make_llm(), tools=[])
+    expected = create_registry().build(agent._build_prompt_context()).static
+    assert agent.static_system_message == expected
 
 
 # --- serialization round-trip ---

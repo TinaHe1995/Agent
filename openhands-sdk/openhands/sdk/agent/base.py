@@ -109,6 +109,12 @@ _DEFAULT_SOUL = (
     " with a computer to solve tasks."
 )
 
+# Built-in prompt dir. The registry only stands in for the default prompt here; a
+# subclass with its own prompts/system_prompt.j2 keeps the Jinja render path.
+_BUILTIN_PROMPT_DIR = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "prompts")
+)
+
 
 def _load_soul_md() -> str:
     """Load ``~/.openhands/SOUL.md``, falling back to the built-in default."""
@@ -458,9 +464,10 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         across conversations for better prompt caching efficiency.
 
         The default prompt is assembled from the typed section registry
-        (``create_registry``). The escape hatches are preserved untouched:
-        an inline ``system_prompt`` is returned verbatim, and a custom or absolute
-        ``system_prompt_filename`` keeps rendering through ``render_template``.
+        (``create_registry``). Escape hatches keep the Jinja render path: an inline
+        ``system_prompt`` is returned verbatim; a custom/absolute
+        ``system_prompt_filename`` renders through ``render_template``; and a subclass
+        with its own ``prompt_dir`` still renders its default-named template.
 
         Returns:
             The static system prompt without dynamic context.
@@ -468,8 +475,12 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         if self.system_prompt is not None:
             return self.system_prompt
 
-        # Custom / absolute filename: keep the Jinja render path (escape hatch).
-        if self.system_prompt_filename != "system_prompt.j2":
+        # Escape hatch: custom/absolute filename, or a subclass with its own
+        # prompt_dir. The registry serves only the built-in default prompt.
+        if (
+            self.system_prompt_filename != "system_prompt.j2"
+            or os.path.realpath(self.prompt_dir) != _BUILTIN_PROMPT_DIR
+        ):
             return render_template(
                 prompt_dir=self.prompt_dir,
                 template_name=self.system_prompt_filename,
