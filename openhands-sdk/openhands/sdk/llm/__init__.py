@@ -19,6 +19,11 @@ from openhands.sdk.llm.message import (
     ThinkingBlock,
     content_to_str,
 )
+from openhands.sdk.llm.meta_profile_store import (
+    MetaProfile,
+    MetaProfileClass,
+    MetaProfileStore,
+)
 from openhands.sdk.llm.router import RouterLLM
 from openhands.sdk.llm.streaming import (
     AsyncTokenCallbackType,
@@ -46,6 +51,9 @@ __all__ = [
     "LLM_PROFILE_SCHEMA_VERSION",
     "LLMRegistry",
     "LLMProfileStore",
+    "MetaProfile",
+    "MetaProfileClass",
+    "MetaProfileStore",
     "RouterLLM",
     "RegistryEvent",
     # Messages
