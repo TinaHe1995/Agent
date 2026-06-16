@@ -1,32 +1,10 @@
-"""``AgentProfile`` — the top-level, named, **reference-bearing** launch spec.
+"""``AgentProfile`` — the named, reference-bearing agent launch spec.
 
-An ``AgentProfile`` is the kind-discriminated union a user picks when starting a
-conversation. It mirrors the proven ``Discriminator("agent_kind")`` + ``Tag``
-pattern of :data:`~openhands.sdk.settings.model.AgentSettingsConfig`, but is a
-**separate** union with a fundamentally different contract:
-
-* ``AgentSettingsConfig`` is *resolved* — it embeds the concrete ``llm`` and
-  ``mcp_config`` (with their secrets) ready to build an agent.
-* ``AgentProfile`` carries only *references* — ``llm_profile_ref`` and
-  ``mcp_server_refs`` — and is **secret-free at rest**. The resolver (#3717)
-  dereferences those into an ``AgentSettingsConfig`` at launch time.
-
-Where secrets actually live:
-
-* LLM credentials → on the referenced LLM profile (the LLM profile store).
-* MCP server configs (with their secrets) → the user's global ``mcp_config``;
-  the profile only names which of those servers to expose.
-* ACP provider credentials → the env-keyed secret store, *derived* from
-  ``acp_server`` via :data:`~openhands.sdk.settings.acp_providers.ACP_PROVIDERS`.
-  The profile references them by env-var name; values ride the single
-  ``state.secret_registry`` ← ``request.secrets`` channel (#1022/#1039).
-
-The two identity fields are distinct: :attr:`id` is the stable UUID provenance
-handle (what conversations record), while :attr:`name` is the human-facing,
-renameable key.
-
-The editor for these profiles is fully custom React, so — unlike the settings
-models — profile fields carry no ``SettingsFieldMetadata`` annotations.
+A separate ``Discriminator("agent_kind")`` + ``Tag`` union from
+:data:`~openhands.sdk.settings.model.AgentSettingsConfig`: the profile carries
+*references* (``llm_profile_ref`` / ``mcp_server_refs``) and is secret-free at
+rest, whereas the settings union embeds the resolved ``llm`` / ``mcp_config``.
+See epic #3713 for the resolution model.
 """
 
 from __future__ import annotations
@@ -84,11 +62,8 @@ class AgentProfileBase(BaseModel):
         ge=0,
         description="Monotonic revision counter, bumped on each saved edit.",
     )
-    # ``null`` = use all of the user's globally configured MCP servers (current
-    # behavior); a non-null list filters ``mcp_config.mcpServers`` to the named
-    # keys (a name absent from the global config is a dangling ref — the
-    # resolver, #3717, hard-errors). ``null`` and ``[]`` are deliberately
-    # distinct: ``[]`` selects *no* servers.
+    # null = all of the user's MCP servers; [] = none; a non-null list filters
+    # to the named keys. null and [] are deliberately distinct.
     mcp_server_refs: list[str] | None = Field(
         default=None,
         description=(
