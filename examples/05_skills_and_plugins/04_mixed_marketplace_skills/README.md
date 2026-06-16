@@ -16,7 +16,7 @@ This pattern is useful when you want to:
 ## Directory Structure
 
 ```
-05_mixed_marketplace_skills/
+04_mixed_marketplace_skills/
 ├── .plugin/
 │   └── marketplace.json     # Marketplace configuration
 ├── skills/
