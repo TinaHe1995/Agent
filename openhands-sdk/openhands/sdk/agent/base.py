@@ -24,6 +24,7 @@ from pydantic import (
 
 from openhands.sdk.context.agent_context import AgentContext
 from openhands.sdk.context.condenser import CondenserBase
+from openhands.sdk.context.prompts.presets import create_default_registry
 from openhands.sdk.context.prompts.prompt import render_template
 from openhands.sdk.context.prompts.section import Platform, PromptContext
 from openhands.sdk.critic.base import CriticBase
@@ -456,20 +457,26 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         per-conversation context. This static portion can be cached and reused
         across conversations for better prompt caching efficiency.
 
-        When ``system_prompt`` is set, that string is returned verbatim,
-        bypassing Jinja2 template rendering entirely.
+        The default prompt is assembled from the typed section registry
+        (``create_default_registry``). The escape hatches are preserved untouched:
+        an inline ``system_prompt`` is returned verbatim, and a custom or absolute
+        ``system_prompt_filename`` keeps rendering through ``render_template``.
 
         Returns:
-            The rendered system prompt template without dynamic context.
+            The static system prompt without dynamic context.
         """
         if self.system_prompt is not None:
             return self.system_prompt
 
-        return render_template(
-            prompt_dir=self.prompt_dir,
-            template_name=self.system_prompt_filename,
-            **self._resolved_template_kwargs(),
-        )
+        # Custom / absolute filename: keep the Jinja render path (escape hatch).
+        if self.system_prompt_filename != "system_prompt.j2":
+            return render_template(
+                prompt_dir=self.prompt_dir,
+                template_name=self.system_prompt_filename,
+                **self._resolved_template_kwargs(),
+            )
+
+        return create_default_registry().build(self._build_prompt_context()).static
 
     def _resolved_template_kwargs(self) -> dict[str, object]:
         """Resolve the system-prompt template kwargs.
@@ -583,15 +590,14 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         cross-conversation cache sharing. Instead, it is sent as a second content
         block (without a cache marker) inside the system message.
 
+        Assembled from the dynamic-tier sections of the default registry.
+
         Returns:
             The dynamic context string, or None if no context is configured.
         """
         if not self.agent_context:
             return None
-        return self.agent_context.get_system_message_suffix(
-            llm_model=self.llm.model,
-            llm_model_canonical=self.llm.model_canonical_name,
-        )
+        return create_default_registry().build(self._build_prompt_context()).dynamic
 
     def init_state(
         self,
