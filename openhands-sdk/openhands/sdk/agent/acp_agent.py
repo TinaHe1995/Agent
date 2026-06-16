@@ -1697,6 +1697,29 @@ class ACPAgent(AgentBase):
         provider = detect_acp_provider_by_agent_name(self._agent_name)
         return provider is not None and provider.supports_runtime_model_switch
 
+    @property
+    def has_live_acp_session(self) -> bool:
+        """Whether a live ACP session exists to act on right now.
+
+        ``True`` only once the subprocess-backed session is fully wired —
+        connection, session id, and executor all present — which happens during
+        the first ``run()`` (see :meth:`init_state`). ``False`` before that
+        (created but not yet run) and after teardown.
+
+        Lets callers branch on session state instead of catching the
+        ``RuntimeError`` that :meth:`set_acp_model` raises pre-session or
+        reaching into the ``_conn`` / ``_session_id`` / ``_executor``
+        PrivateAttrs. In particular
+        :meth:`~openhands.sdk.conversation.impl.local_conversation.LocalConversation.switch_acp_model`
+        uses it to decide between a live in-place switch and a deferred persist
+        that the next session start applies.
+        """
+        return (
+            self._conn is not None
+            and self._session_id is not None
+            and self._executor is not None
+        )
+
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
 
@@ -3451,7 +3474,7 @@ class ACPAgent(AgentBase):
         """
         if not model or not model.strip():
             raise ValueError("model must be a non-empty string")
-        if self._conn is None or self._session_id is None or self._executor is None:
+        if not self.has_live_acp_session:
             raise RuntimeError(
                 "ACP session is not initialized; the model can only be switched "
                 "after the conversation has started (first run())."
