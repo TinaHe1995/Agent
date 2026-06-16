@@ -197,6 +197,19 @@ def test_message_tool_calls_strip_blank_list_content():
     assert "content" not in result
 
 
+def test_empty_assistant_message_uses_string_content_in_list_serializer():
+    """List-serialized empty assistant messages should keep string content."""
+    from openhands.sdk.llm.message import Message
+
+    message = Message(role="assistant", content=[])
+
+    result = message.to_chat_dict(
+        **{**DEFAULT_SERIALIZATION_OPTS, "function_calling_enabled": True}
+    )
+
+    assert result == {"content": "", "role": "assistant"}
+
+
 def test_message_from_llm_chat_message_function_role_error():
     """Test Message.from_llm_chat_message with function role raises error."""
     from litellm.types.utils import Message as LiteLLMMessage
