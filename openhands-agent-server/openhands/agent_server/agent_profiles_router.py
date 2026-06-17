@@ -15,6 +15,7 @@ import shlex
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import BaseModel, Field, ValidationError
@@ -243,23 +244,33 @@ def _seed_default_profile(
     settings: PersistedSettings,
     cipher: Cipher | None,
 ) -> None:
-    """Persist one default profile and point ``active_agent_profile_id`` at it."""
-    profile = _build_seed_profile(settings.agent_settings, settings.active_profile)
-    # Settings persist skills[].mcp_tools encrypted (and never decrypt on load),
-    # so decrypt before re-encrypting at save to avoid double-encryption.
-    profile = _decrypt_profile_mcp_tools(profile, cipher)
-    with _store_errors():
+    """Persist one default profile and point ``active_agent_profile_id`` at it.
+
+    Holds the store lock across the empty-check + save + pointer write so
+    concurrent first requests seed exactly once (the loser sees a non-empty
+    store and returns); the pointer always matches the persisted profile id.
+    """
+    with _store_errors(), store._acquire_lock():
+        # Double-checked under the lock: a concurrent first request may have
+        # already seeded (the outer emptiness check in the list endpoint is
+        # unlocked).
+        if store.list():
+            return
+        profile = _build_seed_profile(settings.agent_settings, settings.active_profile)
+        # Settings persist skills[].mcp_tools encrypted (and never decrypt on
+        # load), so decrypt before re-encrypting at save to avoid double-encrypt.
+        profile = _decrypt_profile_mcp_tools(profile, cipher)
         store.save(profile, cipher=cipher, max_profiles=MAX_AGENT_PROFILES)
 
-    profile_id = str(profile.id)
-    settings_store = get_settings_store(get_config(request))
+        profile_id = str(profile.id)
+        settings_store = get_settings_store(get_config(request))
 
-    def set_pointer(s: PersistedSettings) -> PersistedSettings:
-        s.active_agent_profile_id = profile_id
-        return s
+        def set_pointer(s: PersistedSettings) -> PersistedSettings:
+            s.active_agent_profile_id = profile_id
+            return s
 
-    settings_store.update(set_pointer)
-    logger.info(f"Seeded default agent profile '{profile.name}' (id={profile_id})")
+        settings_store.update(set_pointer)
+        logger.info(f"Seeded default agent profile '{profile.name}' (id={profile_id})")
 
 
 def _summary_id_for_name(store: AgentProfileStore, name: str) -> str | None:
@@ -270,6 +281,29 @@ def _summary_id_for_name(store: AgentProfileStore, name: str) -> str | None:
                 sid = summary.get("id")
                 return str(sid) if sid is not None else None
     return None
+
+
+def _existing_identity(
+    store: AgentProfileStore, name: str
+) -> tuple[UUID | None, int | None]:
+    """Return the stable ``(id, revision)`` of the profile under ``name``.
+
+    Used to keep ``id`` stable across an overwrite — the active pointer is keyed
+    on it — and to bump ``revision`` monotonically. Ignores a malformed stored
+    id (treated as no prior identity).
+    """
+    with _store_errors():
+        for summary in store.list_summaries():
+            if summary.get("name") != name:
+                continue
+            sid = summary.get("id")
+            rev = summary.get("revision")
+            try:
+                parsed = UUID(str(sid)) if sid is not None else None
+            except (ValueError, TypeError):
+                parsed = None
+            return parsed, rev if isinstance(rev, int) else None
+    return None, None
 
 
 @agent_profiles_router.get("", response_model=AgentProfileListResponse)
@@ -358,6 +392,14 @@ async def save_agent_profile(
     profile = _decrypt_profile_mcp_tools(profile, cipher)
 
     store = AgentProfileStore()
+    # The id is stable state, not a defaultable request field: overwriting a
+    # namesake keeps its id (so an active pointer never dangles) and bumps the
+    # revision, even when a create-style body omits both.
+    existing_id, existing_rev = _existing_identity(store, name)
+    if existing_id is not None:
+        profile = profile.model_copy(
+            update={"id": existing_id, "revision": (existing_rev or 0) + 1}
+        )
     try:
         with _store_errors():
             store.save(profile, cipher=cipher, max_profiles=MAX_AGENT_PROFILES)

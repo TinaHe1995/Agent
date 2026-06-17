@@ -5,6 +5,7 @@ contracts: a separate ``active_agent_profile_id`` pointer, pointer-only
 activation by id (no ``agent_settings`` write), and the lazy migration seed.
 """
 
+import concurrent.futures
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -121,6 +122,25 @@ def test_no_seed_when_store_nonempty(client, store):
     assert body["active_agent_profile_id"] is None
 
 
+def test_concurrent_first_list_seeds_once(client, store):
+    """Concurrent first GETs seed exactly one profile; the pointer is consistent.
+
+    The seed holds the store lock across check + save + pointer write, so the
+    losing requests see a non-empty store and the active pointer always matches
+    the single persisted profile id (never a dangling/overwritten id).
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        codes = list(
+            ex.map(lambda _: client.get("/api/agent-profiles").status_code, range(8))
+        )
+
+    assert all(code == 200 for code in codes)
+    summaries = store.list_summaries()
+    assert len(summaries) == 1  # seeded exactly once
+    pointer = client.get("/api/settings").json()["active_agent_profile_id"]
+    assert pointer == summaries[0]["id"]  # pointer resolves to the real profile
+
+
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
 
@@ -146,6 +166,28 @@ def test_save_overwrites_existing(client, store):
 
     assert response.status_code == 201
     assert store.load("existing").llm_profile_ref == "new"
+
+
+def test_overwrite_preserves_id_and_pointer(client, store):
+    """Overwriting a profile keeps its id stable (and bumps revision).
+
+    A create-style body that omits ``id``/``revision`` must not mint a fresh
+    UUID — that would dangle the active pointer keyed on the old id.
+    """
+    store.save(OpenHandsAgentProfile(name="p", llm_profile_ref="base"))
+    pid = client.get("/api/agent-profiles/p").json()["profile"]["id"]
+    client.post(f"/api/agent-profiles/{pid}/activate")
+    assert client.get("/api/settings").json()["active_agent_profile_id"] == pid
+
+    response = client.post("/api/agent-profiles/p", json={"llm_profile_ref": "changed"})
+    assert response.status_code == 201
+
+    detail = client.get("/api/agent-profiles/p").json()["profile"]
+    assert detail["id"] == pid  # stable id preserved
+    assert detail["revision"] == 1  # monotonically bumped
+    assert detail["llm_profile_ref"] == "changed"
+    # The active pointer still resolves to the (same-id) profile.
+    assert client.get("/api/settings").json()["active_agent_profile_id"] == pid
 
 
 def test_save_path_name_is_authoritative(client, store):
