@@ -18,20 +18,9 @@ from PyInstaller.utils.hooks import (
 # and cause LoadLibrary to fail at runtime with "Invalid access to memory location".
 IS_WINDOWS = sys.platform == "win32"
 
-# Optional Vertex AI bundle. google-cloud-aiplatform is an opt-in extra
-# (`openhands-sdk[vertex]`) and is NOT bundled in the default agent-server
-# build. To produce a binary that supports `vertex_ai/*` partner models
-# (MiniMax, Qwen, Kimi MaaS endpoints):
-#
-#   - Docker:    docker build --build-arg ENABLE_VERTEX=1 ...
-#   - From src:  uv sync --frozen --dev --no-editable --extra boto3 --extra vertex
-#                uv run pyinstaller .../agent-server.spec
-#
-# When `vertexai` is importable we use collect_all(...) for the Vertex SDK
-# and its google.cloud.* namespace siblings: the imports happen inside
-# function bodies AND traverse PEP-420 google.cloud namespace packages, so
-# collect_submodules alone misses everything below the namespace root.
-# collect_all walks the actual installed dirs.
+# Optional Vertex AI bundle. The default build stays lean; install the
+# openhands-sdk[vertex] extra first, or pass ENABLE_VERTEX=1 to the Docker build,
+# when the binary should support vertex_ai/* partner models.
 import importlib.util as _vertex_importlib_util
 
 _VERTEX_AVAILABLE = _vertex_importlib_util.find_spec("vertexai") is not None
@@ -57,9 +46,9 @@ _vertex_hiddenimports = []
 if _VERTEX_AVAILABLE:
     for _pkg in _vertex_pkgs:
         _d, _b, _h = collect_all(_pkg)
-        _vertex_datas += _d
-        _vertex_binaries += _b
-        _vertex_hiddenimports += _h
+        _vertex_datas.extend(_d)
+        _vertex_binaries.extend(_b)
+        _vertex_hiddenimports.extend(_h)
     # google.rpc.status_pb2 is a gRPC proto stub imported dynamically; only pin
     # it when the SDK is actually present.
     _vertex_hiddenimports.append("google.rpc.status_pb2")

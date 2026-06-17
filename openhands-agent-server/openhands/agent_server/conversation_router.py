@@ -41,6 +41,7 @@ from openhands.agent_server.models import (
 )
 from openhands.sdk import LLM, Agent, TextContent
 from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.tool.client_tool import ClientToolRegistrationError
 from openhands.sdk.workspace import LocalWorkspace
 from openhands.tools.preset.default import get_default_tools
 
@@ -194,7 +195,12 @@ async def start_conversation(
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationInfo:
     """Start a conversation in the local environment."""
-    info, is_new = await conversation_service.start_conversation(request)
+    try:
+        info, is_new = await conversation_service.start_conversation(request)
+    except ClientToolRegistrationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        ) from e
     response.status_code = status.HTTP_201_CREATED if is_new else status.HTTP_200_OK
     if not include_skills:
         info = trim_conversation_response_skills(info)
@@ -399,7 +405,6 @@ async def switch_conversation_llm(
     responses={
         400: {"description": "Agent is not ACP, or provider can't switch models"},
         404: {"description": "Conversation not found"},
-        409: {"description": "ACP session not initialized yet"},
         504: {"description": "ACP server did not answer the model switch in time"},
     },
 )
@@ -408,11 +413,14 @@ async def switch_conversation_acp_model(
     model: str = Body(..., embed=True),
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> Success:
-    """Switch the model of a running ACP conversation, mid-conversation.
+    """Switch the model of an ACP conversation.
 
-    Issues a protocol-level ``session/set_model`` call to the ACP subprocess
-    so the new model applies to subsequent turns without losing context. Only
-    valid for ACP conversations whose provider supports runtime switching.
+    For a conversation that has already started, issues a protocol-level
+    ``session/set_model`` call to the ACP subprocess so the new model applies to
+    subsequent turns without losing context. For one created but not yet run,
+    the value is persisted and applied when the first session starts (returns
+    ``200`` either way). Only valid for ACP conversations whose provider
+    supports model switching.
     """
     event_service = await conversation_service.get_event_service(conversation_id)
     if event_service is None:
@@ -430,11 +438,6 @@ async def switch_conversation_acp_model(
         # instead of an opaque 500.
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=str(e),
-        )
-    except RuntimeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
             detail=str(e),
         )
     return Success()

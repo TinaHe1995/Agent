@@ -133,6 +133,7 @@ def test_get_settings_returns_default_settings(client_with_settings):
     assert "conversation_settings" in body
     assert "llm_api_key_is_set" in body
     assert body["llm_api_key_is_set"] is False
+    assert body["active_profile"] is None
 
 
 def test_get_settings_migrates_legacy_openhands_settings_and_resaves_current(
@@ -214,11 +215,21 @@ def test_get_settings_migrates_legacy_openhands_settings_and_resaves_current(
     )
     assert response.status_code == 200
     body = response.json()
+    assert body["active_profile"] == "legacy-profile"
     agent_settings = body["agent_settings"]
     assert agent_settings["schema_version"] == AGENT_SETTINGS_SCHEMA_VERSION
     assert agent_settings["agent_kind"] == "openhands"
     assert agent_settings["llm"]["api_key"] == "sk-legacy-agent-key"
-    assert agent_settings["condenser"] == {"enabled": False, "max_size": 120}
+    assert agent_settings["condenser"] == {
+        "enabled": False,
+        "condenser_kind": "llm_summarizing",
+        "max_size": 120,
+        "max_tokens": None,
+        "keep_first": 2,
+        "minimum_progress": 0.1,
+        "hard_context_reset_max_retries": 5,
+        "hard_context_reset_context_scaling": 0.8,
+    }
     assert agent_settings["verification"]["critic_enabled"] is True
     assert "confirmation_mode" not in agent_settings["verification"]
     assert "security_analyzer" not in agent_settings["verification"]
@@ -474,6 +485,97 @@ def test_patch_settings_updates_llm_config(client_with_settings):
     assert body["llm_api_key_is_set"] is True
 
 
+def test_patch_settings_updates_active_profile(client_with_settings):
+    """PATCH /api/settings can update and clear the active LLM profile."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_profile": "fast-profile"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["active_profile"] == "fast-profile"
+
+    refetch = client_with_settings.get("/api/settings")
+    assert refetch.status_code == 200
+    assert refetch.json()["active_profile"] == "fast-profile"
+
+    clear_response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_profile": None},
+    )
+
+    assert clear_response.status_code == 200
+    assert clear_response.json()["active_profile"] is None
+
+    refetch = client_with_settings.get("/api/settings")
+    assert refetch.status_code == 200
+    assert refetch.json()["active_profile"] is None
+
+
+def test_patch_settings_rejects_invalid_active_profile(client_with_settings):
+    """PATCH /api/settings validates active profile names."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_profile": "not a valid profile"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_settings_updates_condenser_config(client_with_settings):
+    """PATCH /api/settings can update condenser constructor settings."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "condenser": {
+                    "enabled": True,
+                    "condenser_kind": "llm_summarizing",
+                    "max_size": 120,
+                    "max_tokens": 56000,
+                    "keep_first": 3,
+                    "minimum_progress": 0.2,
+                    "hard_context_reset_max_retries": 7,
+                    "hard_context_reset_context_scaling": 0.6,
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_settings"]["condenser"] == {
+        "enabled": True,
+        "condenser_kind": "llm_summarizing",
+        "max_size": 120,
+        "max_tokens": 56000,
+        "keep_first": 3,
+        "minimum_progress": 0.2,
+        "hard_context_reset_max_retries": 7,
+        "hard_context_reset_context_scaling": 0.6,
+    }
+
+
+def test_patch_settings_switches_condenser_variant(client_with_settings):
+    """PATCH /api/settings can switch to a different condenser settings variant."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={
+            "agent_settings_diff": {
+                "condenser": {
+                    "enabled": True,
+                    "condenser_kind": "no_op",
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_settings"]["condenser"] == {
+        "enabled": True,
+        "condenser_kind": "no_op",
+    }
+
+
 def test_patch_settings_encrypts_mcp_env_and_headers_on_disk(
     client_with_settings, temp_persistence_dir
 ):
@@ -537,7 +639,172 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     response = client_with_settings.patch("/api/settings", json={})
 
     assert response.status_code == 400
-    assert "At least one of" in response.json()["detail"]
+    assert response.json()["detail"] == (
+        "At least one of agent_settings_diff, "
+        "conversation_settings_diff, misc_settings_diff, "
+        "or active_profile must be provided"
+    )
+
+
+# ── misc_settings (opaque frontend-owned container) ─────────────────────
+#
+# These tests exercise the persistence + deep-merge behaviour of the
+# ``misc_settings`` container. The agent-server treats it as opaque, so the
+# payloads below use neutral keys/values whose only purpose is to exercise
+# the merge machinery — they intentionally do not reference any specific
+# frontend's schema.
+
+
+def test_get_settings_returns_empty_misc_settings_by_default(client_with_settings):
+    """GET /api/settings returns an empty misc_settings dict by default."""
+    response = client_with_settings.get("/api/settings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "misc_settings" in body
+    assert body["misc_settings"] == {}
+
+
+def test_patch_settings_writes_misc_settings(client_with_settings):
+    """PATCH /api/settings with misc_settings_diff persists the payload."""
+    payload = {
+        "theme": "dark",
+        "ui": {"sidebar": "open", "tags": ["alpha", "beta"]},
+    }
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": payload},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["misc_settings"] == payload
+
+    # Persisted across requests
+    refetch = client_with_settings.get("/api/settings")
+    assert refetch.status_code == 200
+    assert refetch.json()["misc_settings"] == payload
+
+
+def test_patch_settings_misc_settings_diff_is_deep_merged(client_with_settings):
+    """Partial misc_settings_diff merges into the existing block.
+
+    A diff that updates one nested field must NOT clobber sibling fields set
+    by an earlier PATCH — the merge runs through the same ``_deep_merge``
+    used for agent_settings / conversation_settings.
+    """
+    client_with_settings.patch(
+        "/api/settings",
+        json={
+            "misc_settings_diff": {
+                "theme": "dark",
+                "ui": {"sidebar": "open", "density": "comfortable"},
+            }
+        },
+    )
+
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"ui": {"sidebar": "collapsed"}}},
+    )
+
+    assert response.status_code == 200
+    misc = response.json()["misc_settings"]
+    # Sibling top-level field is preserved
+    assert misc["theme"] == "dark"
+    # Updated nested field
+    assert misc["ui"]["sidebar"] == "collapsed"
+    # Sibling nested field is preserved (this is the deep-merge property)
+    assert misc["ui"]["density"] == "comfortable"
+
+
+def test_patch_settings_misc_settings_lists_replace_wholesale(client_with_settings):
+    """Lists inside misc_settings are replaced wholesale, not merged."""
+    client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"tags": ["alpha", "beta", "gamma"]}},
+    )
+
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"tags": []}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["misc_settings"]["tags"] == []
+
+
+def test_patch_settings_misc_settings_only_payload_is_accepted(client_with_settings):
+    """misc_settings_diff alone satisfies the "at least one of" check."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"theme": "dark"}},
+    )
+
+    assert response.status_code == 200
+
+
+def test_patch_settings_misc_settings_accepts_arbitrary_payloads(client_with_settings):
+    """The agent-server doesn't interpret misc_settings — any JSON shape is fine.
+
+    Coverage for the *opaque* contract: a payload that would have been
+    rejected by an inner typed schema (e.g. a string where a list would
+    "naturally" go) is accepted and persisted verbatim, because validation
+    of misc_settings is the frontend's responsibility.
+    """
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"tags": "not-a-list", "count": 42}},
+    )
+
+    assert response.status_code == 200
+    misc = response.json()["misc_settings"]
+    assert misc["tags"] == "not-a-list"
+    assert misc["count"] == 42
+
+
+def test_patch_settings_misc_settings_does_not_clobber_agent_settings(
+    client_with_settings,
+):
+    """Writing only misc_settings must not reset agent_settings."""
+    client_with_settings.patch(
+        "/api/settings",
+        json={"agent_settings_diff": {"llm": {"model": "gpt-4o"}}},
+    )
+
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"misc_settings_diff": {"theme": "dark"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["agent_settings"]["llm"]["model"] == "gpt-4o"
+
+
+def test_persisted_settings_v1_loads_with_empty_misc_settings(
+    temp_persistence_dir, client_with_settings
+):
+    """A v1 settings file (no misc_settings) loads with empty defaults."""
+    settings_path = temp_persistence_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "agent_settings": {
+                    "agent_kind": "openhands",
+                    "schema_version": AGENT_SETTINGS_SCHEMA_VERSION,
+                    "llm": {"model": "gpt-4o"},
+                },
+                "conversation_settings": {
+                    "schema_version": CONVERSATION_SETTINGS_SCHEMA_VERSION,
+                },
+                "active_profile": None,
+            }
+        )
+    )
+
+    response = client_with_settings.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["misc_settings"] == {}
 
 
 def test_patch_settings_deep_merges(client_with_settings):
@@ -601,6 +868,99 @@ def test_deep_merge_non_null_still_wins():
     assert merged == {"a": 2, "b": {"x": 1, "y": 2}}
 
 
+# ── apply_agent_settings_diff parity (PersistedSettings.update) ─────────
+
+
+def test_update_agent_settings_same_kind_merge() -> None:
+    """Same-kind update deep-merges within the variant."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-4o"}}})
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_kind_switch_replaces_fresh() -> None:
+    """Kind switch starts from fresh variant; old fields are not carried."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-x"}}})
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "claude-code"}}
+    )
+
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_server == "claude-code"
+
+
+def test_update_agent_settings_switch_back_to_openhands() -> None:
+    """Switching back to openhands starts fresh; ACP fields are not leaked."""
+    from openhands.sdk.settings.model import OpenHandsAgentSettings
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "gemini-cli"}}
+    )
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "openhands", "llm": {"model": "gpt-4o"}}}
+    )
+
+    assert isinstance(settings.agent_settings, OpenHandsAgentSettings)
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_null_unsets_optional_field() -> None:
+    """A null value on an optional field resets it to default (RFC 7386 semantics)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_model": "claude-opus-4-8",
+            }
+        }
+    )
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_model == "claude-opus-4-8"
+
+    settings.update({"agent_settings_diff": {"acp_model": None}})
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_model is None
+
+
+def test_update_agent_settings_nested_null_removes_map_entry() -> None:
+    """A null inside a nested map removes that entry (acp_env key removal)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_env": {"KEEP": "yes", "DROP": "bye"},
+            }
+        }
+    )
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+
+    settings.update({"agent_settings_diff": {"acp_env": {"DROP": None}}})
+    assert settings.agent_settings.acp_env == {"KEEP": "yes"}
+
+
+def test_update_agent_settings_secret_survives_same_kind_merge() -> None:
+    """An existing api_key in agent_settings is preserved across a same-kind update."""
+    from pydantic import SecretStr
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"llm": {"model": "gpt-4o", "api_key": "sk-SECRET"}}}
+    )
+
+    settings.update({"agent_settings_diff": {"llm": {"temperature": 0.5}}})
+
+    assert isinstance(settings.agent_settings.llm.api_key, SecretStr)
+    assert settings.agent_settings.llm.api_key.get_secret_value() == "sk-SECRET"
+
+
 def _seed_acp_settings(persistence_dir: Path, acp_env: dict[str, str]) -> None:
     """Write a settings.json with an active ACP agent carrying ``acp_env``."""
     acp = ACPAgentSettings(acp_command=["echo", "hi"], acp_env=acp_env)
@@ -656,22 +1016,21 @@ def test_patch_settings_unset_then_add_acp_env_key(
     assert set(response.json()["agent_settings"]["acp_env"]) == {"OLD", "NEW"}
 
 
-def test_patch_settings_null_on_acp_env_field_itself_is_rejected(
+def test_patch_settings_null_on_acp_env_field_resets_to_default(
     client_with_settings, temp_persistence_dir
 ):
-    """A ``null`` on the ``acp_env`` *field* (not an entry) is not an unset —
-    it flows to validation. ``acp_env`` is a non-optional dict, so it 422s
-    rather than wiping the map; clients clear a map by sending ``{}``."""
+    """A ``null`` on the ``acp_env`` field itself resets it to its default ``{}``
+    (RFC 7386 semantics via apply_agent_settings_diff). This is a change from the
+    old _deep_merge behavior where top-level null would flow to validation and 422."""
     _seed_acp_settings(temp_persistence_dir, {"KEEP_ME": "keep"})
 
     response = client_with_settings.patch(
         "/api/settings",
         json={"agent_settings_diff": {"acp_env": None}},
     )
-    assert response.status_code == 422
-    # The pre-existing value is untouched (atomic validate-then-apply).
+    assert response.status_code == 200
     after = client_with_settings.get("/api/settings").json()
-    assert set(after["agent_settings"]["acp_env"]) == {"KEEP_ME"}
+    assert after["agent_settings"]["acp_env"] == {}
 
 
 def test_patch_settings_null_on_scalar_field_fails_loudly(client_with_settings):

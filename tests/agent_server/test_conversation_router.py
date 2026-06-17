@@ -28,6 +28,7 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.llm import llm_profile_store
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.security.llm_analyzer import LLMSecurityAnalyzer
+from openhands.sdk.settings import AGENT_SETTINGS_SCHEMA_VERSION
 from openhands.sdk.workspace import LocalWorkspace
 
 
@@ -726,7 +727,7 @@ def test_start_conversation_accepts_acp_agent_settings(
             "/api/conversations",
             json={
                 "agent_settings": {
-                    "schema_version": 3,
+                    "schema_version": AGENT_SETTINGS_SCHEMA_VERSION,
                     "agent_kind": "acp",
                     "acp_server": "custom",
                     "acp_command": ["echo", "settings"],
@@ -1155,14 +1156,18 @@ def test_switch_acp_model_non_acp_returns_400(
         client.app.dependency_overrides.clear()
 
 
-def test_switch_acp_model_uninitialized_returns_409(
+def test_switch_acp_model_pre_session_returns_200(
     client, mock_conversation_service, mock_event_service, sample_conversation_id
 ):
-    """A RuntimeError (session not initialized yet) maps to 409."""
+    """A switch before the first run() is a 200, not a 409.
+
+    Regression for #3763: the SDK now persists (defers) a pre-session switch
+    instead of raising, so the route no longer maps it to 409 "ACP session not
+    initialized yet". The event service returns normally (the deferral is
+    applied when the first session starts).
+    """
     mock_conversation_service.get_event_service.return_value = mock_event_service
-    mock_event_service.switch_acp_model.side_effect = RuntimeError(
-        "ACP session is not initialized"
-    )
+    mock_event_service.switch_acp_model.return_value = None
 
     client.app.dependency_overrides[get_conversation_service] = (
         lambda: mock_conversation_service
@@ -1172,7 +1177,33 @@ def test_switch_acp_model_uninitialized_returns_409(
             f"/api/conversations/{sample_conversation_id}/switch_acp_model",
             json={"model": "haiku"},
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
+        mock_event_service.switch_acp_model.assert_awaited_once_with("haiku")
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_switch_acp_model_inactive_service_returns_400(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """An inactive service (closed/never-started) maps to 400.
+
+    The event service raises the shared ``inactive_service`` ValueError for a
+    missing live conversation, consistent with its other methods; the router's
+    generic ValueError handler turns it into a 400.
+    """
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.switch_acp_model.side_effect = ValueError("inactive_service")
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/switch_acp_model",
+            json={"model": "haiku"},
+        )
+        assert response.status_code == 400
     finally:
         client.app.dependency_overrides.clear()
 
@@ -2214,5 +2245,41 @@ def test_fork_conversation_duplicate_id_returns_409(
         )
 
         assert response.status_code == 409
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_start_conversation_client_tool_registration_error_returns_422(
+    client, mock_conversation_service
+):
+    """Client tool registration input errors yield 422, not 500."""
+    from openhands.sdk.tool.client_tool import ClientToolRegistrationError
+
+    mock_conversation_service.start_conversation.side_effect = (
+        ClientToolRegistrationError(
+            "Client tool name 'terminal' collides with an existing non-client tool."
+        )
+    )
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+
+    request = StartConversationRequest(
+        agent=Agent(
+            llm=LLM(model="gpt-4o", api_key=SecretStr("test-key"), usage_id="t"),
+            tools=[],
+        ),
+        workspace=LocalWorkspace(working_dir="/tmp/test"),
+    )
+
+    try:
+        response = client.post(
+            "/api/conversations",
+            json=request.model_dump(mode="json"),
+        )
+
+        assert response.status_code == 422
+        assert "collides with an existing non-client tool" in response.json()["detail"]
     finally:
         client.app.dependency_overrides.clear()
