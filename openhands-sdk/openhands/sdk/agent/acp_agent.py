@@ -394,8 +394,14 @@ def _model_config_option(response: Any) -> Any | None:
     ``session/set_model``. Returns that option (carrying ``options`` and
     ``current_value``) or ``None`` when the server uses neither / the old
     mechanism. ``getattr`` keeps it tolerant of partial structures.
+
+    The ``agent-client-protocol`` Python lib wraps each entry in a
+    ``SessionConfigOption`` ``RootModel`` on 0.8.x (access via ``.root``) but
+    lists the union members directly on 0.10.x; unwrap ``.root`` so detection
+    works on either.
     """
-    for opt in getattr(response, "config_options", None) or []:
+    for raw in getattr(response, "config_options", None) or []:
+        opt = getattr(raw, "root", raw)
         if (
             getattr(opt, "type", None) == "select"
             and getattr(opt, "id", None) == _MODEL_CONFIG_OPTION_ID

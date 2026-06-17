@@ -15,14 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
-from acp.schema import (
-    ModelInfo,
-    NewSessionResponse,
-    PromptResponse,
-    SessionConfigOptionSelect,
-    SessionConfigSelectOption,
-    SessionModelState,
-)
+from acp.schema import NewSessionResponse, PromptResponse
 from pydantic import Field, SecretStr
 
 from openhands.sdk.agent.acp_agent import (
@@ -7159,6 +7152,22 @@ class TestConfigOptionModelMechanism:
             ACPModelInfo(model_id="haiku", name="Haiku", description="Haiku 4.5"),
         ]
 
+    def test_unwraps_rootmodel_wrapped_config_option(self):
+        # agent-client-protocol 0.8.x wraps each entry in a SessionConfigOption
+        # RootModel (the option lives under ``.root``); detection must unwrap it,
+        # else ``opt.id`` is None and the SDK wrongly falls back to set_model.
+        select = self._select(
+            current_value="opus[1m]",
+            options=[self._opt("opus[1m]", "Opus"), self._opt("sonnet", "Sonnet")],
+        )
+        wrapped = SimpleNamespace(root=select)  # mimics the RootModel wrapper
+        response = self._response(config_options=[wrapped])
+        assert _session_selects_model_via_config_option(response) is True
+        cur, avail = _extract_session_models(response)
+        assert cur == "opus[1m]"
+        assert avail is not None
+        assert [m.model_id for m in avail] == ["opus[1m]", "sonnet"]
+
     def test_models_capability_wins_over_config_option(self):
         # If a server somehow carries both, the ``models`` capability is used.
         models = MagicMock()
@@ -7223,93 +7232,88 @@ class TestConfigOptionModelMechanism:
         assert _session_selects_model_via_config_option(None) is False
 
 
-def _select(opt_id, current, values, category=None):
-    return SessionConfigOptionSelect(
-        id=opt_id,
-        name=opt_id,
-        type="select",
-        category=category,
-        current_value=current,
-        options=[SessionConfigSelectOption(value=v, name=v) for v in values],
-    )
+# Real ``session/new`` wire payloads (by-alias) captured from the pinned CLIs.
+# Parsed through the real ``NewSessionResponse`` so the test exercises the
+# genuine schema, INCLUDING the ``SessionConfigOption`` RootModel wrapper the
+# ``agent-client-protocol`` lib applies to ``config_options`` on 0.8.x (where a
+# naive ``opt.id`` read returns ``None``). This is the exact failure the QA bot
+# surfaced; the detection helper unwraps ``.root`` so it works on 0.8.x + 0.10.x.
+def _select_dict(opt_id, current, values, category=None):
+    return {
+        "id": opt_id,
+        "name": opt_id,
+        "type": "select",
+        "category": category,
+        "currentValue": current,
+        "options": [{"value": v, "name": v} for v in values],
+    }
 
 
-def _claude_046_session() -> NewSessionResponse:
-    # claude-agent-acp 0.46.0: ``models`` dropped; model is a configOptions
-    # select alongside ``mode``/``effort``.
-    return NewSessionResponse(
-        session_id="sess-claude",
-        models=None,
-        config_options=[
-            _select("mode", "default", ["default", "acceptEdits"]),
-            _select(
-                "model",
-                "opus[1m]",
-                ["default", "opus[1m]", "sonnet", "haiku"],
-                category="model",
-            ),
-            _select("effort", "xhigh", ["xhigh", "low"]),
-        ],
-    )
-
-
-def _codex_016_session() -> NewSessionResponse:
-    # codex-acp 0.16.0: same shape, combined model ids stay in the select.
-    return NewSessionResponse(
-        session_id="sess-codex",
-        models=None,
-        config_options=[
-            _select("mode", "read-only", ["read-only", "full-access"]),
-            _select(
-                "model",
-                "gpt-5.5",
-                ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
-                category="model",
-            ),
-            _select("reasoning_effort", "xhigh", ["xhigh", "low"]),
-        ],
-    )
-
-
-def _gemini_046_session() -> NewSessionResponse:
-    # gemini-cli 0.46.0: keeps the ``models`` capability, no model configOption.
-    return NewSessionResponse(
-        session_id="sess-gemini",
-        config_options=None,
-        models=SessionModelState(
-            current_model_id="gemini-3-flash-preview",
-            available_models=[
-                ModelInfo(model_id=mid, name=mid)
-                for mid in (
-                    "auto",
-                    "gemini-3-pro-preview",
-                    "gemini-3-flash-preview",
-                    "gemini-2.5-pro",
-                    "gemini-2.5-flash",
-                    "gemini-3.1-flash-lite",
-                )
-            ],
+_CLAUDE_046_SESSION = {
+    "sessionId": "sess-claude",
+    "models": None,
+    "configOptions": [
+        _select_dict("mode", "default", ["default", "acceptEdits"]),
+        _select_dict(
+            "model",
+            "opus[1m]",
+            ["default", "opus[1m]", "sonnet", "haiku"],
+            category="model",
         ),
-    )
+        _select_dict("effort", "xhigh", ["xhigh", "low"]),
+    ],
+}
+_CODEX_016_SESSION = {
+    "sessionId": "sess-codex",
+    "models": None,
+    "configOptions": [
+        _select_dict("mode", "read-only", ["read-only", "full-access"]),
+        _select_dict(
+            "model",
+            "gpt-5.5",
+            ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+            category="model",
+        ),
+        _select_dict("reasoning_effort", "xhigh", ["xhigh", "low"]),
+    ],
+}
+_GEMINI_046_SESSION = {
+    "sessionId": "sess-gemini",
+    "configOptions": None,
+    "models": {
+        "currentModelId": "gemini-3-flash-preview",
+        "availableModels": [
+            {"modelId": mid, "name": mid}
+            for mid in (
+                "auto",
+                "gemini-3-pro-preview",
+                "gemini-3-flash-preview",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-3.1-flash-lite",
+            )
+        ],
+    },
+}
 
 
 class TestDetectionAgainstRealSessionResponses:
-    """Detection + extraction against the real CLI ``session/new`` shapes built
-    from the genuine ``acp.schema`` types (not a hand-rolled mock).
+    """Detection + extraction against the real CLI ``session/new`` wire shapes,
+    parsed through the actual ``acp.schema.NewSessionResponse``.
 
-    Guards the exact failure the QA bot hypothesised — that
-    ``getattr(response, "config_options")`` could be ``None`` due to a field-name
-    mismatch — by reading the real schema field (``config_options`` /
-    ``current_value`` / ``model_id``).
+    Guards the real production bug the QA bot surfaced: on
+    ``agent-client-protocol`` 0.8.x each ``config_options`` entry is a
+    ``SessionConfigOption`` RootModel (``.root``), so a naive ``opt.id`` read is
+    ``None`` and the SDK would fall back to the removed ``session/set_model``.
     """
 
     def test_config_options_is_the_schema_field_name(self):
         # The SDK reads ``response.config_options``; pin that this is the real
-        # field on the schema (the bot hypothesised a name mismatch).
+        # field on the schema.
         assert "config_options" in NewSessionResponse.model_fields
 
     def test_claude_046_uses_config_option(self):
-        resp = _claude_046_session()
+        resp = NewSessionResponse.model_validate(_CLAUDE_046_SESSION)
         assert _session_selects_model_via_config_option(resp) is True
         cur, avail = _extract_session_models(resp)
         assert cur == "opus[1m]"
@@ -7317,7 +7321,7 @@ class TestDetectionAgainstRealSessionResponses:
         assert [m.model_id for m in avail] == ["default", "opus[1m]", "sonnet", "haiku"]
 
     def test_codex_016_uses_config_option(self):
-        resp = _codex_016_session()
+        resp = NewSessionResponse.model_validate(_CODEX_016_SESSION)
         assert _session_selects_model_via_config_option(resp) is True
         cur, avail = _extract_session_models(resp)
         assert cur == "gpt-5.5"
@@ -7325,7 +7329,7 @@ class TestDetectionAgainstRealSessionResponses:
         assert [m.model_id for m in avail] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
 
     def test_gemini_046_uses_set_session_model(self):
-        resp = _gemini_046_session()
+        resp = NewSessionResponse.model_validate(_GEMINI_046_SESSION)
         assert _session_selects_model_via_config_option(resp) is False
         cur, avail = _extract_session_models(resp)
         assert cur == "gemini-3-flash-preview"
