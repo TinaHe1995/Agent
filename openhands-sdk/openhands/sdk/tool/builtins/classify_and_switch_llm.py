@@ -116,7 +116,13 @@ def parse_class_index(text: str, num_classes: int) -> int:
 def _recent_messages_text(
     conversation: "LocalConversation", limit: int = _RECENT_MESSAGE_LIMIT
 ) -> str:
-    """Return a transcript of the last ``limit`` conversation messages."""
+    """Return a transcript of the last ``limit`` conversation messages.
+
+    Only ``MessageEvent`` is included on purpose: user/assistant messages are
+    the task signal the classifier needs. Action/observation events (tool calls,
+    outputs) are deliberately excluded — they are noisy, can be large, and don't
+    describe the task any better than the surrounding messages.
+    """
     from openhands.sdk.event.llm_convertible.message import MessageEvent
     from openhands.sdk.llm import content_to_str
 
@@ -157,6 +163,8 @@ class ClassifyAndSwitchLLMExecutor(ToolExecutor):
                     "No meta-profile is active and none are available in the "
                     "meta-profile store."
                 )
+            # ``list()`` is alphabetically sorted, so this is the
+            # alphabetically-first meta-profile, not the most recently saved.
             name = available[0]
             logger.info(
                 "No active meta-profile set; falling back to first available: %r",

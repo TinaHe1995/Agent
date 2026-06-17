@@ -1,6 +1,7 @@
 """Tests for meta_profiles_router endpoints."""
 
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -212,3 +213,41 @@ def test_activate_propagates_into_agent_settings(client, store):
 def test_activate_missing_returns_404(client):
     response = client.post("/api/meta-profiles/nope/activate")
     assert response.status_code == 404
+
+
+def test_concurrent_delete_and_activate_keep_settings_consistent(client, store):
+    """Racing delete(active) against activate(other) must not corrupt settings.
+
+    ``delete`` clears the active meta-profile and ``activate`` sets a new one;
+    both route through the file-locked settings store. Whatever the interleaving,
+    the persisted state must stay consistent: the active profile is never the
+    just-deleted one, and the nested ``agent_settings`` never drifts from the
+    top-level ``active_meta_profile``.
+    """
+    store.save("q", MetaProfile.model_validate(_meta()))
+
+    for _ in range(15):
+        # Re-establish "p" as the active profile before each race.
+        store.save("p", MetaProfile.model_validate(_meta()))
+        client.post("/api/meta-profiles/p/activate")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(client.delete, "/api/meta-profiles/p"),
+                pool.submit(client.post, "/api/meta-profiles/q/activate"),
+            ]
+            for future in futures:
+                assert future.result().status_code == 200
+
+        persisted = get_settings_store().load()
+        assert persisted is not None
+        active = persisted.active_meta_profile
+        # "p" was deleted, so it must never remain active; outcome is "q" or None
+        # depending on which write committed last.
+        assert active in (None, "q")
+
+        agent = persisted.agent_settings
+        assert isinstance(agent, OpenHandsAgentSettings)
+        # Nested agent settings must agree with the top-level facade.
+        assert agent.active_meta_profile == active
+        assert agent.enable_classify_and_switch_llm_tool is (active is not None)

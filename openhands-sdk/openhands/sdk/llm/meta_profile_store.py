@@ -1,14 +1,9 @@
-"""Storage for *meta-profiles*: declarative model-routing configurations.
+"""JSON-file storage for meta-profiles under ``~/.openhands/meta-profiles``.
 
-A meta-profile describes how to pick an LLM for a task. It names a
-``classifier_model`` used to categorize the task, a ``default_model`` to fall
-back to, and a list of ``classes`` mapping a natural-language task description
-to the model that should handle it.
-
-Every model reference (``classifier_model``, ``default_model`` and each
-class's ``model``) is the *name of a saved LLM profile* in
-:class:`~openhands.sdk.llm.llm_profile_store.LLMProfileStore`, so credentials
-and provider settings are resolved through the existing profile machinery.
+Key invariant: every model reference in a meta-profile (``classifier_model``,
+``default_model``, and each class's ``model``) is the *name of a saved LLM
+profile* in :class:`~openhands.sdk.llm.llm_profile_store.LLMProfileStore`, not a
+raw model string — credentials/provider settings resolve through that store.
 """
 
 from __future__ import annotations
@@ -103,7 +98,12 @@ class MetaProfileStore:
             )
 
     def list(self) -> list[str]:
-        """Return the names (without ``.json``) of all stored meta-profiles."""
+        """Return stored meta-profile names (without ``.json``), sorted.
+
+        The order is alphabetical, not chronological. Callers that fall back to
+        "the first available" meta-profile (when none is explicitly active) get
+        the alphabetically-first name, which is stable but not "most recent".
+        """
         return sorted(
             p.stem
             for p in self.base_dir.glob("*.json")

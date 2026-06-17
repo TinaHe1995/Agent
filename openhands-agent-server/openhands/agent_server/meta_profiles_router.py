@@ -1,9 +1,7 @@
-"""HTTP endpoints for managing meta-profiles (model-routing configurations).
+"""HTTP CRUD + activate endpoints for meta-profiles (mirrors profiles_router).
 
-A meta-profile names a ``classifier_model``, a ``default_model`` and a list of
-task ``classes``. Every model reference is the name of a saved LLM profile, so
-this router intentionally mirrors :mod:`profiles_router` but stores plain JSON
-documents (no secrets) via :class:`MetaProfileStore`.
+Unlike LLM profiles, meta-profiles hold no secrets — they are plain JSON
+documents persisted via :class:`MetaProfileStore`.
 """
 
 from collections.abc import Iterator
