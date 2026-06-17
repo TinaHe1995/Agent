@@ -363,6 +363,7 @@ def test_mcp_tools_real_values_remain_accessible_in_memory():
     runtime MCP usage is unaffected."""
     skill = _skill_with_mcp_secret()
 
+    assert skill.mcp_tools is not None
     env = skill.mcp_tools["mcpServers"]["svc"]["env"]
     assert env["API_KEY"] == _MCP_SECRET
 
