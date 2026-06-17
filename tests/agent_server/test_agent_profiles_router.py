@@ -122,6 +122,21 @@ def test_no_seed_when_store_nonempty(client, store):
     assert body["active_agent_profile_id"] is None
 
 
+def test_no_seed_when_pointer_set_but_store_empty(client):
+    """An empty store with a non-null pointer is left as-is (no seed, no error).
+
+    A stale pointer (e.g. after a failed delete) reflects user state, so the
+    seed condition deliberately requires both an empty store *and* a null
+    pointer.
+    """
+    stale = "12345678-1234-1234-1234-1234567890ab"
+    client.patch("/api/settings", json={"active_agent_profile_id": stale})
+
+    body = client.get("/api/agent-profiles").json()
+    assert body["profiles"] == []
+    assert body["active_agent_profile_id"] == stale
+
+
 def test_concurrent_first_list_seeds_once(client, store):
     """Concurrent first GETs seed exactly one profile; the pointer is consistent.
 
@@ -216,9 +231,33 @@ def test_save_acp_profile(client, store):
 
 
 def test_save_missing_required_ref_returns_422(client):
-    """An OpenHands profile without llm_profile_ref is rejected."""
+    """A missing required field is rejected and the field location is surfaced."""
     response = client.post("/api/agent-profiles/bad", json={})
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    # The discriminated union tags the location with the variant ("openhands").
+    assert any("llm_profile_ref" in err["loc"] for err in detail["errors"])
+
+
+def test_save_invalid_body_does_not_leak_mcp_secret(client):
+    """A malformed profile body's 422 must not echo skills[].mcp_tools secrets."""
+    secret = "ghp_should_never_appear_in_error"
+    response = client.post(
+        "/api/agent-profiles/bad",
+        json={
+            "llm_profile_ref": "base",
+            "skills": [
+                {
+                    "name": "leaky",
+                    "content": "x",
+                    # Malformed: mcpServers must be an object, forcing a failure.
+                    "mcp_tools": {"mcpServers": {"svc": {"headers": secret}}},
+                }
+            ],
+        },
+    )
+    assert response.status_code == 422
+    assert secret not in response.text
 
 
 def test_save_extra_field_returns_422(client):

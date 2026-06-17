@@ -380,10 +380,26 @@ async def save_agent_profile(
     cipher = get_cipher(request)
     try:
         profile = validate_agent_profile({**body, "name": name})
-    except (ValidationError, ValueError, TypeError) as e:
+    except ValidationError as e:
+        # Surface field locations + error types so the client can fix the body,
+        # but omit ``input``/``msg`` — a nested mcp_tools MCPConfig error embeds
+        # the input (which may carry secrets) in its message.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid agent profile: {type(e).__name__}",
+            detail={
+                "message": "Invalid agent profile",
+                "errors": [
+                    {"loc": err["loc"], "type": err["type"]} for err in e.errors()
+                ],
+            },
+        )
+    except Exception:
+        # Any other validation failure (e.g. SkillValidationError from a
+        # malformed mcp_tools, or a schema/migration error) is a client error,
+        # never a 500. Stay generic — these messages can embed the input.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid agent profile",
         )
 
     # A client editing a profile fetched with X-Expose-Secrets: encrypted posts
