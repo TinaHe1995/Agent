@@ -376,9 +376,6 @@ def _write_secret_file(path: Path, value: str) -> None:
 # (codex-acp 0.16+, claude-agent-acp 0.44+) rather than the UNSTABLE ``models``
 # capability + ``session/set_model`` (gemini-cli, older codex/claude).
 _MODEL_CONFIG_OPTION_ID = "model"
-# Companion config-option id codex-acp 0.16 uses for the reasoning-effort tier
-# (the 0.15 combined ``<model>/<effort>`` id is split across the two on 0.16).
-_REASONING_EFFORT_CONFIG_OPTION_ID = "reasoning_effort"
 
 
 def _model_config_option(response: Any) -> Any | None:
@@ -406,24 +403,6 @@ def _model_config_option(response: Any) -> Any | None:
     return None
 
 
-def _split_codex_model_effort(model: str) -> tuple[str, str | None]:
-    """Split a codex-style ``<model>/<effort>`` id into ``(model, effort)``.
-
-    codex-acp's ``models`` capability (0.15) used a combined id like
-    ``gpt-5.5/medium`` that the server parsed itself. Its 0.16 ``model``
-    ``configOptions`` select instead wants a **bare preset id** (``gpt-5.5``)
-    with the reasoning effort set via a separate ``reasoning_effort`` option —
-    an unknown combined id is taken literally and rejected by the backend
-    (``"<id>" model is not supported``). So when applying via configOptions we
-    split on ``/``. Bare ids (claude ``opus[1m]``/``sonnet``, gemini ``auto``,
-    codex without an effort suffix) return ``(model, None)`` unchanged.
-    """
-    base, sep, effort = model.partition("/")
-    if sep and effort:
-        return base, effort
-    return model, None
-
-
 async def _apply_acp_model(
     conn: ClientSideConnection,
     session_id: str,
@@ -435,36 +414,15 @@ async def _apply_acp_model(
     advertised: ``set_config_option(configId="model")`` for configOptions-based
     servers (codex-acp 0.16+, claude-agent-acp 0.44+), else ``set_session_model``.
 
-    A codex ``<model>/<effort>`` id is split into a bare ``model`` plus a
-    separate ``reasoning_effort`` option (see :func:`_split_codex_model_effort`).
-    The model selection is the switch; the effort is a secondary refinement, so
-    a rejected effort is logged rather than raised — the live session keeps the
-    applied model instead of reporting the whole switch failed (#3772).
+    The model id is a bare preset id the server lists in its ``model`` select /
+    ``models`` capability — applied as-is on either mechanism.
     """
-    if not via_config_option:
+    if via_config_option:
+        await conn.set_config_option(
+            config_id=_MODEL_CONFIG_OPTION_ID, value=model, session_id=session_id
+        )
+    else:
         await conn.set_session_model(model_id=model, session_id=session_id)
-        return
-    base, effort = _split_codex_model_effort(model)
-    await conn.set_config_option(
-        config_id=_MODEL_CONFIG_OPTION_ID, value=base, session_id=session_id
-    )
-    if effort is not None:
-        # reasoning_effort is only valid once the model is a known preset, which
-        # the call above just set. Best-effort: keep the applied model on failure.
-        try:
-            await conn.set_config_option(
-                config_id=_REASONING_EFFORT_CONFIG_OPTION_ID,
-                value=effort,
-                session_id=session_id,
-            )
-        except ACPRequestError as exc:
-            logger.warning(
-                "ACP reasoning_effort=%r rejected after model=%r applied (%s); "
-                "keeping the model on the server default effort",
-                effort,
-                base,
-                exc,
-            )
 
 
 def _usable_models(infos: Iterable[ACPModelInfo]) -> list[ACPModelInfo]:
@@ -498,10 +456,8 @@ def _extract_session_models(
 
     ``via_config_option`` is the selection mechanism: ``True`` for the
     configOptions select, ``False`` for the ``models`` capability, and
-    ``default_via_config_option`` when the response carries neither — callers on
-    the resume path pass the persisted mechanism hint so a config-option session
-    whose ``load_session`` omits the model block still reapplies via the right
-    call instead of defaulting to ``set_session_model``.
+    ``default_via_config_option`` when the response carries neither (the
+    resume-path default for a ``load_session`` that omits the model block).
 
     ``getattr`` keeps the helper tolerant of agents that emit a partial
     structure.
@@ -2612,10 +2568,9 @@ class ACPAgent(AgentBase):
                 else reported_model_id
             )
 
-            # Resolve the permission mode.  Known providers each have their
-            # own mode ID (bypassPermissions, full-access, yolo …).
-            # Unknown/custom servers get None — skip the call rather than
-            # sending a provider-specific string they won't recognise.
+            # Resolve the permission mode. Known providers each have their own
+            # mode ID; unknown/custom servers get None — skip the call rather
+            # than sending a provider-specific string they won't recognise.
             provider = detect_acp_provider_by_agent_name(agent_name)
             mode_id = self.acp_session_mode or (
                 provider.default_session_mode if provider else None
@@ -3590,7 +3545,7 @@ class ACPAgent(AgentBase):
 
         Args:
             model: Provider-specific model id to switch to (e.g.
-                ``"claude-haiku-4-5-20251001"`` or ``"gpt-5.4/low"``).
+                ``"sonnet"`` or ``"gpt-5.5"``).
 
         Raises:
             ValueError: If ``model`` is empty or whitespace-only, if the

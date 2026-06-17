@@ -34,9 +34,9 @@ class ACPModelInfo(BaseModel):
     model_id: str = Field(
         description=(
             "Server-assigned model identifier. May be concrete "
-            '(e.g. ``"gpt-5.5/xhigh"``) or an opaque alias '
-            '(e.g. ``"default"``, ``"auto"``). This is the value to pass to '
-            "``set_session_model`` to switch to this model."
+            '(e.g. ``"gpt-5.5"``) or an opaque alias '
+            '(e.g. ``"default"``, ``"auto"``). This is the value to pass back '
+            "to the server to switch to this model."
         ),
     )
     name: str | None = Field(

@@ -155,13 +155,12 @@ class ACPProviderInfo:
     """
 
     default_session_mode: str
-    """ACP session-mode ID that suppresses all permission prompts.
+    """ACP session-mode ID set right after ``session/new``.
 
-    Different servers use different IDs for the same concept:
-
-    - ``bypassPermissions`` — claude-agent-acp
-    - ``full-access``       — codex-acp
-    - ``yolo``              — gemini-cli
+    For servers with a permission-suppressing mode that is the value:
+    ``bypassPermissions`` (claude-agent-acp), ``full-access`` (codex-acp).
+    gemini-cli uses ``default`` (its ``yolo`` mode errors at init); the ACP
+    bridge auto-approves permission requests, so the mode doesn't gate prompts.
     """
 
     agent_name_patterns: tuple[str, ...]
@@ -307,20 +306,14 @@ _CLAUDE_MODELS: tuple[ACPModelOption, ...] = (
     ACPModelOption(id="haiku", label="Claude Haiku 4.5"),
 )
 
-# Model IDs accepted by ``@zed-industries/codex-acp`` (``session/new``
-# ``availableModels`` on the pinned CLI), curated to the frontier family plus
-# the cost-efficient mini tier. Format is ``<base-model>/<effort>`` where the
-# trailing tier (``low``/``medium``/``high``/``xhigh``) hints the reasoning
-# effort for the turn.
+# Bare preset ids the ``@zed-industries/codex-acp`` 0.16 ``model`` configOptions
+# select reports at ``session/new`` (``set_config_option(configId="model")``
+# targets). The reasoning-effort tier is a *separate* ``reasoning_effort``
+# configOption on 0.16, not part of the model id, so it is not encoded here.
 _CODEX_MODELS: tuple[ACPModelOption, ...] = (
-    ACPModelOption(id="gpt-5.5/low", label="GPT-5.5 (low)"),
-    ACPModelOption(id="gpt-5.5/medium", label="GPT-5.5 (medium)"),
-    ACPModelOption(id="gpt-5.5/high", label="GPT-5.5 (high)"),
-    ACPModelOption(id="gpt-5.5/xhigh", label="GPT-5.5 (xhigh)"),
-    ACPModelOption(id="gpt-5.4-mini/low", label="GPT-5.4 Mini (low)"),
-    ACPModelOption(id="gpt-5.4-mini/medium", label="GPT-5.4 Mini (medium)"),
-    ACPModelOption(id="gpt-5.4-mini/high", label="GPT-5.4 Mini (high)"),
-    ACPModelOption(id="gpt-5.4-mini/xhigh", label="GPT-5.4 Mini (xhigh)"),
+    ACPModelOption(id="gpt-5.5", label="GPT-5.5"),
+    ACPModelOption(id="gpt-5.4", label="GPT-5.4"),
+    ACPModelOption(id="gpt-5.4-mini", label="GPT-5.4 Mini"),
 )
 
 # Model IDs accepted by ``@google/gemini-cli --acp``. Mirrors the
@@ -379,9 +372,8 @@ _GEMINI_FILE_SECRETS: tuple[ACPFileSecretSpec, ...] = (
 # so the `@version` suffix is a no-op there.
 #
 # claude-agent-acp 0.44+ / codex-acp 0.16+ select the model via a ``model``
-# ``configOptions`` entry, not ``session/set_model``; the SDK detects which per
-# session in ``_extract_session_models`` and applies it. codex 0.16 also splits
-# the model id from the reasoning effort (see ``_split_codex_model_effort``). #3772.
+# ``configOptions`` entry rather than ``session/set_model``; the SDK detects
+# which per session and applies it through the matching call.
 CLAUDE_AGENT_ACP_VERSION = "0.44.0"
 CODEX_ACP_VERSION = "0.16.0"
 GEMINI_CLI_VERSION = "0.46.0"
@@ -434,7 +426,7 @@ ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType(
             supports_runtime_model_switch=True,
             session_meta_key=None,
             available_models=_CODEX_MODELS,
-            default_model="gpt-5.5/medium",
+            default_model="gpt-5.5",
             file_secrets=_CODEX_FILE_SECRETS,
             binary_name="codex-acp",
             data_dir_env_var="CODEX_HOME",

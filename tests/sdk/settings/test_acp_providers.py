@@ -59,8 +59,8 @@ class TestACPProviderInfo:
         assert info.supports_set_session_model is True
         assert info.supports_runtime_model_switch is True
         assert info.session_meta_key is None
-        assert info.default_model == "gpt-5.5/medium"
-        assert any(m.id == "gpt-5.5/medium" for m in info.available_models)
+        assert info.default_model == "gpt-5.5"
+        assert any(m.id == "gpt-5.5" for m in info.available_models)
         assert info.binary_name == "codex-acp"
         assert info.data_dir_env_var == "CODEX_HOME"
 

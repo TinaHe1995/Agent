@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
@@ -35,7 +35,6 @@ from openhands.sdk.agent.acp_agent import (
     _reapply_session_model_on_resume,
     _select_auth_method,
     _serialize_tool_content,
-    _split_codex_model_effort,
     _strip_inherited_npm_env,
 )
 from openhands.sdk.agent.acp_models import ACPModelInfo
@@ -4446,7 +4445,7 @@ class TestMaybeSetSessionModel:
 
     @pytest.mark.asyncio
     async def test_set_config_option_mechanism(self):
-        # ``via_config_option=True`` (codex-acp 0.16+, claude-agent-acp 0.46+)
+        # ``via_config_option=True`` (codex-acp 0.16+, claude-agent-acp 0.44+)
         # applies the model via ``set_config_option(configId="model")``.
         conn = AsyncMock()
         applied = await _maybe_set_session_model(
@@ -4537,17 +4536,15 @@ class TestReapplySessionModelOnResume:
 
     @pytest.mark.asyncio
     async def test_reapply_via_set_config_option_mechanism(self):
-        # codex-acp 0.16+/claude-agent-acp 0.46+ reapply via
-        # ``set_config_option(configId="model")``; a codex combined id splits
-        # into model + reasoning_effort.
+        # codex-acp 0.16+/claude-agent-acp 0.44+ reapply via
+        # ``set_config_option(configId="model")`` with the bare preset id.
         conn = AsyncMock()
         applied = await _reapply_session_model_on_resume(
-            conn, "codex-acp", "sess-1", "gpt-5.4/low", via_config_option=True
+            conn, "codex-acp", "sess-1", "gpt-5.5", via_config_option=True
         )
-        assert conn.set_config_option.await_args_list == [
-            call(config_id="model", value="gpt-5.4", session_id="sess-1"),
-            call(config_id="reasoning_effort", value="low", session_id="sess-1"),
-        ]
+        conn.set_config_option.assert_awaited_once_with(
+            config_id="model", value="gpt-5.5", session_id="sess-1"
+        )
         conn.set_session_model.assert_not_called()
         assert applied is True
 
@@ -4631,7 +4628,7 @@ class TestReapplySessionModelOnResume:
             code=-32603, message="internal error"
         )
         applied = await _reapply_session_model_on_resume(
-            conn, "codex-acp", "sess-1", "gpt-5.4/low", via_config_option=False
+            conn, "codex-acp", "sess-1", "gpt-5.5", via_config_option=False
         )
         conn.set_session_model.assert_awaited_once()
         assert applied is False
@@ -4709,31 +4706,29 @@ class TestSetACPModel:
         return agent
 
     def test_switches_model_on_live_codex_session(self):
-        # Default (models-capability) session ⇒ set_session_model (combined id).
+        # Default (models-capability) session ⇒ set_session_model, id as-is.
         agent = self._wire(_make_agent(), "codex-acp")
-        agent.set_acp_model("gpt-5.4/low")
+        agent.set_acp_model("gpt-5.5")
         agent._conn.set_session_model.assert_awaited_once_with(
-            model_id="gpt-5.4/low", session_id="sess-1"
+            model_id="gpt-5.5", session_id="sess-1"
         )
         agent._conn.set_config_option.assert_not_called()
         agent._executor.run_async.assert_called_once()
         # Sentinel LLM + metrics reflect the live model for cost/token tracking.
-        assert agent.llm.model == "gpt-5.4/low"
-        assert agent.llm.metrics.model_name == "gpt-5.4/low"
+        assert agent.llm.model == "gpt-5.5"
+        assert agent.llm.metrics.model_name == "gpt-5.5"
 
-    def test_switches_codex_via_config_option_splits_model_and_effort(self):
-        # codex-acp 0.16 configOptions: the combined id is split into a bare
-        # `model` preset + a separate `reasoning_effort` option.
+    def test_switches_codex_via_config_option_single_call(self):
+        # codex-acp 0.16 configOptions: the bare preset id applies as a single
+        # `model` selection (reasoning effort is a separate, unmanaged option).
         agent = self._wire(_make_agent(), "codex-acp", via_config_option=True)
-        agent.set_acp_model("gpt-5.4/low")
-        assert agent._conn.set_config_option.await_args_list == [
-            call(config_id="model", value="gpt-5.4", session_id="sess-1"),
-            call(config_id="reasoning_effort", value="low", session_id="sess-1"),
-        ]
+        agent.set_acp_model("gpt-5.5")
+        agent._conn.set_config_option.assert_awaited_once_with(
+            config_id="model", value="gpt-5.5", session_id="sess-1"
+        )
         agent._conn.set_session_model.assert_not_called()
-        # The agent's surfaced/persisted model stays the combined registry id.
-        assert agent.llm.model == "gpt-5.4/low"
-        assert agent._current_model_id == "gpt-5.4/low"
+        assert agent.llm.model == "gpt-5.5"
+        assert agent._current_model_id == "gpt-5.5"
 
     def test_switches_claude_via_config_option_single_call(self):
         # A bare id (no `/`) applies as a single `model` selection — no effort.
@@ -4752,12 +4747,12 @@ class TestSetACPModel:
             code=-32601, message="Method not found"
         )
         with pytest.raises(ValueError, match="rejected set_session_model"):
-            agent.set_acp_model("gpt-5.4/low")
+            agent.set_acp_model("gpt-5.5")
         agent._conn.set_config_option.assert_not_called()
         agent._executor.run_async.assert_called_once()
         # Mechanism + sentinel model are left unchanged on a failed switch.
         assert agent._model_via_config_option is False
-        assert agent.llm.model != "gpt-5.4/low"
+        assert agent.llm.model != "gpt-5.5"
 
     def test_switch_invalid_model_raises_value_error(self):
         # A -32602 invalid-params is a real client error, not a wrong-mechanism
@@ -4852,7 +4847,7 @@ class TestSetACPModel:
         # The protocol round-trip runs under the conversation state lock, so it
         # must be bounded to avoid wedging the lock if the server never answers.
         agent = self._wire(_make_agent(acp_prompt_timeout=42.0), "codex-acp")
-        agent.set_acp_model("gpt-5.4/low")
+        agent.set_acp_model("gpt-5.5")
         _, kwargs = agent._executor.run_async.call_args
         assert kwargs["timeout"] == 42.0
 
@@ -7106,15 +7101,15 @@ class TestExtractSessionModelsNormalization:
     def test_maps_fields_through(self):
         response = MagicMock()
         response.models = MagicMock()
-        response.models.current_model_id = "gpt-5.4/low"
+        response.models.current_model_id = "gpt-5.4"
         response.models.available_models = [
-            self._raw("gpt-5.4/low", "gpt-5.4 (low)", "Strong everyday model."),
+            self._raw("gpt-5.4", "GPT-5.4", "Strong everyday model."),
         ]
         _cur, avail, _ = _extract_session_models(response)
         assert avail == [
             ACPModelInfo(
-                model_id="gpt-5.4/low",
-                name="gpt-5.4 (low)",
+                model_id="gpt-5.4",
+                name="GPT-5.4",
                 description="Strong everyday model.",
             )
         ]
@@ -7138,7 +7133,7 @@ class TestExtractSessionModelsNormalization:
 class TestConfigOptionModelMechanism:
     """Model selection via the ``model`` ``configOptions`` select.
 
-    codex-acp 0.16+ and claude-agent-acp 0.46+ dropped the UNSTABLE ``models``
+    codex-acp 0.16+ and claude-agent-acp 0.44+ dropped the UNSTABLE ``models``
     capability + ``session/set_model`` in favour of a ``model`` config-option
     select driven by ``session/set_config_option``. ``_extract_session_models``
     reads that select and reports the apply mechanism as its third return value
@@ -7158,7 +7153,7 @@ class TestConfigOptionModelMechanism:
         return SimpleNamespace(models=models, config_options=config_options)
 
     def test_extracts_model_state_from_config_option(self):
-        # claude-agent-acp 0.46: model select with short aliases.
+        # claude-agent-acp 0.44: model select with short aliases.
         response = self._response(
             config_options=[
                 self._select(
@@ -7289,8 +7284,8 @@ class TestConfigOptionModelMechanism:
 # Parsed through the real ``NewSessionResponse`` so the test exercises the
 # genuine schema, INCLUDING the ``SessionConfigOption`` RootModel wrapper the
 # ``agent-client-protocol`` lib applies to ``config_options`` on 0.8.x (where a
-# naive ``opt.id`` read returns ``None``). This is the exact failure the QA bot
-# surfaced; the detection helper unwraps ``.root`` so it works on 0.8.x + 0.10.x.
+# naive ``opt.id`` read returns ``None``). The detection helper unwraps
+# ``.root`` so it works on 0.8.x + 0.10.x.
 def _select_dict(opt_id, current, values, category=None):
     return {
         "id": opt_id,
@@ -7354,10 +7349,10 @@ class TestDetectionAgainstRealSessionResponses:
     """Detection + extraction against the real CLI ``session/new`` wire shapes,
     parsed through the actual ``acp.schema.NewSessionResponse``.
 
-    Guards the real production bug the QA bot surfaced: on
-    ``agent-client-protocol`` 0.8.x each ``config_options`` entry is a
-    ``SessionConfigOption`` RootModel (``.root``), so a naive ``opt.id`` read is
-    ``None`` and the SDK would fall back to the removed ``session/set_model``.
+    Guards a schema-shape regression: on ``agent-client-protocol`` 0.8.x each
+    ``config_options`` entry is a ``SessionConfigOption`` RootModel (``.root``),
+    so a naive ``opt.id`` read is ``None`` and the SDK would fall back to the
+    removed ``session/set_model``.
     """
 
     def test_config_options_is_the_schema_field_name(self):
@@ -7421,63 +7416,32 @@ class TestApplyAcpModelNoFallback:
         conn.set_config_option.assert_not_called()  # no fallback
 
 
-class TestCodexModelEffortSplit:
-    """codex-acp 0.16 splits the 0.15 combined ``<model>/<effort>`` id into a
-    bare ``model`` preset + a separate ``reasoning_effort`` configOption."""
-
-    def test_splits_combined_id(self):
-        assert _split_codex_model_effort("gpt-5.5/medium") == ("gpt-5.5", "medium")
-        assert _split_codex_model_effort("gpt-5.4-mini/xhigh") == (
-            "gpt-5.4-mini",
-            "xhigh",
-        )
-
-    def test_bare_ids_unchanged(self):
-        # claude / gemini / codex-without-effort ids have no ``/``.
-        assert _split_codex_model_effort("opus[1m]") == ("opus[1m]", None)
-        assert _split_codex_model_effort("sonnet") == ("sonnet", None)
-        assert _split_codex_model_effort("auto") == ("auto", None)
-        assert _split_codex_model_effort("gpt-5.5") == ("gpt-5.5", None)
+class TestApplyAcpModel:
+    """``_apply_acp_model`` sends the model id verbatim through the mechanism the
+    session advertised — the ``model`` configOption select or
+    ``set_session_model`` — with no id rewriting. (codex 0.16 exposes reasoning
+    effort as a separate, unmanaged ``reasoning_effort`` configOption, so the
+    model ids are bare presets on every provider.)"""
 
     @pytest.mark.asyncio
-    async def test_apply_splits_into_two_config_options(self):
-        # The configOptions apply path sets model (bare) then reasoning_effort.
+    async def test_config_option_single_call(self):
         conn = AsyncMock()
-        await _apply_acp_model(conn, "sess-1", "gpt-5.5/medium", via_config_option=True)
-        assert conn.set_config_option.await_args_list == [
-            call(config_id="model", value="gpt-5.5", session_id="sess-1"),
-            call(config_id="reasoning_effort", value="medium", session_id="sess-1"),
-        ]
+        await _apply_acp_model(conn, "sess-1", "gpt-5.5", via_config_option=True)
+        conn.set_config_option.assert_awaited_once_with(
+            config_id="model", value="gpt-5.5", session_id="sess-1"
+        )
         conn.set_session_model.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_apply_bare_config_option_single_call(self):
+    async def test_set_session_model_branch(self):
         conn = AsyncMock()
-        await _apply_acp_model(conn, "sess-1", "opus[1m]", via_config_option=True)
-        conn.set_config_option.assert_awaited_once_with(
-            config_id="model", value="opus[1m]", session_id="sess-1"
+        await _apply_acp_model(
+            conn, "sess-1", "gemini-2.5-pro", via_config_option=False
         )
-
-    @pytest.mark.asyncio
-    async def test_reasoning_effort_failure_is_tolerated(self):
-        # The model selection is the switch; a rejected reasoning_effort must NOT
-        # fail the whole apply (else the live session changed model while the
-        # caller reports failure and leaves llm.model stale). The model call
-        # succeeded, so _apply_acp_model returns normally. #3772
-        conn = AsyncMock()
-
-        async def _effort_fails(*, config_id, value, session_id):
-            if config_id == "reasoning_effort":
-                raise ACPRequestError(code=-32603, message="transient")
-
-        conn.set_config_option.side_effect = _effort_fails
-        # Does not raise: the model preset applied, only the effort refinement
-        # was dropped.
-        await _apply_acp_model(conn, "sess-1", "gpt-5.5/medium", via_config_option=True)
-        assert conn.set_config_option.await_args_list == [
-            call(config_id="model", value="gpt-5.5", session_id="sess-1"),
-            call(config_id="reasoning_effort", value="medium", session_id="sess-1"),
-        ]
+        conn.set_session_model.assert_awaited_once_with(
+            model_id="gemini-2.5-pro", session_id="sess-1"
+        )
+        conn.set_config_option.assert_not_called()
 
 
 class TestACPAgentAvailableModelsProperty:
