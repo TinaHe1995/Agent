@@ -1,0 +1,379 @@
+"""HTTP endpoints for managing named ``AgentProfile`` launch specs.
+
+Mirrors ``profiles_router.py`` (the LLM ``/api/profiles`` router) but serves the
+reference-bearing :class:`~openhands.sdk.profiles.AgentProfile` union and keeps a
+*separate* active pointer (``active_agent_profile_id``). Activation here is
+pointer-only — unlike the LLM ``/activate`` it must **not** write
+``agent_settings`` (the creation-time-only contract).
+
+``POST /{id}/materialize`` is a fast-follow once the resolver (#3717) lands; it
+is deliberately not implemented here so this router ships independently.
+"""
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Annotated, Any
+
+from fastapi import APIRouter, HTTPException, Path, Request, status
+from pydantic import BaseModel, Field, ValidationError
+
+from openhands.agent_server._secrets_exposure import (
+    build_expose_context,
+    get_cipher,
+    get_config,
+    parse_expose_secrets_header,
+    translate_missing_cipher,
+)
+from openhands.agent_server.persistence import (
+    PersistedSettings,
+    get_settings_store,
+)
+from openhands.sdk.logger import get_logger
+from openhands.sdk.profiles import (
+    ACPAgentProfile,
+    AgentProfileStore,
+    OpenHandsAgentProfile,
+    ProfileLimitExceeded,
+    ProfileReferenced,
+    validate_agent_profile,
+)
+from openhands.sdk.profiles.agent_profile_store import PROFILE_NAME_PATTERN
+from openhands.sdk.settings import AgentSettingsConfig
+
+
+logger = get_logger(__name__)
+
+agent_profiles_router = APIRouter(prefix="/agent-profiles", tags=["Agent Profiles"])
+
+MAX_AGENT_PROFILES = 50
+
+# Name the lazily-seeded migration profile (and its LLM ref fallback).
+SEED_PROFILE_NAME = "default"
+
+ProfileName = Annotated[
+    str,
+    Path(min_length=1, max_length=64, pattern=PROFILE_NAME_PATTERN),
+]
+ProfileId = Annotated[str, Path(min_length=1, max_length=128)]
+
+
+class AgentProfileInfo(BaseModel):
+    """Summary projection of a stored profile (no secret instantiation)."""
+
+    id: str | None = None
+    name: str
+    agent_kind: str = "openhands"
+    revision: int | None = None
+    llm_profile_ref: str | None = None
+    mcp_server_refs: list[str] | None = None
+
+
+class AgentProfileListResponse(BaseModel):
+    profiles: list[AgentProfileInfo]
+    active_agent_profile_id: str | None = None
+
+
+class AgentProfileDetailResponse(BaseModel):
+    name: str
+    profile: dict[str, Any]
+
+
+class AgentProfileMutationResponse(BaseModel):
+    name: str
+    message: str
+
+
+class ActivateAgentProfileResponse(BaseModel):
+    id: str
+    message: str
+    agent_settings_applied: bool = False
+
+
+class RenameAgentProfileRequest(BaseModel):
+    new_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=PROFILE_NAME_PATTERN,
+    )
+
+
+@contextmanager
+def _store_errors() -> Iterator[None]:
+    """Map ``AgentProfileStore`` / FK errors to HTTP responses."""
+    try:
+        yield
+    except ProfileReferenced as e:
+        # Names the referrers so the caller knows what to detach first.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except FileExistsError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent profile store is busy. Please retry.",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def _build_seed_profile(
+    agent_settings: AgentSettingsConfig, active_llm_profile: str | None
+) -> OpenHandsAgentProfile | ACPAgentProfile:
+    """Build one conservative ``AgentProfile`` from the current ``agent_settings``.
+
+    Carries only the cleanly-overlapping fields; ``mcp_server_refs=None`` exposes
+    all of the user's MCP servers. An OpenHands profile references the active LLM
+    profile (falling back to ``"default"`` when none is set — a soft ref the
+    resolver checks at materialize time).
+    """
+    if agent_settings.agent_kind == "acp":
+        return ACPAgentProfile(
+            name=SEED_PROFILE_NAME,
+            acp_server=agent_settings.acp_server,
+            acp_model=agent_settings.acp_model,
+            acp_session_mode=agent_settings.acp_session_mode,
+            acp_prompt_timeout=agent_settings.acp_prompt_timeout,
+            mcp_server_refs=None,
+        )
+    return OpenHandsAgentProfile(
+        name=SEED_PROFILE_NAME,
+        llm_profile_ref=active_llm_profile or SEED_PROFILE_NAME,
+        agent=agent_settings.agent,
+        enable_sub_agents=agent_settings.enable_sub_agents,
+        tool_concurrency_limit=agent_settings.tool_concurrency_limit,
+        mcp_server_refs=None,
+    )
+
+
+def _seed_default_profile(
+    store: AgentProfileStore, request: Request, settings: PersistedSettings
+) -> None:
+    """Persist one default profile and point ``active_agent_profile_id`` at it."""
+    profile = _build_seed_profile(settings.agent_settings, settings.active_profile)
+    with _store_errors():
+        store.save(profile, max_profiles=MAX_AGENT_PROFILES)
+
+    profile_id = str(profile.id)
+    settings_store = get_settings_store(get_config(request))
+
+    def set_pointer(s: PersistedSettings) -> PersistedSettings:
+        s.active_agent_profile_id = profile_id
+        return s
+
+    settings_store.update(set_pointer)
+    logger.info(f"Seeded default agent profile '{profile.name}' (id={profile_id})")
+
+
+def _summary_id_for_name(store: AgentProfileStore, name: str) -> str | None:
+    """Return the stable id of the profile stored under ``name``, if present."""
+    with _store_errors():
+        for summary in store.list_summaries():
+            if summary.get("name") == name:
+                sid = summary.get("id")
+                return str(sid) if sid is not None else None
+    return None
+
+
+@agent_profiles_router.get("", response_model=AgentProfileListResponse)
+async def list_agent_profiles(request: Request) -> AgentProfileListResponse:
+    """List all stored agent profiles and the active pointer.
+
+    On the first call against an empty store with no active pointer, lazily
+    seeds one default profile from the current ``agent_settings`` and activates
+    it (the one-time migration that replaces a dedicated seed step).
+    """
+    config = get_config(request)
+    settings_store = get_settings_store(config)
+    settings = settings_store.load() or PersistedSettings()
+
+    store = AgentProfileStore()
+    with _store_errors():
+        existing = store.list()
+
+    if not existing and settings.active_agent_profile_id is None:
+        _seed_default_profile(store, request, settings)
+        settings = settings_store.load() or settings
+
+    with _store_errors():
+        summaries = store.list_summaries()
+
+    return AgentProfileListResponse(
+        profiles=[AgentProfileInfo(**s) for s in summaries],
+        active_agent_profile_id=settings.active_agent_profile_id,
+    )
+
+
+@agent_profiles_router.get("/{name}", response_model=AgentProfileDetailResponse)
+async def get_agent_profile(
+    request: Request, name: ProfileName
+) -> AgentProfileDetailResponse:
+    """Get a stored profile.
+
+    Use the ``X-Expose-Secrets`` header to control ``skills[].mcp_tools`` secret
+    exposure (``encrypted`` / ``plaintext``); absent, those values are masked.
+    """
+    expose_mode = parse_expose_secrets_header(request)
+    cipher = get_cipher(request)
+
+    store = AgentProfileStore()
+    with _store_errors():
+        profile = store.load(name, cipher=cipher)
+
+    context = build_expose_context(expose_mode, cipher)
+    with translate_missing_cipher():
+        payload = profile.model_dump(mode="json", context=context)
+
+    return AgentProfileDetailResponse(name=name, profile=payload)
+
+
+@agent_profiles_router.post(
+    "/{name}",
+    response_model=AgentProfileMutationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def save_agent_profile(
+    request: Request, name: ProfileName, body: dict[str, Any]
+) -> AgentProfileMutationResponse:
+    """Save an ``AgentProfile`` under ``name`` (overwriting a namesake).
+
+    The path ``name`` is authoritative — it overrides any ``name`` in the body.
+    With ``OH_SECRET_KEY`` configured, ``skills[].mcp_tools`` secrets are
+    encrypted at rest; otherwise they are redacted. Returns 409 if creating a
+    new profile would exceed ``MAX_AGENT_PROFILES``.
+    """
+    cipher = get_cipher(request)
+    try:
+        profile = validate_agent_profile({**body, "name": name})
+    except (ValidationError, ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid agent profile: {type(e).__name__}",
+        )
+
+    store = AgentProfileStore()
+    try:
+        with _store_errors():
+            store.save(profile, cipher=cipher, max_profiles=MAX_AGENT_PROFILES)
+    except ProfileLimitExceeded:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Agent profile limit reached ({MAX_AGENT_PROFILES}). "
+                "Delete a profile before saving a new one."
+            ),
+        )
+
+    logger.info(f"Saved agent profile '{name}'")
+    return AgentProfileMutationResponse(
+        name=name, message=f"Agent profile '{name}' saved"
+    )
+
+
+@agent_profiles_router.delete("/{name}", response_model=AgentProfileMutationResponse)
+async def delete_agent_profile(
+    request: Request, name: ProfileName
+) -> AgentProfileMutationResponse:
+    """Delete a stored profile (idempotent).
+
+    If the deleted profile was the active one, ``active_agent_profile_id`` is
+    cleared.
+    """
+    store = AgentProfileStore()
+    deleted_id = _summary_id_for_name(store, name)
+
+    with _store_errors():
+        store.delete(name)
+
+    if deleted_id is not None:
+        config = get_config(request)
+        settings_store = get_settings_store(config)
+        settings = settings_store.load() or PersistedSettings()
+        if settings.active_agent_profile_id == deleted_id:
+
+            def clear_pointer(s: PersistedSettings) -> PersistedSettings:
+                s.active_agent_profile_id = None
+                return s
+
+            settings_store.update(clear_pointer)
+            logger.info(f"Cleared active pointer for deleted profile '{name}'")
+
+    logger.info(f"Deleted agent profile '{name}'")
+    return AgentProfileMutationResponse(
+        name=name, message=f"Agent profile '{name}' deleted"
+    )
+
+
+@agent_profiles_router.post(
+    "/{name}/rename", response_model=AgentProfileMutationResponse
+)
+async def rename_agent_profile(
+    name: ProfileName, body: RenameAgentProfileRequest
+) -> AgentProfileMutationResponse:
+    """Rename a stored profile atomically.
+
+    The stable ``id`` is preserved, so an active pointer (keyed on ``id``)
+    survives the rename untouched. Returns 404 if the source is missing, 409 if
+    ``new_name`` is taken.
+    """
+    store = AgentProfileStore()
+    with _store_errors():
+        store.rename(name, body.new_name)
+
+    if name == body.new_name:
+        message = f"Agent profile '{name}' unchanged (same name)"
+    else:
+        message = f"Agent profile '{name}' renamed to '{body.new_name}'"
+    logger.info(message)
+    return AgentProfileMutationResponse(name=body.new_name, message=message)
+
+
+@agent_profiles_router.post(
+    "/{profile_id}/activate", response_model=ActivateAgentProfileResponse
+)
+async def activate_agent_profile(
+    request: Request, profile_id: ProfileId
+) -> ActivateAgentProfileResponse:
+    """Activate a profile by its stable ``id`` — pointer only.
+
+    Sets ``active_agent_profile_id`` and nothing else: unlike the LLM
+    ``/activate``, this does **not** write ``agent_settings`` (the
+    creation-time-only contract). Returns 404 if no stored profile has that id.
+    """
+    store = AgentProfileStore()
+    with _store_errors():
+        known_ids = {
+            str(s["id"]) for s in store.list_summaries() if s.get("id") is not None
+        }
+    if profile_id not in known_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent profile with id '{profile_id}' not found",
+        )
+
+    config = get_config(request)
+    settings_store = get_settings_store(config)
+
+    def set_pointer(settings: PersistedSettings) -> PersistedSettings:
+        settings.active_agent_profile_id = profile_id
+        return settings
+
+    try:
+        settings_store.update(set_pointer)
+    except (OSError, PermissionError):
+        logger.error("Failed to activate agent profile - file I/O error")
+        raise HTTPException(status_code=500, detail="Failed to activate agent profile")
+    except RuntimeError as e:
+        logger.error(f"Failed to activate agent profile: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Settings file is corrupted or encrypted with a different key",
+        )
+
+    logger.info(f"Activated agent profile id '{profile_id}'")
+    return ActivateAgentProfileResponse(
+        id=profile_id,
+        message=f"Agent profile '{profile_id}' activated",
+    )

@@ -69,6 +69,10 @@ class SettingsResponse(BaseModel):
         default=None,
         description="Name of the currently active LLM profile, if one is selected.",
     )
+    active_agent_profile_id: str | None = Field(
+        default=None,
+        description="Stable id of the currently active AgentProfile, if one is set.",
+    )
     misc_settings: dict[str, Any] = Field(default_factory=dict)
 
     def get_agent_settings(self) -> AgentSettingsConfig:
@@ -112,6 +116,10 @@ class SettingsUpdateRequest(BaseModel):
         default=None,
         pattern=PROFILE_NAME_PATTERN,
         description="Name of the active LLM profile to persist; null clears it.",
+    )
+    active_agent_profile_id: str | None = Field(
+        default=None,
+        description="Stable id of the active AgentProfile to persist; null clears it.",
     )
 
 

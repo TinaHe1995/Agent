@@ -522,6 +522,54 @@ def test_patch_settings_rejects_invalid_active_profile(client_with_settings):
     assert response.status_code == 422
 
 
+def test_patch_settings_active_agent_profile_id_independent(client_with_settings):
+    """active_agent_profile_id sets/clears independently of active_profile."""
+    set_response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_profile": "fast-profile", "active_agent_profile_id": "abc-123"},
+    )
+    assert set_response.status_code == 200
+    body = set_response.json()
+    assert body["active_profile"] == "fast-profile"
+    assert body["active_agent_profile_id"] == "abc-123"
+
+    # Clearing the agent pointer must leave the LLM profile pointer untouched.
+    clear_response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_agent_profile_id": None},
+    )
+    assert clear_response.status_code == 200
+    cleared = clear_response.json()
+    assert cleared["active_agent_profile_id"] is None
+    assert cleared["active_profile"] == "fast-profile"
+
+    refetch = client_with_settings.get("/api/settings").json()
+    assert refetch["active_agent_profile_id"] is None
+    assert refetch["active_profile"] == "fast-profile"
+
+
+def test_existing_settings_load_with_null_active_agent_profile_id(
+    temp_persistence_dir, config_with_settings
+):
+    """A settings file predating the field loads with active_agent_profile_id=None."""
+    _write_settings_file(
+        temp_persistence_dir,
+        {
+            "schema_version": PERSISTED_SETTINGS_SCHEMA_VERSION,
+            "agent_settings": {"agent_kind": "openhands"},
+            "active_profile": "legacy-profile",
+        },
+    )
+
+    client = TestClient(create_app(config_with_settings))
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_profile"] == "legacy-profile"
+    assert body["active_agent_profile_id"] is None
+
+
 def test_patch_settings_updates_condenser_config(client_with_settings):
     """PATCH /api/settings can update condenser constructor settings."""
     response = client_with_settings.patch(
@@ -642,7 +690,7 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     assert response.json()["detail"] == (
         "At least one of agent_settings_diff, "
         "conversation_settings_diff, misc_settings_diff, "
-        "or active_profile must be provided"
+        "active_profile, or active_agent_profile_id must be provided"
     )
 
 
