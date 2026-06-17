@@ -293,18 +293,18 @@ class ACPProviderInfo:
 # ``acp_model`` outside these lists is always allowed.
 # ---------------------------------------------------------------------------
 
-# Canonical model IDs the Claude Code CLI accepts, curated to the newest
-# generation per capability tier. ``opus[1m]`` is the SDK-documented
-# version-agnostic 1M-context alias (auto-tracks the newest 1M-capable model —
-# keep its label version-less to match). ``opusplan`` routes planning to Opus
-# and execution to Sonnet.
+# Model IDs the Claude Code CLI accepts, mirroring the ``model`` configOptions
+# select claude-agent-acp 0.46.0 reports at ``session/new`` (the short aliases
+# the CLI's own ``/model`` menu offers, switched via ``set_config_option``).
+# ``opus[1m]`` is the SDK-documented version-agnostic 1M-context alias and the
+# CLI's own default (``currentValue``); ``default`` is the CLI's recommended
+# tier (Opus 4.8 · 1M). The CLI also accepts ids outside this list, so these
+# are curated suggestions, not an access check.
 _CLAUDE_MODELS: tuple[ACPModelOption, ...] = (
-    ACPModelOption(id="claude-fable-5", label="Claude Fable 5"),
-    ACPModelOption(id="claude-opus-4-8", label="Claude Opus 4.8"),
-    ACPModelOption(id="opus[1m]", label="Claude Opus (1M)"),
-    ACPModelOption(id="claude-sonnet-4-6", label="Claude Sonnet 4.6"),
-    ACPModelOption(id="claude-haiku-4-5", label="Claude Haiku 4.5"),
-    ACPModelOption(id="opusplan", label="Opus (plan) + Sonnet (execute)"),
+    ACPModelOption(id="default", label="Default (recommended)"),
+    ACPModelOption(id="opus[1m]", label="Claude Opus 4.8 (1M)"),
+    ACPModelOption(id="sonnet", label="Claude Sonnet 4.6"),
+    ACPModelOption(id="haiku", label="Claude Haiku 4.5"),
 )
 
 # Model IDs accepted by ``@zed-industries/codex-acp`` (``session/new``
@@ -323,20 +323,19 @@ _CODEX_MODELS: tuple[ACPModelOption, ...] = (
     ACPModelOption(id="gpt-5.4-mini/xhigh", label="GPT-5.4 Mini (xhigh)"),
 )
 
-# Model IDs accepted by ``@google/gemini-cli --acp``. The ``auto-gemini-*``
-# entries delegate version selection to the CLI's router; the explicit
-# ``gemini-3.1-*`` / ``gemini-2.5-*`` entries pin to a specific snapshot.
+# Model IDs accepted by ``@google/gemini-cli --acp``. Mirrors the
+# ``availableModels`` the CLI reports at ``session/new`` on the pinned version
+# (gemini-cli 0.46.0). ``auto`` delegates version selection to the CLI's
+# router; the explicit ``gemini-*`` entries pin to a specific snapshot. The CLI
+# also accepts ids outside this list (it remaps them at generation), so these
+# are curated suggestions, not an access check.
 _GEMINI_MODELS: tuple[ACPModelOption, ...] = (
-    ACPModelOption(id="auto-gemini-3", label="Auto (Gemini 3)"),
-    ACPModelOption(id="auto-gemini-2.5", label="Auto (Gemini 2.5)"),
-    ACPModelOption(id="gemini-3.1-pro-preview", label="Gemini 3.1 Pro (preview)"),
+    ACPModelOption(id="auto", label="Auto"),
+    ACPModelOption(id="gemini-3-pro-preview", label="Gemini 3 Pro (preview)"),
     ACPModelOption(id="gemini-3-flash-preview", label="Gemini 3 Flash (preview)"),
-    ACPModelOption(
-        id="gemini-3.1-flash-lite-preview", label="Gemini 3.1 Flash Lite (preview)"
-    ),
+    ACPModelOption(id="gemini-3.1-flash-lite", label="Gemini 3.1 Flash Lite"),
     ACPModelOption(id="gemini-2.5-pro", label="Gemini 2.5 Pro"),
     ACPModelOption(id="gemini-2.5-flash", label="Gemini 2.5 Flash"),
-    ACPModelOption(id="gemini-2.5-flash-lite", label="Gemini 2.5 Flash Lite"),
 )
 
 
@@ -378,9 +377,15 @@ _GEMINI_FILE_SECRETS: tuple[ACPFileSecretSpec, ...] = (
 # permission-disabling session mode. In the image the binary rewrite in
 # `ACPAgentSettings.resolve_acp_command` runs the pinned `binary_name` instead,
 # so the `@version` suffix is a no-op there.
-CLAUDE_AGENT_ACP_VERSION = "0.30.0"
-CODEX_ACP_VERSION = "0.15.0"
-GEMINI_CLI_VERSION = "0.38.0"
+#
+# codex-acp 0.16.0 and claude-agent-acp 0.46.0 dropped the UNSTABLE ``models``
+# capability + ``session/set_model`` in favour of a ``model`` ``configOptions``
+# select driven by ``session/set_config_option``; the SDK auto-detects and uses
+# the right call (see ``_session_selects_model_via_config_option`` in
+# acp_agent.py), so model switching keeps working across the bump (#3772).
+CLAUDE_AGENT_ACP_VERSION = "0.46.0"
+CODEX_ACP_VERSION = "0.16.0"
+GEMINI_CLI_VERSION = "0.46.0"
 
 
 ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType(
@@ -397,17 +402,20 @@ ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType(
             base_url_env_var="ANTHROPIC_BASE_URL",
             default_session_mode="bypassPermissions",
             agent_name_patterns=("claude-agent",),
-            # claude-agent-acp 0.30.0 silently ignores the session-_meta model
-            # selection (the requested model only becomes a picker option; the
-            # session keeps running "default"), so the init path must push the
-            # model via session/set_model like codex/gemini (#3654). The _meta
+            # claude-agent-acp ignores the session-_meta model selection (the
+            # requested model only becomes a picker option; the session keeps
+            # running its default), so the init path must push the model via a
+            # protocol call (#3654). On 0.46.0 that call is
+            # ``set_config_option(configId="model")`` rather than
+            # ``set_session_model`` (auto-detected from session/new); the _meta
             # payload (session_meta_key below) is still sent — harmless, and
             # picks up the same model if a future CLI honours it.
             supports_set_session_model=True,
             supports_runtime_model_switch=True,
             session_meta_key="claudeCode",
             available_models=_CLAUDE_MODELS,
-            default_model="claude-opus-4-8",
+            # The CLI's own default (model configOptions ``currentValue``).
+            default_model="opus[1m]",
             binary_name="claude-agent-acp",
             data_dir_env_var="CLAUDE_CONFIG_DIR",
         ),
@@ -443,18 +451,25 @@ ACP_PROVIDERS: Mapping[str, ACPProviderInfo] = MappingProxyType(
             ),
             api_key_env_var="GEMINI_API_KEY",
             base_url_env_var="GEMINI_BASE_URL",
-            default_session_mode="yolo",
+            # gemini-cli 0.46.0 rejects ``set_session_mode("yolo")`` at session
+            # init with a JSON-RPC -32603 (it gates yolo on folder-trust that is
+            # not yet established right after session/new), which would crash
+            # headless startup. ``default`` is accepted at init, and the SDK's
+            # ACP bridge already auto-approves every ``session/request_permission``
+            # the server sends, so permission prompts never block regardless of
+            # mode — making ``default`` the headless-safe choice. See #3772.
+            default_session_mode="default",
             agent_name_patterns=("gemini-cli",),
             supports_set_session_model=True,
             supports_runtime_model_switch=True,
             session_meta_key=None,
             available_models=_GEMINI_MODELS,
-            # Match the Gemini CLI's own no-model-configured default
-            # (``DEFAULT_GEMINI_MODEL_AUTO``), i.e. the auto-router — not a
-            # manually-pinned snapshot. Pinning ``gemini-2.5-pro`` here would
-            # make downstream clients persist a value that bypasses the CLI's
-            # auto-routing.
-            default_model="auto-gemini-2.5",
+            # Match the Gemini CLI's own auto-router rather than a manually
+            # pinned snapshot. Pinning e.g. ``gemini-2.5-pro`` here would make
+            # downstream clients persist a value that bypasses the CLI's
+            # auto-routing. ``auto`` is the router id the CLI reports in its
+            # 0.46.0 ``availableModels``.
+            default_model="auto",
             file_secrets=_GEMINI_FILE_SECRETS,
             binary_name="gemini",
             # Gemini CLI has no dedicated config-dir var; it hard-codes
@@ -516,7 +531,7 @@ def detect_acp_provider_by_command(
     *caller-controlled*: each token is reduced to its basename (last path segment,
     minus a trailing ``@version`` pin) and a provider matches only when that
     basename *starts with* one of its patterns. This accepts the real forms —
-    ``@zed-industries/codex-acp``, ``@google/gemini-cli@0.43.0``,
+    ``@zed-industries/codex-acp``, ``@google/gemini-cli@0.46.0``,
     ``/opt/node_modules/.bin/codex-acp`` — while rejecting incidental substrings
     like ``my-codex-acp-wrapper`` or ``/opt/shims/not-codex-acp`` that a plain
     substring test would misattribute.

@@ -9,6 +9,7 @@ import uuid
 from base64 import urlsafe_b64encode
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +34,7 @@ from openhands.sdk.agent.acp_agent import (
     _reapply_session_model_on_resume,
     _select_auth_method,
     _serialize_tool_content,
+    _session_selects_model_via_config_option,
     _strip_inherited_npm_env,
 )
 from openhands.sdk.agent.acp_models import ACPModelInfo
@@ -4426,41 +4428,49 @@ class TestCodexBaseUrlOverrides:
 
 class TestMaybeSetSessionModel:
     @pytest.mark.asyncio
-    async def test_codex_agent_uses_protocol_model_override(self):
+    async def test_set_session_model_mechanism(self):
+        # ``via_config_option=False`` (gemini-cli, older codex/claude with the
+        # ``models`` capability) applies the model via ``set_session_model``.
         conn = AsyncMock()
         applied = await _maybe_set_session_model(
-            conn, "codex-acp", "session-1", "gpt-5.4"
+            conn, "codex-acp", "session-1", "gpt-5.4", via_config_option=False
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="gpt-5.4",
             session_id="session-1",
         )
+        conn.set_config_option.assert_not_called()
         # The override was actually pushed to the server via the protocol call.
         assert applied is True
 
     @pytest.mark.asyncio
-    async def test_claude_agent_uses_protocol_model_override(self):
-        # claude-agent-acp 0.30.0 silently ignores the session-_meta model
-        # selection (#3654), so the init path pushes the model via the same
-        # one-shot set_session_model call as codex/gemini.
+    async def test_set_config_option_mechanism(self):
+        # ``via_config_option=True`` (codex-acp 0.16+, claude-agent-acp 0.46+)
+        # applies the model via ``set_config_option(configId="model")``.
         conn = AsyncMock()
         applied = await _maybe_set_session_model(
             conn,
             "claude-agent-acp",
             "session-1",
-            "claude-opus-4-8",
+            "opus[1m]",
+            via_config_option=True,
         )
-        conn.set_session_model.assert_awaited_once_with(
-            model_id="claude-opus-4-8",
+        conn.set_config_option.assert_awaited_once_with(
+            config_id="model",
+            value="opus[1m]",
             session_id="session-1",
         )
+        conn.set_session_model.assert_not_called()
         assert applied is True
 
     @pytest.mark.asyncio
     async def test_missing_model_skips_protocol_override(self):
         conn = AsyncMock()
-        applied = await _maybe_set_session_model(conn, "codex-acp", "session-1", None)
+        applied = await _maybe_set_session_model(
+            conn, "codex-acp", "session-1", None, via_config_option=True
+        )
         conn.set_session_model.assert_not_called()
+        conn.set_config_option.assert_not_called()
         assert applied is False
 
     @pytest.mark.asyncio
@@ -4469,7 +4479,7 @@ class TestMaybeSetSessionModel:
         # for model selection, which is a standard ACP method.
         conn = AsyncMock()
         applied = await _maybe_set_session_model(
-            conn, "devin-cli", "session-1", "kimi-k2-6"
+            conn, "devin-cli", "session-1", "kimi-k2-6", via_config_option=False
         )
         conn.set_session_model.assert_not_called()
         conn.set_config_option.assert_awaited_once_with(
@@ -4488,7 +4498,7 @@ class TestMaybeSetSessionModel:
             code=-32601, message="method not found"
         )
         applied = await _maybe_set_session_model(
-            conn, "some-custom-acp", "session-1", "whatever"
+            conn, "some-custom-acp", "session-1", "whatever", via_config_option=False
         )
         conn.set_session_model.assert_not_called()
         conn.set_config_option.assert_awaited_once()
@@ -4499,12 +4509,18 @@ class TestReapplySessionModelOnResume:
     """Resume reapplies the persisted model via the runtime-switch gate."""
 
     @pytest.mark.asyncio
-    async def test_claude_reapplies_persisted_model_on_resume(self):
+    async def test_reapply_via_set_session_model_mechanism(self):
         # load_session() carries no model selection, so on resume the persisted
-        # model must be reapplied via the runtime-switch gate.
+        # model must be reapplied via the runtime-switch gate. Servers with the
+        # ``models`` capability (gemini-cli, older codex/claude) use
+        # ``set_session_model``.
         conn = AsyncMock()
         applied = await _reapply_session_model_on_resume(
-            conn, "claude-agent-acp", "sess-1", "claude-haiku-4-5-20251001"
+            conn,
+            "claude-agent-acp",
+            "sess-1",
+            "claude-haiku-4-5-20251001",
+            via_config_option=False,
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="claude-haiku-4-5-20251001", session_id="sess-1"
@@ -4512,23 +4528,27 @@ class TestReapplySessionModelOnResume:
         assert applied is True
 
     @pytest.mark.asyncio
-    async def test_codex_reapplies_persisted_model_on_resume(self):
+    async def test_reapply_via_set_config_option_mechanism(self):
+        # codex-acp 0.16+/claude-agent-acp 0.46+ reapply via
+        # ``set_config_option(configId="model")``.
         conn = AsyncMock()
         applied = await _reapply_session_model_on_resume(
-            conn, "codex-acp", "sess-1", "gpt-5.4/low"
+            conn, "codex-acp", "sess-1", "gpt-5.4/low", via_config_option=True
         )
-        conn.set_session_model.assert_awaited_once_with(
-            model_id="gpt-5.4/low", session_id="sess-1"
+        conn.set_config_option.assert_awaited_once_with(
+            config_id="model", value="gpt-5.4/low", session_id="sess-1"
         )
+        conn.set_session_model.assert_not_called()
         assert applied is True
 
     @pytest.mark.asyncio
     async def test_missing_model_skips_reapply(self):
         conn = AsyncMock()
         applied = await _reapply_session_model_on_resume(
-            conn, "claude-agent-acp", "sess-1", None
+            conn, "claude-agent-acp", "sess-1", None, via_config_option=True
         )
         conn.set_session_model.assert_not_called()
+        conn.set_config_option.assert_not_called()
         assert applied is False
 
     @pytest.mark.asyncio
@@ -4537,7 +4557,7 @@ class TestReapplySessionModelOnResume:
         # as a fallback, which is a standard ACP method.
         conn = AsyncMock()
         applied = await _reapply_session_model_on_resume(
-            conn, "devin-cli", "sess-1", "kimi-k2-6"
+            conn, "devin-cli", "sess-1", "kimi-k2-6", via_config_option=False
         )
         conn.set_session_model.assert_not_called()
         conn.set_config_option.assert_awaited_once_with(
@@ -4569,7 +4589,7 @@ class TestReapplySessionModelOnResume:
             return_value=unsupported,
         ):
             applied = await _reapply_session_model_on_resume(
-                conn, "legacy-acp", "sess-1", "x"
+                conn, "legacy-acp", "sess-1", "x", via_config_option=False
             )
         conn.set_session_model.assert_not_called()
         assert applied is False
@@ -4584,7 +4604,7 @@ class TestReapplySessionModelOnResume:
             code=-32601, message="method not found"
         )
         applied = await _reapply_session_model_on_resume(
-            conn, "some-custom-acp", "sess-1", "whatever"
+            conn, "some-custom-acp", "sess-1", "whatever", via_config_option=False
         )
         conn.set_config_option.assert_awaited_once()
         # Rejected => the live session kept the server default, so the override
@@ -4601,7 +4621,7 @@ class TestReapplySessionModelOnResume:
             code=-32603, message="internal error"
         )
         applied = await _reapply_session_model_on_resume(
-            conn, "codex-acp", "sess-1", "gpt-5.4/low"
+            conn, "codex-acp", "sess-1", "gpt-5.4/low", via_config_option=False
         )
         conn.set_session_model.assert_awaited_once()
         assert applied is False
@@ -4650,28 +4670,46 @@ class TestHasLiveACPSession:
 
 
 class TestSetACPModel:
-    """Runtime (mid-conversation) model switching via set_session_model."""
+    """Runtime (mid-conversation) model switching via the session's mechanism."""
 
     @staticmethod
-    def _wire(agent: ACPAgent, agent_name: str) -> ACPAgent:
+    def _wire(
+        agent: ACPAgent, agent_name: str, *, via_config_option: bool = False
+    ) -> ACPAgent:
         agent._conn = MagicMock()
         agent._session_id = "sess-1"
         agent._agent_name = agent_name
+        agent._model_via_config_option = via_config_option
         executor = MagicMock()
         executor.run_async = MagicMock()
         agent._executor = executor
         return agent
 
     def test_switches_model_on_live_codex_session(self):
+        # Default (models-capability) session ⇒ set_session_model.
         agent = self._wire(_make_agent(), "codex-acp")
         agent.set_acp_model("gpt-5.4/low")
         agent._conn.set_session_model.assert_called_once_with(
             model_id="gpt-5.4/low", session_id="sess-1"
         )
+        agent._conn.set_config_option.assert_not_called()
         agent._executor.run_async.assert_called_once()
         # Sentinel LLM + metrics reflect the live model for cost/token tracking.
         assert agent.llm.model == "gpt-5.4/low"
         assert agent.llm.metrics.model_name == "gpt-5.4/low"
+
+    def test_switches_model_via_config_option_session(self):
+        # configOptions session (codex-acp 0.16+, claude-agent-acp 0.46+) ⇒
+        # set_config_option(configId="model").
+        agent = self._wire(_make_agent(), "codex-acp", via_config_option=True)
+        agent.set_acp_model("gpt-5.4/low")
+        agent._conn.set_config_option.assert_called_once_with(
+            config_id="model", value="gpt-5.4/low", session_id="sess-1"
+        )
+        agent._conn.set_session_model.assert_not_called()
+        agent._executor.run_async.assert_called_once()
+        assert agent.llm.model == "gpt-5.4/low"
+        assert agent._current_model_id == "gpt-5.4/low"
 
     def test_claude_provider_supports_runtime_switch(self):
         agent = self._wire(_make_agent(), "claude-agent-acp")
@@ -5041,9 +5079,11 @@ class TestACPPromptRetry:
 class TestGeminiSessionModel:
     @pytest.mark.asyncio
     async def test_gemini_cli_uses_protocol_model_override(self):
+        # gemini-cli keeps the ``models`` capability, so model selection rides
+        # ``set_session_model`` (via_config_option=False).
         conn = AsyncMock()
         await _maybe_set_session_model(
-            conn, "gemini-cli", "session-1", "gemini-3-flash"
+            conn, "gemini-cli", "session-1", "gemini-3-flash", via_config_option=False
         )
         conn.set_session_model.assert_awaited_once_with(
             model_id="gemini-3-flash",
@@ -7031,6 +7071,120 @@ class TestExtractSessionModelsNormalization:
         ]
         _cur, avail = _extract_session_models(response)
         assert avail == [ACPModelInfo(model_id="good", name="Good", description=None)]
+
+
+class TestConfigOptionModelMechanism:
+    """Model selection via the ``model`` ``configOptions`` select.
+
+    codex-acp 0.16+ and claude-agent-acp 0.46+ dropped the UNSTABLE ``models``
+    capability + ``session/set_model`` in favour of a ``model`` config-option
+    select driven by ``session/set_config_option``. ``_extract_session_models``
+    reads that select, and ``_session_selects_model_via_config_option`` picks
+    the apply mechanism.
+    """
+
+    def _select(self, *, id="model", type="select", current_value, options):
+        opt = SimpleNamespace(
+            id=id, type=type, current_value=current_value, options=options
+        )
+        return opt
+
+    def _opt(self, value, name=None, description=None):
+        return SimpleNamespace(value=value, name=name, description=description)
+
+    def _response(self, *, models=None, config_options):
+        return SimpleNamespace(models=models, config_options=config_options)
+
+    def test_extracts_model_state_from_config_option(self):
+        # claude-agent-acp 0.46: model select with short aliases.
+        response = self._response(
+            config_options=[
+                self._select(
+                    current_value="opus[1m]",
+                    options=[
+                        self._opt("default", "Default (recommended)", "Opus 4.8 · 1M"),
+                        self._opt("opus[1m]", "Opus", "Opus 4.8 · 1M"),
+                        self._opt("sonnet", "Sonnet", "Sonnet 4.6"),
+                        self._opt("haiku", "Haiku", "Haiku 4.5"),
+                    ],
+                )
+            ],
+        )
+        cur, avail = _extract_session_models(response)
+        assert cur == "opus[1m]"
+        assert avail == [
+            ACPModelInfo(
+                model_id="default",
+                name="Default (recommended)",
+                description="Opus 4.8 · 1M",
+            ),
+            ACPModelInfo(model_id="opus[1m]", name="Opus", description="Opus 4.8 · 1M"),
+            ACPModelInfo(model_id="sonnet", name="Sonnet", description="Sonnet 4.6"),
+            ACPModelInfo(model_id="haiku", name="Haiku", description="Haiku 4.5"),
+        ]
+
+    def test_models_capability_wins_over_config_option(self):
+        # If a server somehow carries both, the ``models`` capability is used.
+        models = MagicMock()
+        models.current_model_id = "from-models"
+        models.available_models = []
+        response = self._response(
+            models=models,
+            config_options=[
+                self._select(
+                    current_value="from-config", options=[self._opt("from-config", "X")]
+                )
+            ],
+        )
+        cur, avail = _extract_session_models(response)
+        assert cur == "from-models"
+        assert avail == []
+        assert _session_selects_model_via_config_option(response) is False
+
+    def test_detects_config_option_mechanism(self):
+        response = self._response(
+            config_options=[
+                self._select(
+                    current_value="gpt-5.5", options=[self._opt("gpt-5.5", "GPT-5.5")]
+                )
+            ],
+        )
+        assert _session_selects_model_via_config_option(response) is True
+
+    def test_ignores_non_model_config_options(self):
+        # A ``mode`` select alongside no ``model`` select ⇒ old mechanism.
+        response = self._response(
+            config_options=[
+                SimpleNamespace(
+                    id="mode",
+                    type="select",
+                    current_value="default",
+                    options=[self._opt("default", "Default")],
+                ),
+            ],
+        )
+        assert _session_selects_model_via_config_option(response) is False
+        assert _extract_session_models(response) == (None, None)
+
+    def test_drops_options_without_usable_value(self):
+        response = self._response(
+            config_options=[
+                self._select(
+                    current_value="ok",
+                    options=[
+                        self._opt(value=42),  # non-string -> dropped
+                        self._opt("ok", "Ok"),
+                        self._opt(value="", name="Empty"),  # empty -> dropped
+                    ],
+                )
+            ],
+        )
+        cur, avail = _extract_session_models(response)
+        assert cur == "ok"
+        assert avail == [ACPModelInfo(model_id="ok", name="Ok", description=None)]
+
+    def test_none_response_is_not_config_option(self):
+        assert _session_selects_model_via_config_option(None) is False
 
 
 class TestACPAgentAvailableModelsProperty:
