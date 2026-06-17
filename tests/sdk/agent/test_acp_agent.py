@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
-from acp.schema import PromptResponse
+from acp.schema import NewSessionResponse, PromptResponse
 from pydantic import Field, SecretStr
 
 from openhands.sdk.agent.acp_agent import (
@@ -7214,6 +7214,127 @@ class TestConfigOptionModelMechanism:
 
     def test_none_response_is_not_config_option(self):
         assert _session_selects_model_via_config_option(None) is False
+
+
+# Real ``session/new`` payloads (the wire shape, by-alias) captured from the
+# pinned CLIs and round-tripped through ``acp.schema``. Parsed here through the
+# real ``NewSessionResponse`` — not a hand-built mock — so the test catches any
+# field-name / access-path drift in detection + extraction (e.g. ``models``
+# vs ``configOptions``, ``currentValue``, ``modelId``).
+_CLAUDE_046_SESSION = {
+    "sessionId": "sess-claude",
+    "models": None,
+    "configOptions": [
+        {
+            "id": "mode",
+            "name": "Mode",
+            "type": "select",
+            "currentValue": "default",
+            "options": [{"value": "default", "name": "Default"}],
+        },
+        {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "category": "model",
+            "currentValue": "opus[1m]",
+            "options": [
+                {"value": "default", "name": "Default (recommended)"},
+                {"value": "opus[1m]", "name": "Opus"},
+                {"value": "sonnet", "name": "Sonnet"},
+                {"value": "haiku", "name": "Haiku"},
+            ],
+        },
+        {
+            "id": "effort",
+            "name": "Thinking",
+            "type": "select",
+            "currentValue": "xhigh",
+            "options": [{"value": "xhigh", "name": "Xhigh"}],
+        },
+    ],
+}
+_CODEX_016_SESSION = {
+    "sessionId": "sess-codex",
+    "models": None,
+    "configOptions": [
+        {
+            "id": "mode",
+            "name": "Approval Preset",
+            "type": "select",
+            "currentValue": "read-only",
+            "options": [{"value": "read-only", "name": "Read Only"}],
+        },
+        {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "category": "model",
+            "currentValue": "gpt-5.5",
+            "options": [
+                {"value": "gpt-5.5", "name": "GPT-5.5"},
+                {"value": "gpt-5.4", "name": "GPT-5.4"},
+                {"value": "gpt-5.4-mini", "name": "GPT-5.4-Mini"},
+            ],
+        },
+        {
+            "id": "reasoning_effort",
+            "name": "Reasoning Effort",
+            "type": "select",
+            "currentValue": "xhigh",
+            "options": [{"value": "xhigh", "name": "Xhigh"}],
+        },
+    ],
+}
+_GEMINI_046_SESSION = {
+    "sessionId": "sess-gemini",
+    "models": {
+        "currentModelId": "gemini-3-flash-preview",
+        "availableModels": [
+            {"modelId": "auto", "name": "Auto"},
+            {"modelId": "gemini-3-pro-preview", "name": "gemini-3-pro-preview"},
+            {"modelId": "gemini-3-flash-preview", "name": "gemini-3-flash-preview"},
+            {"modelId": "gemini-2.5-pro", "name": "gemini-2.5-pro"},
+            {"modelId": "gemini-2.5-flash", "name": "gemini-2.5-flash"},
+            {"modelId": "gemini-3.1-flash-lite", "name": "gemini-3.1-flash-lite"},
+        ],
+    },
+    "configOptions": None,
+}
+
+
+class TestDetectionAgainstRealSessionResponses:
+    """Detection + extraction against the real CLI ``session/new`` wire shapes,
+    parsed through the actual ``acp.schema.NewSessionResponse`` (not a mock).
+
+    Guards the exact failure the QA bot hypothesised — that
+    ``getattr(response, "config_options")`` could be ``None`` due to a field-name
+    mismatch — by exercising the genuine alias-mapped schema.
+    """
+
+    def test_claude_046_uses_config_option(self):
+        resp = NewSessionResponse.model_validate(_CLAUDE_046_SESSION)
+        assert _session_selects_model_via_config_option(resp) is True
+        cur, avail = _extract_session_models(resp)
+        assert cur == "opus[1m]"
+        assert avail is not None
+        assert [m.model_id for m in avail] == ["default", "opus[1m]", "sonnet", "haiku"]
+
+    def test_codex_016_uses_config_option(self):
+        resp = NewSessionResponse.model_validate(_CODEX_016_SESSION)
+        assert _session_selects_model_via_config_option(resp) is True
+        cur, avail = _extract_session_models(resp)
+        assert cur == "gpt-5.5"
+        assert avail is not None
+        assert [m.model_id for m in avail] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+
+    def test_gemini_046_uses_set_session_model(self):
+        resp = NewSessionResponse.model_validate(_GEMINI_046_SESSION)
+        assert _session_selects_model_via_config_option(resp) is False
+        cur, avail = _extract_session_models(resp)
+        assert cur == "gemini-3-flash-preview"
+        assert avail is not None
+        assert "gemini-3-pro-preview" in [m.model_id for m in avail]
 
 
 class TestApplyAcpModelFallback:
