@@ -20,6 +20,7 @@ from pydantic import Field, SecretStr
 
 from openhands.sdk.agent.acp_agent import (
     ACPAgent,
+    _apply_acp_model_with_fallback,
     _classify_acp_init_error,
     _codex_auth_file,
     _codex_base_url_overrides,
@@ -27,6 +28,7 @@ from openhands.sdk.agent.acp_agent import (
     _extract_session_models,
     _extract_token_usage,
     _image_url_to_acp_block,
+    _is_method_not_found,
     _mask_json_value,
     _maybe_set_session_model,
     _mcp_config_to_acp_servers,
@@ -4711,6 +4713,33 @@ class TestSetACPModel:
         assert agent.llm.model == "gpt-5.4/low"
         assert agent._current_model_id == "gpt-5.4/low"
 
+    def test_switch_falls_back_on_method_not_found(self):
+        # Detected set_session_model, but the live server only has the
+        # configOptions mechanism: the first apply raises -32601, the switch
+        # retries with the other call and remembers it.
+        agent = self._wire(_make_agent(), "codex-acp", via_config_option=False)
+        agent._executor.run_async.side_effect = [
+            ACPRequestError(code=-32601, message="Method not found"),
+            None,  # retry with the flipped mechanism succeeds
+        ]
+        agent.set_acp_model("gpt-5.4/low")
+        assert agent._executor.run_async.call_count == 2
+        # The working mechanism is remembered for later switches.
+        assert agent._model_via_config_option is True
+        assert agent.llm.model == "gpt-5.4/low"
+        assert agent._current_model_id == "gpt-5.4/low"
+
+    def test_switch_invalid_model_does_not_fall_back(self):
+        # A -32602 invalid-params is a real client error, not a wrong-mechanism
+        # signal: surface it as ValueError without a second call.
+        agent = self._wire(_make_agent(), "codex-acp", via_config_option=True)
+        agent._executor.run_async.side_effect = ACPRequestError(
+            code=-32602, message="Invalid params"
+        )
+        with pytest.raises(ValueError, match="rejected set_config_option"):
+            agent.set_acp_model("nonsense")
+        agent._executor.run_async.assert_called_once()
+
     def test_claude_provider_supports_runtime_switch(self):
         agent = self._wire(_make_agent(), "claude-agent-acp")
         agent.set_acp_model("claude-haiku-4-5-20251001")
@@ -7185,6 +7214,77 @@ class TestConfigOptionModelMechanism:
 
     def test_none_response_is_not_config_option(self):
         assert _session_selects_model_via_config_option(None) is False
+
+
+class TestApplyAcpModelFallback:
+    """Model-apply falls back to the other mechanism on -32601 method-not-found.
+
+    Response-detection is correct for every validated CLI, but it reads an
+    UNSTABLE capability; a misdetect (or a server that moved between mechanisms)
+    must self-heal rather than crash session init / a switch.
+    """
+
+    def test_is_method_not_found(self):
+        assert _is_method_not_found(ACPRequestError(code=-32601, message="x")) is True
+        assert _is_method_not_found(ACPRequestError(code=-32603, message="x")) is False
+        assert _is_method_not_found(ACPRequestError(code=-32602, message="x")) is False
+
+    @pytest.mark.asyncio
+    async def test_config_option_falls_back_to_set_session_model(self):
+        # Detected configOptions, but the server only has set_session_model.
+        conn = AsyncMock()
+        conn.set_config_option.side_effect = ACPRequestError(
+            code=-32601, message="Method not found"
+        )
+        effective = await _apply_acp_model_with_fallback(
+            conn, "sess-1", "gemini-3-flash", via_config_option=True
+        )
+        conn.set_config_option.assert_awaited_once()
+        conn.set_session_model.assert_awaited_once_with(
+            model_id="gemini-3-flash", session_id="sess-1"
+        )
+        assert effective is False  # the mechanism that actually worked
+
+    @pytest.mark.asyncio
+    async def test_set_session_model_falls_back_to_config_option(self):
+        # Detected set_session_model, but the server moved to configOptions
+        # (codex 0.16 / claude 0.46 reached via a stale/degraded detection).
+        conn = AsyncMock()
+        conn.set_session_model.side_effect = ACPRequestError(
+            code=-32601, message="Method not found"
+        )
+        effective = await _apply_acp_model_with_fallback(
+            conn, "sess-1", "opus[1m]", via_config_option=False
+        )
+        conn.set_session_model.assert_awaited_once()
+        conn.set_config_option.assert_awaited_once_with(
+            config_id="model", value="opus[1m]", session_id="sess-1"
+        )
+        assert effective is True
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_when_primary_succeeds(self):
+        conn = AsyncMock()
+        effective = await _apply_acp_model_with_fallback(
+            conn, "sess-1", "sonnet", via_config_option=True
+        )
+        conn.set_config_option.assert_awaited_once()
+        conn.set_session_model.assert_not_called()
+        assert effective is True
+
+    @pytest.mark.asyncio
+    async def test_non_method_not_found_error_propagates(self):
+        # An invalid-model / server error is NOT a wrong-mechanism signal — it
+        # must propagate, not silently try the other call.
+        conn = AsyncMock()
+        conn.set_config_option.side_effect = ACPRequestError(
+            code=-32602, message="Invalid params"
+        )
+        with pytest.raises(ACPRequestError):
+            await _apply_acp_model_with_fallback(
+                conn, "sess-1", "bad", via_config_option=True
+            )
+        conn.set_session_model.assert_not_called()
 
 
 class TestACPAgentAvailableModelsProperty:

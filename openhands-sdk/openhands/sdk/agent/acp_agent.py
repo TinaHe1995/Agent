@@ -140,6 +140,13 @@ _INHERITED_NPM_ENV_PREFIXES: tuple[str, ...] = ("npm_", "NPM_")
 #          upstream model 500s, and transient infrastructure errors.
 _RETRIABLE_SERVER_ERROR_CODES: frozenset[int] = frozenset({-32603})
 
+# -32601 = "Method not found" (JSON-RPC spec). An ACP server raises this when a
+# model-selection call uses the mechanism it does *not* implement — e.g.
+# `session/set_model` on a CLI that moved model selection to `configOptions`
+# (codex-acp 0.16+, claude-agent-acp 0.46+), or vice versa. We use it to fall
+# back to the other mechanism if response-detection picked the wrong one.
+_METHOD_NOT_FOUND_CODE: Final[int] = -32601
+
 
 # Maximum characters for ACP tool call content — matches MAX_CMD_OUTPUT_SIZE
 # used by the terminal tool and the default max_message_chars in LLM config.
@@ -437,6 +444,48 @@ def _apply_acp_model(
     return conn.set_session_model(model_id=model, session_id=session_id)
 
 
+def _is_method_not_found(exc: ACPRequestError) -> bool:
+    """Whether ``exc`` is a JSON-RPC "method not found" — i.e. the server does
+    not implement the model-selection call we used."""
+    return exc.code == _METHOD_NOT_FOUND_CODE
+
+
+async def _apply_acp_model_with_fallback(
+    conn: ClientSideConnection,
+    session_id: str,
+    model: str,
+    *,
+    via_config_option: bool,
+) -> bool:
+    """Apply ``model`` via the detected mechanism, falling back to the other if
+    the server reports the method missing.
+
+    Response-detection (``_session_selects_model_via_config_option``) is correct
+    for every CLI we've validated, but it reads an UNSTABLE capability and the
+    response shape can vary by build/auth state. If the chosen call raises
+    ``-32601 "Method not found"``, the server simply uses the *other* mechanism,
+    so we retry with it instead of crashing session init. Returns the
+    ``via_config_option`` value that actually applied the model.
+    """
+    try:
+        await _apply_acp_model(
+            conn, session_id, model, via_config_option=via_config_option
+        )
+        return via_config_option
+    except ACPRequestError as exc:
+        if not _is_method_not_found(exc):
+            raise
+        logger.info(
+            "ACP model-apply via %s rejected as method-not-found; retrying via %s",
+            "set_config_option" if via_config_option else "set_session_model",
+            "set_session_model" if via_config_option else "set_config_option",
+        )
+        await _apply_acp_model(
+            conn, session_id, model, via_config_option=not via_config_option
+        )
+        return not via_config_option
+
+
 def _extract_session_models(
     response: Any,
 ) -> tuple[str | None, list[ACPModelInfo] | None]:
@@ -654,7 +703,7 @@ async def _maybe_set_session_model(
         return False
     provider = detect_acp_provider_by_agent_name(agent_name)
     if provider is not None and provider.supports_set_session_model:
-        await _apply_acp_model(
+        await _apply_acp_model_with_fallback(
             conn, session_id, acp_model, via_config_option=via_config_option
         )
         return True
@@ -727,7 +776,9 @@ async def _reapply_session_model_on_resume(
         if provider is not None:
             # Known provider: apply via the mechanism the resumed session uses
             # (set_config_option for codex-acp 0.16+/claude-agent-acp 0.46+,
-            # else set_session_model).
+            # else set_session_model). A rejection is already tolerated below
+            # (the session keeps the server default), so resume doesn't need the
+            # cross-mechanism fallback the init/switch paths use.
             await _apply_acp_model(
                 conn, session_id, acp_model, via_config_option=via_config_option
             )
@@ -3643,25 +3694,48 @@ class ACPAgent(AgentBase):
                 timeout=self.acp_prompt_timeout,
             )
         except ACPRequestError as e:
-            # Server-internal failures (JSON-RPC -32603) are not the caller's
-            # fault, and the prompt path already treats them as retriable. Let
-            # them propagate (-> 5xx) instead of mislabeling them as a 400
-            # client error.
-            if e.code in _RETRIABLE_SERVER_ERROR_CODES:
-                raise
-            # acp.exceptions.RequestError derives from Exception (not
-            # RuntimeError); surface a true client/protocol rejection (e.g.
-            # method-not-found, invalid model id) as a ValueError so callers —
-            # and the agent-server route — treat it as a 400-class client error
-            # rather than an opaque 500.
-            method = (
-                "set_config_option(model)"
-                if self._model_via_config_option
-                else "set_session_model"
-            )
-            raise ValueError(
-                f"ACP server rejected {method}(model={model!r}): {e}"
-            ) from e
+            pending_error: ACPRequestError | None = e
+            if _is_method_not_found(e):
+                # The session uses the other model-selection mechanism (or the
+                # init-time detection picked the wrong one): retry once with it,
+                # and remember the working mechanism for later switches. If the
+                # retry also fails, fall through to the error translation below.
+                flipped = not self._model_via_config_option
+                try:
+                    self._executor.run_async(
+                        _apply_acp_model(
+                            self._conn,
+                            self._session_id,
+                            model,
+                            via_config_option=flipped,
+                        ),
+                        timeout=self.acp_prompt_timeout,
+                    )
+                except ACPRequestError as e2:
+                    pending_error = e2
+                else:
+                    self._model_via_config_option = flipped
+                    pending_error = None  # both selections applied
+            if pending_error is not None:
+                # Server-internal failures (JSON-RPC -32603) are not the caller's
+                # fault, and the prompt path already treats them as retriable.
+                # Let them propagate (-> 5xx) instead of mislabeling them as a
+                # 400 client error.
+                if pending_error.code in _RETRIABLE_SERVER_ERROR_CODES:
+                    raise pending_error
+                # acp.exceptions.RequestError derives from Exception (not
+                # RuntimeError); surface a true client/protocol rejection (e.g.
+                # method-not-found on both mechanisms, invalid model id) as a
+                # ValueError so callers — and the agent-server route — treat it
+                # as a 400-class client error rather than an opaque 500.
+                method = (
+                    "set_config_option(model)"
+                    if self._model_via_config_option
+                    else "set_session_model"
+                )
+                raise ValueError(
+                    f"ACP server rejected {method}(model={model!r}): {pending_error}"
+                ) from pending_error
         # Reflect the live model on the sentinel LLM + metrics so cost/token
         # accounting and serialized state show the model actually in use
         # (mirrors model_post_init). The ``acp_model`` field is frozen, so the
