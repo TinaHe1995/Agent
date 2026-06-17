@@ -113,10 +113,8 @@ def main() -> None:
     agent, judge_llm, main_message, objective, max_iters = build(real)
     workspace = tempfile.mkdtemp(prefix="goal-demo-")
     # visualizer=None keeps the output focused on the proof below.
-    from pathlib import Path
-
     conversation = Conversation(
-        agent=agent, workspace=workspace, visualizer=None, persistence_dir=Path.cwd()
+        agent=agent, workspace=workspace, visualizer=None, persistence_dir=workspace
     )
     convo_id = conversation.id
 

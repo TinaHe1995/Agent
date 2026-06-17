@@ -1,7 +1,5 @@
 """Prompt text for the ``/goal`` command's judge and continuation messages."""
 
-from __future__ import annotations
-
 from typing import Final
 
 
