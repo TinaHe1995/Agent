@@ -2,6 +2,8 @@ from unittest.mock import patch
 
 import pytest
 
+from openhands.sdk.llm.message import Message
+
 
 # Default serialization options for to_chat_dict() - tests can override as needed
 DEFAULT_SERIALIZATION_OPTS = {
@@ -199,9 +201,21 @@ def test_message_tool_calls_strip_blank_list_content():
 
 def test_empty_assistant_message_uses_string_content_in_list_serializer():
     """List-serialized empty assistant messages should keep string content."""
-    from openhands.sdk.llm.message import Message
-
     message = Message(role="assistant", content=[])
+
+    result = message.to_chat_dict(
+        **{**DEFAULT_SERIALIZATION_OPTS, "function_calling_enabled": True}
+    )
+
+    assert result == {"content": "", "role": "assistant"}
+
+
+def test_empty_assistant_from_llm_chat_message_uses_string_content_in_list_serializer():
+    """Empty assistant LLM responses should keep string content."""
+    from litellm.types.utils import Message as LiteLLMMessage
+
+    litellm_message = LiteLLMMessage(role="assistant", content=None)
+    message = Message.from_llm_chat_message(litellm_message)
 
     result = message.to_chat_dict(
         **{**DEFAULT_SERIALIZATION_OPTS, "function_calling_enabled": True}
