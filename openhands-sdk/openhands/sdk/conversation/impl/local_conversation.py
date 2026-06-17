@@ -1003,9 +1003,9 @@ class LocalConversation(BaseConversation):
           turns of the *same* session, preserving conversation context.
         * **No live session yet** (created but not yet run): there is nothing to
           switch live, so the new value is only persisted. Session creation on
-          the first ``run()`` then honors it — ``_maybe_set_session_model`` for
-          providers that support ``set_session_model`` (codex/gemini), or the
-          ``session/new`` ``_meta`` for Claude — so the first turn runs on the
+          the first ``run()`` then honors it — ``_maybe_set_session_model``
+          issues a one-shot ``set_session_model`` for every built-in provider
+          (codex, gemini, and claude-code) — so the first turn runs on the
           switched model rather than silently using the construction-time one.
 
         Args:
