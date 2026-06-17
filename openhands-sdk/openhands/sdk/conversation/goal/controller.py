@@ -7,8 +7,6 @@ sending messages and running the agent; the controller only judges and decides.
 That split lets the sync and async drivers share identical decision logic.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from typing import Literal
 

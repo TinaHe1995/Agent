@@ -6,8 +6,6 @@ critic machinery. The ``/goal`` runner uses it to drive continuation, but it
 can equally back a status command, a stop hook, or a server endpoint.
 """
 
-from __future__ import annotations
-
 import contextlib
 import json
 import re
