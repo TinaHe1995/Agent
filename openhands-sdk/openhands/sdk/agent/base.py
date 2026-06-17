@@ -466,8 +466,9 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         The default prompt is assembled from the typed section registry
         (``create_registry``). Escape hatches keep the Jinja render path: an inline
         ``system_prompt`` is returned verbatim; a custom/absolute
-        ``system_prompt_filename`` renders through ``render_template``; and a subclass
-        with its own ``prompt_dir`` still renders its default-named template.
+        ``system_prompt_filename`` renders through ``render_template``; a subclass
+        with its own ``prompt_dir`` still renders its default-named template; and a
+        custom ``security_policy_filename`` renders so its policy file is included.
 
         Returns:
             The static system prompt without dynamic context.
@@ -475,11 +476,14 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         if self.system_prompt is not None:
             return self.system_prompt
 
-        # Escape hatch: custom/absolute filename, or a subclass with its own
-        # prompt_dir. The registry serves only the built-in default prompt.
+        # Escape hatch: custom/absolute filename, a subclass with its own
+        # prompt_dir, or a custom security policy. The registry reproduces only
+        # the built-in default prompt (default template + default policy); a
+        # non-default security_policy_filename must keep the Jinja include path.
         if (
             self.system_prompt_filename != "system_prompt.j2"
             or os.path.realpath(self.prompt_dir) != _BUILTIN_PROMPT_DIR
+            or self.security_policy_filename != "security_policy.j2"
         ):
             return render_template(
                 prompt_dir=self.prompt_dir,

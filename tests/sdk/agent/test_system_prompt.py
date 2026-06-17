@@ -106,6 +106,21 @@ def test_builtin_default_prompt_uses_registry() -> None:
     assert agent.static_system_message == expected
 
 
+def test_custom_security_policy_filename_renders_through_jinja(tmp_path: Path) -> None:
+    """A custom security_policy_filename must be honored. The registry hardcodes the
+    default policy, so a non-default policy file falls back to the Jinja include path
+    rather than being silently replaced by the default policy."""
+    policy = tmp_path / "custom_policy.j2"
+    policy.write_text("<SECURITY>\nCUSTOM POLICY\n</SECURITY>", encoding="utf-8")
+
+    agent = Agent(llm=_make_llm(), tools=[], security_policy_filename=str(policy))
+    static = agent.static_system_message
+
+    assert "CUSTOM POLICY" in static
+    # The default policy must NOT leak in alongside the custom one.
+    assert "🔐 Security Policy" not in static
+
+
 # --- serialization round-trip ---
 
 
