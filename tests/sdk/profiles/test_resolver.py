@@ -390,3 +390,20 @@ def test_dry_run_acp_custom_server_has_no_required_secrets(
         profile, llm_store=llm_store, mcp_config=None, cipher=None
     )
     assert diag.required_acp_secret_names == []
+
+
+def test_dry_run_normalizes_settings_build_failure(
+    llm_store: LLMProfileStore,
+) -> None:
+    # An unbalanced-quote acp_command passes profile validation but breaks
+    # shlex.split during settings construction; the dry-run must report it as
+    # invalid rather than raising (its contract is total).
+    profile = ACPAgentProfile(
+        name="acp", acp_server="custom", acp_command="unterminated 'quote"
+    )
+    diag = resolve_agent_profile_dry_run(
+        profile, llm_store=llm_store, mcp_config=None, cipher=None
+    )
+    assert diag.valid is False
+    assert diag.errors
+    assert diag.resolved_settings is None

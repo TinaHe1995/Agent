@@ -324,12 +324,20 @@ def resolve_agent_profile_dry_run(
 
     diagnostics.valid = not diagnostics.errors
     if diagnostics.valid:
-        if isinstance(profile, OpenHandsAgentProfile):
-            assert llm is not None
-            settings = _build_openhands_settings(profile, llm, filtered_mcp, cipher)
-        else:
-            settings = _build_acp_settings(profile, filtered_mcp)
-        # No expose context => secrets redacted (mcp env/headers, llm api_key).
-        diagnostics.resolved_settings = settings.model_dump(mode="json")
+        # Building settings can still fail on input that passes profile
+        # validation (e.g. an acp_command with unbalanced shell quotes, which
+        # shlex.split rejects). Keep the dry-run total: surface such failures as
+        # diagnostics rather than raising, matching the API contract.
+        try:
+            if isinstance(profile, OpenHandsAgentProfile):
+                assert llm is not None
+                settings = _build_openhands_settings(profile, llm, filtered_mcp, cipher)
+            else:
+                settings = _build_acp_settings(profile, filtered_mcp)
+            # No expose context => secrets redacted (mcp env/headers, llm api_key).
+            diagnostics.resolved_settings = settings.model_dump(mode="json")
+        except Exception as e:
+            diagnostics.valid = False
+            diagnostics.errors.append(f"Failed to build agent settings: {e}")
 
     return diagnostics
