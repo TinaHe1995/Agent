@@ -1104,7 +1104,7 @@ class _OpenHandsACPBridge:
             return
         self._fork_accumulated_text.append(self._mask_value(update.content.text))
 
-    def _handle_message_chunk(self, update: Any) -> None:
+    def _handle_message_chunk(self, update: AgentMessageChunk) -> None:
         if isinstance(update.content, TextContentBlock):
             # Mask once, then use the masked chunk for both the persisted
             # accumulation and the live ``on_token`` relay. A secret split
@@ -1120,12 +1120,12 @@ class _OpenHandsACPBridge:
                     logger.debug("on_token callback failed", exc_info=True)
         self._maybe_signal_activity()
 
-    def _handle_thought_chunk(self, update: Any) -> None:
+    def _handle_thought_chunk(self, update: AgentThoughtChunk) -> None:
         if not isinstance(update.content, TextContentBlock):
             return
         self.accumulated_thoughts.append(self._mask_value(update.content.text))
 
-    def _handle_usage_update(self, session_id: str, update: Any) -> None:
+    def _handle_usage_update(self, session_id: str, update: UsageUpdate) -> None:
         # Store the update for step()/ask_agent() to process in one place.
         self._context_window = update.size
         self._context_window_by_session[session_id] = update.size
@@ -1134,7 +1134,7 @@ class _OpenHandsACPBridge:
         if event is not None:
             event.set()
 
-    def _handle_tool_call_start(self, update: Any) -> None:
+    def _handle_tool_call_start(self, update: ToolCallStart) -> None:
         entry = {
             "tool_call_id": update.tool_call_id,
             "title": update.title,
@@ -1155,7 +1155,7 @@ class _OpenHandsACPBridge:
         self._emit_tool_call_event(entry)
         self._maybe_signal_activity()
 
-    def _handle_tool_call_progress(self, update: Any) -> None:
+    def _handle_tool_call_progress(self, update: ToolCallProgress) -> None:
         # Find the existing tool call entry and merge updates. Track the
         # status seen *before* this frame so we can detect the single
         # transition into a terminal state.
