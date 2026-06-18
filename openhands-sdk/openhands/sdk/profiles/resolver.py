@@ -331,9 +331,18 @@ def resolve_agent_profile_dry_run(
             llm = llm_store.load(profile.llm_profile_ref, cipher=cipher)
             diagnostics.llm_profile_resolved = True
             diagnostics.llm_api_key_set = _api_key_set(llm)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             diagnostics.errors.append(
                 f"LLM profile {profile.llm_profile_ref!r} not found"
+            )
+        except Exception as e:
+            # Keep the dry-run total: the store can raise filelock.TimeoutError
+            # (lock contention), OSError, or a validation error before its own
+            # handler runs. Surface those as a diagnostic instead of crashing
+            # the editor preview (#3719) — distinct from a definitively-missing
+            # profile above.
+            diagnostics.errors.append(
+                f"Could not load LLM profile {profile.llm_profile_ref!r}: {e}"
             )
     else:
         (
@@ -350,7 +359,12 @@ def resolve_agent_profile_dry_run(
         # diagnostics rather than raising, matching the API contract.
         try:
             if isinstance(profile, OpenHandsAgentProfile):
-                assert llm is not None
+                # valid here implies the LLM load above succeeded; gate
+                # explicitly rather than via assert (stripped under python -O).
+                if llm is None:
+                    raise RuntimeError(
+                        "OpenHands profile marked valid without a resolved LLM"
+                    )
                 settings = _build_openhands_settings(profile, llm, filtered_mcp, cipher)
             else:
                 settings = _build_acp_settings(profile, filtered_mcp)

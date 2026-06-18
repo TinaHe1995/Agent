@@ -345,6 +345,29 @@ def test_dry_run_reports_dangling_llm_and_mcp(
     assert diag.resolved_settings is None
 
 
+def test_dry_run_total_on_llm_store_transient_error(
+    llm_store: LLMProfileStore, mcp_config: MCPConfig
+) -> None:
+    # The store can raise filelock.TimeoutError (lock contention) before its
+    # own handler runs; the dry-run must surface that as a diagnostic, not
+    # crash the editor preview (#3719).
+    def _boom(*_args: object, **_kwargs: object) -> LLM:
+        raise TimeoutError("profile store lock acquisition timed out")
+
+    llm_store.load = _boom  # type: ignore[method-assign]
+    profile = OpenHandsAgentProfile(
+        name="oh", llm_profile_ref="default", mcp_server_refs=["fetch"]
+    )
+    diag = resolve_agent_profile_dry_run(
+        profile, llm_store=llm_store, mcp_config=mcp_config, cipher=None
+    )
+    assert diag.valid is False
+    assert diag.llm_profile_resolved is False
+    # Reported as "could not load" (transient), distinct from "not found".
+    assert any("Could not load LLM profile" in e for e in diag.errors)
+    assert diag.resolved_settings is None
+
+
 def test_dry_run_verdict_matches_real_resolve(
     llm_store: LLMProfileStore, mcp_config: MCPConfig
 ) -> None:
