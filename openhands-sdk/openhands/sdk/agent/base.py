@@ -463,12 +463,10 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         per-conversation context. This static portion can be cached and reused
         across conversations for better prompt caching efficiency.
 
-        The default prompt is assembled from the typed section registry
-        (``create_registry``). Escape hatches keep the Jinja render path: an inline
-        ``system_prompt`` is returned verbatim; a custom/absolute
-        ``system_prompt_filename`` renders through ``render_template``; a subclass
-        with its own ``prompt_dir`` still renders its default-named template; and a
-        custom ``security_policy_filename`` renders so its policy file is included.
+        The default prompt is assembled from the typed section registry, which also
+        resolves a custom ``security_policy_filename``. Escape hatches keep the Jinja
+        path: an inline ``system_prompt`` is returned verbatim; a custom
+        ``system_prompt_filename`` or subclass ``prompt_dir`` renders its own template.
 
         Returns:
             The static system prompt without dynamic context.
@@ -476,14 +474,11 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         if self.system_prompt is not None:
             return self.system_prompt
 
-        # Escape hatch: custom/absolute filename, a subclass with its own
-        # prompt_dir, or a custom security policy. The registry reproduces only
-        # the built-in default prompt (default template + default policy); a
-        # non-default security_policy_filename must keep the Jinja include path.
+        # Escape hatch: a custom filename or a subclass's own prompt_dir renders its
+        # own Jinja template; everything else (incl. custom policies) uses the registry.
         if (
             self.system_prompt_filename != "system_prompt.j2"
             or os.path.realpath(self.prompt_dir) != _BUILTIN_PROMPT_DIR
-            or self.security_policy_filename != "security_policy.j2"
         ):
             return render_template(
                 prompt_dir=self.prompt_dir,
@@ -523,6 +518,23 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
             if "model_variant" not in template_kwargs and spec.variant:
                 template_kwargs["model_variant"] = spec.variant
         return template_kwargs
+
+    def _read_custom_security_policy(self) -> str | None:
+        """Content of a custom security policy file, or ``None`` for the default
+        (``security_policy.j2`` sentinel) or disabled (empty) policy.
+
+        Relative names resolve against ``prompt_dir``; absolute paths are used as-is.
+        """
+        filename = self.security_policy_filename
+        if not filename or filename == "security_policy.j2":
+            return None
+        path = (
+            filename
+            if os.path.isabs(filename)
+            else os.path.join(self.prompt_dir, filename)
+        )
+        with open(path, encoding="utf-8") as f:
+            return f.read()
 
     def _build_prompt_context(
         self,
@@ -577,8 +589,17 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
             # secrets (additional_secret_infos), matching what <CUSTOM_SECRETS> shows.
             secret_names = tuple(name for name, _ in secret_infos if name)
 
+        template_kwargs = self._resolved_template_kwargs()
+        # A custom security policy's content for SecuritySection (registry path only).
+        policy_content = self._read_custom_security_policy()
+        if policy_content is not None:
+            template_kwargs = {
+                **template_kwargs,
+                "security_policy_content": policy_content,
+            }
+
         return PromptContext(
-            template_kwargs=self._resolved_template_kwargs(),
+            template_kwargs=template_kwargs,
             tool_names=tuple(t.name for t in self.tools),
             platform=Platform.current(),
             working_dir=None,
