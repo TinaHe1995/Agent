@@ -20,6 +20,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -803,9 +804,10 @@ async def _filter_jsonrpc_lines(source: Any, dest: Any) -> None:
 # (codex-acp swallows its thread-startup error; the claude SDK has a catch-all that
 # rewraps everything as internal), so the code alone is not a reliable auth signal —
 # the message + data must be scanned too.
+# Matched as whole words so "4031ms" or "model-id-401b" don't fire.
+_ACP_AUTH_HTTP_CODES_RE = re.compile(r"\b(401|403)\b")
+
 _ACP_AUTH_ERROR_MARKERS: tuple[str, ...] = (
-    "401",
-    "403",
     "unauthorized",
     "invalid api key",
     "invalid_api_key",
@@ -858,7 +860,10 @@ def _acp_error_indicates_auth(exc: BaseException) -> bool:
     """
     if isinstance(exc, ACPRequestError) and getattr(exc, "code", None) == -32000:
         return True
-    return any(marker in _acp_error_text(exc) for marker in _ACP_AUTH_ERROR_MARKERS)
+    text = _acp_error_text(exc)
+    return any(marker in text for marker in _ACP_AUTH_ERROR_MARKERS) or bool(
+        _ACP_AUTH_HTTP_CODES_RE.search(text)
+    )
 
 
 def _acp_error_detail(
@@ -879,7 +884,7 @@ def _acp_error_detail(
         message = str(exc)
         data_str = _stringify_acp_error_data(getattr(exc, "data", None))
         detail = f"[{code}] {message}" if code is not None else message
-        if data_str and data_str not in detail:
+        if data_str and data_str != message:
             detail = f"{detail}: {data_str}"
     else:
         detail = str(exc)

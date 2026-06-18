@@ -86,7 +86,7 @@ ACP_SUPERSEDE_INFLIGHT_PROMPT = "acp_supersede_inflight_prompt"
 ACP_STOP_HOOK_FEEDBACK_PREFIX = "[Stop hook feedback]"
 
 
-def _agent_already_surfaced_error(events: Sequence[Event]) -> bool:
+def _agent_already_surfaced_error(events: Sequence[Event], since: int = 0) -> bool:
     """Whether the agent's own step already emitted a typed ConversationErrorEvent.
 
     ACPAgent surfaces a detailed, classified ``ConversationErrorEvent``
@@ -96,8 +96,14 @@ def _agent_already_surfaced_error(events: Sequence[Event]) -> bool:
     as the *latest* error — clobbering the agent's rich one in clients that show the
     most recent error.  Regular agents never self-emit (all their error events are
     ``source="environment"``), so only the ACP duplicate is suppressed.
+
+    ``since`` should be the number of events that existed at the start of the current
+    ``run()``/``arun()`` call.  Scoping the scan to events added *during this run*
+    prevents a stale source="agent" event from a prior run from suppressing the error
+    event for an unrelated exception in a subsequent run on the same conversation.
     """
-    for event in reversed(list(events)):
+    for i in range(len(events) - 1, since - 1, -1):
+        event = events[i]
         if isinstance(event, ConversationErrorEvent):
             return event.source == "agent"
     return False
@@ -1169,6 +1175,7 @@ class LocalConversation(BaseConversation):
                 self._state.execution_status = ConversationExecutionStatus.RUNNING
 
         iteration = 0
+        _run_start_event_count = len(self._state.events)
         try:
             while True:
                 logger.debug(f"Conversation run iteration {iteration}")
@@ -1296,7 +1303,9 @@ class LocalConversation(BaseConversation):
                 # Add an error event — unless the agent already surfaced a typed,
                 # detailed one for this failure (e.g. ACPAgent._emit_turn_error),
                 # which a generic str(e) duplicate would otherwise clobber.
-                if not _agent_already_surfaced_error(self._state.events):
+                if not _agent_already_surfaced_error(
+                    self._state.events, _run_start_event_count
+                ):
                     self._on_event(
                         ConversationErrorEvent(
                             source="environment",
@@ -1370,6 +1379,7 @@ class LocalConversation(BaseConversation):
             )
 
         iteration = 0
+        _run_start_event_count = len(self._state.events)
         try:
             while True:
                 logger.debug(f"Conversation arun iteration {iteration}")
@@ -1757,7 +1767,9 @@ class LocalConversation(BaseConversation):
                 self._state.execution_status = ConversationExecutionStatus.ERROR
                 # Skip the generic event if the agent already surfaced a typed,
                 # detailed one for this failure (see _agent_already_surfaced_error).
-                if not _agent_already_surfaced_error(self._state.events):
+                if not _agent_already_surfaced_error(
+                    self._state.events, _run_start_event_count
+                ):
                     self._on_event(
                         ConversationErrorEvent(
                             source="environment",

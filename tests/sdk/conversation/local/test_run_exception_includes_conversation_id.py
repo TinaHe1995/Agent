@@ -139,6 +139,28 @@ class TestAgentAlreadySurfacedError:
         ]
         assert _agent_already_surfaced_error(events) is True
 
+    def test_since_excludes_stale_prior_run_events(self):
+        # A source="agent" error from a prior run must not suppress the generic
+        # event for a new, unrelated exception in a subsequent run on the same
+        # conversation (state.events accumulates across runs).
+        stale_agent_event = ConversationErrorEvent(
+            source="agent", code="ACPPromptError", detail="from prior run"
+        )
+        events = [stale_agent_event]
+        since = len(events)  # start of the new run — no events added yet
+        assert _agent_already_surfaced_error(events, since) is False
+
+    def test_since_still_finds_current_run_agent_event(self):
+        stale_agent_event = ConversationErrorEvent(
+            source="agent", code="ACPPromptError", detail="from prior run"
+        )
+        current_run_agent_event = ConversationErrorEvent(
+            source="agent", code="ACPAuthRequired", detail="from current run"
+        )
+        events = [stale_agent_event, current_run_agent_event]
+        since = 1  # new run started after the stale event
+        assert _agent_already_surfaced_error(events, since) is True
+
 
 def test_run_does_not_duplicate_agent_emitted_error():
     """When the agent surfaces its own typed error and re-raises, the run loop

@@ -1022,6 +1022,20 @@ class TestACPErrorIndicatesAuth:
         assert not _acp_error_indicates_auth(ACPRequestError(-32603, "Internal error"))
         assert not _acp_error_indicates_auth(RuntimeError("timed out"))
 
+    def test_http_401_as_word_matches(self):
+        assert _acp_error_indicates_auth(RuntimeError("HTTP 401 Unauthorized"))
+
+    def test_digit_substring_in_timeout_does_not_match(self):
+        # "4031ms" contains "403" but must not fire — word-boundary check.
+        assert not _acp_error_indicates_auth(RuntimeError("timeout after 4031ms"))
+
+    def test_model_id_with_401_does_not_match(self):
+        assert not _acp_error_indicates_auth(
+            ACPRequestError(
+                -32603, "Internal error", {"message": "model id '401b' not found"}
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # _classify_acp_turn_error
@@ -1074,6 +1088,22 @@ class TestACPErrorDetail:
         exc = ACPRequestError(-32000, "Authentication required")
         detail = _acp_error_detail(exc)
         assert detail == "[-32000] Authentication required"
+
+    def test_data_appended_when_it_differs_from_message(self):
+        # data["message"] differs from exc.message → must be included.
+        exc = ACPRequestError(
+            -32603, "Internal error", {"message": "model gpt-9 not found"}
+        )
+        detail = _acp_error_detail(exc)
+        assert "model gpt-9 not found" in detail
+        assert "Internal error" in detail
+
+    def test_data_not_duplicated_when_equal_to_message(self):
+        # When data["message"] == exc.message, nothing extra to add — avoid
+        # "[-32603] Internal error: Internal error" redundancy.
+        exc = ACPRequestError(-32603, "Internal error", {"message": "Internal error"})
+        detail = _acp_error_detail(exc)
+        assert detail == "[-32603] Internal error"
 
     def test_truncated_to_500_chars(self):
         exc = ACPRequestError(-32603, "Internal error", "x" * 1000)
