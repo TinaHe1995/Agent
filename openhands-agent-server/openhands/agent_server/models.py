@@ -79,6 +79,10 @@ class StoredConversation(StartConversationRequest):
     Extends StartConversationRequest with server-assigned fields.
     """
 
+    # agent_profile_id is resolved into launched_profile at creation; exclude from
+    # the persistence payload so it does not re-appear in meta.json.
+    agent_profile_id: UUID | None = Field(default=None, exclude=True)
+
     id: OpenHandsUUID
     title: str | None = Field(
         default=None, description="User-defined title for the conversation"

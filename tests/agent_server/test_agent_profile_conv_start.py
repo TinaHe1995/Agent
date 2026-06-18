@@ -131,15 +131,16 @@ class TestStartConversationRequestValidation:
         with pytest.raises(ValidationError, match="agent_profile_id"):
             StartConversationRequest(workspace=LocalWorkspace(working_dir="/tmp"))
 
-    def test_agent_profile_id_is_excluded_from_model_dump(self):
-        """agent_profile_id is carry-only (exclude=True)."""
-        agent = _make_agent()
+    def test_agent_profile_id_present_in_request_payload(self):
+        """agent_profile_id must survive model_dump() for HTTP transport."""
+        profile_id = uuid4()
         req = StartConversationRequest(
-            agent=agent,
+            agent_profile_id=profile_id,
             workspace=LocalWorkspace(working_dir="/tmp"),
         )
         dumped = req.model_dump(mode="json")
-        assert "agent_profile_id" not in dumped
+        assert "agent_profile_id" in dumped
+        assert dumped["agent_profile_id"] == str(profile_id)
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +418,30 @@ class TestLaunchedProfileRoundTrip:
             workspace=LocalWorkspace(working_dir="/tmp"),
         )
         assert stored.launched_profile is None
+
+    def test_agent_profile_id_excluded_from_stored_conversation_persistence(self):
+        """Regression: agent_profile_id must NOT appear in StoredConversation payload.
+
+        StartConversationRequest.model_dump() includes agent_profile_id for HTTP
+        transport.  _start_conversation excludes it before building StoredConversation
+        (the field is resolved into launched_profile); this test verifies that a
+        StoredConversation built from a resolved request contains neither the raw
+        profile UUID nor re-exposes it.
+        """
+        profile_id = uuid4()
+        # Simulate the resolved state: agent is set, agent_profile_id excluded.
+        request = StartConversationRequest(
+            agent_profile_id=profile_id,
+            workspace=LocalWorkspace(working_dir="/tmp"),
+        )
+        # Mirror what _start_conversation does: exclude agent_profile_id from
+        # the persistence payload before constructing StoredConversation.
+        request_data = request.model_dump(mode="json", exclude={"agent_profile_id"})
+        agent = _make_agent()
+        request_data["agent"] = agent.model_dump(mode="json")
+        stored = StoredConversation(id=uuid4(), **request_data)
+        dumped = stored.model_dump(mode="json")
+        assert "agent_profile_id" not in dumped
 
     def test_launched_profile_in_conversation_info(self):
         profile_id = uuid4()

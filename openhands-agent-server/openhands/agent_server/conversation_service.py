@@ -751,7 +751,13 @@ class ConversationService:
         # serialize to plain strings. Pass expose_secrets=True so StaticSecret values
         # are preserved through the round-trip; the dict is only used in-process to
         # construct StoredConversation, not sent over the network.
-        request_data = request.model_dump(mode="json", context={"expose_secrets": True})
+        # agent_profile_id is excluded: it was resolved into `launched_profile`
+        # above and must not re-trigger the mutual-exclusivity validator.
+        request_data = request.model_dump(
+            mode="json",
+            context={"expose_secrets": True},
+            exclude={"agent_profile_id"},
+        )
 
         # If secrets_encrypted=True, the agent's secrets (e.g., LLM api_key) are
         # cipher-encrypted and need decryption during model validation. Pass the

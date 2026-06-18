@@ -243,7 +243,6 @@ class StartConversationRequest(BaseModel):
     )
     agent_profile_id: UUID | None = Field(
         default=None,
-        exclude=True,
         description=(
             "Optional agent profile ID. When set, the agent-server resolves the "
             "referenced profile server-side (stores + cipher are required) and "
