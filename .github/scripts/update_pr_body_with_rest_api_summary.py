@@ -41,6 +41,9 @@ def _generated_block(summary: str) -> str:
 
 
 def update_body(body: str, generated_summary: str) -> str:
+    if not generated_summary.strip() and START_MARKER not in body:
+        return body
+
     bounds = _summary_bounds(body)
     if bounds is None:
         return body
@@ -72,9 +75,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    body = args.body_file.read_text()
-    generated_summary = args.summary_file.read_text()
-    args.output.write_text(update_body(body, generated_summary))
+    body = args.body_file.read_text(newline="")
+    generated_summary = args.summary_file.read_text(newline="")
+    args.output.write_text(update_body(body, generated_summary), newline="")
     return 0
 
 

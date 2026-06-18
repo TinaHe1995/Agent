@@ -235,6 +235,42 @@ pytest
     assert "- Existing bullet." in removed
 
 
+def test_update_body_cli_preserves_crlf_when_empty_summary_is_noop(
+    tmp_path,
+    monkeypatch,
+):
+    body = (
+        "AGENT:\r\n\r\n"
+        "## Summary\r\n\r\n"
+        "- Existing bullet.\r\n\r\n"
+        "## How to Test\r\n\r\n"
+        "pytest\r\n"
+    )
+    body_bytes = body.encode()
+    body_file = tmp_path / "body.md"
+    summary_file = tmp_path / "summary.md"
+    output_file = tmp_path / "output.md"
+    body_file.write_bytes(body_bytes)
+    summary_file.write_text("")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "update_pr_body_with_rest_api_summary.py",
+            "--body-file",
+            str(body_file),
+            "--summary-file",
+            str(summary_file),
+            "--output",
+            str(output_file),
+        ],
+    )
+
+    assert _body.main() == 0
+
+    assert output_file.read_bytes() == body_bytes
+
+
 def test_filter_public_rest_openapi_still_shared_with_breakage_check():
     schema = {"paths": {"/ready": {"get": {}}, "/api/items": {"get": {}}}}
 
