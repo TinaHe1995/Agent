@@ -404,3 +404,68 @@ async def test_goal_emits_interrupted_on_unexpected_error(event_service, tmp_pat
         assert event_service._goal_outcome is None
     finally:
         await event_service.close()
+
+
+@pytest.mark.asyncio
+async def test_start_goal_rejected_while_run_active(event_service, tmp_path):
+    # /goal must refuse with conversation_already_running (-> 409) when a normal
+    # run is already in flight, instead of slipping in beside it and judging that
+    # run's unrelated transcript. Uses a real gated run, not a placeholder task.
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    await event_service.start()
+    agent_llm = cast(
+        _GatedLLM,
+        _GatedLLM.from_messages(
+            [Message(role="assistant", content=[TextContent(text="working")])],
+            usage_id="agent",
+        ),
+    )
+    event_service.get_conversation().switch_llm(agent_llm)
+    judge = _scripted("{}", usage_id="judge")
+    try:
+        # Kick off a real background run and wait until the agent is blocked
+        # mid-LLM-call, so the run is genuinely in flight.
+        await event_service.send_message(
+            Message(role="user", content=[TextContent(text="do a thing")]), run=True
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, agent_llm._entered.wait, 5.0)
+
+        with pytest.raises(ValueError, match="conversation_already_running"):
+            await event_service.start_goal("build x", judge_llm=judge)
+        assert event_service._goal_task is None
+    finally:
+        agent_llm._gate.set()  # release the blocked run for cleanup
+        await event_service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_goal_rejected_while_run_active(event_service, tmp_path):
+    # resume_goal shares start_goal's guard. A placeholder _run_task stands in for
+    # an active run: a real gated run would hold the state lock that resume_goal's
+    # _last_goal_status() read needs first, which is a separate concern.
+    await _start(event_service, tmp_path, "noop")
+    conversation = event_service.get_conversation()
+    with conversation._state:
+        conversation._on_event(
+            ConversationStateUpdateEvent(
+                key="goal",
+                value={
+                    "active": False,
+                    "status": "interrupted",
+                    "iteration": 1,
+                    "max_iterations": 5,
+                    "objective": "build x",
+                    "verdict": None,
+                },
+            )
+        )
+    judge = _scripted("{}", usage_id="judge")
+    try:
+        event_service._run_task = asyncio.create_task(asyncio.sleep(10))
+        with pytest.raises(ValueError, match="conversation_already_running"):
+            await event_service.resume_goal(judge_llm=judge)
+    finally:
+        event_service._run_task.cancel()
+        event_service._run_task = None
+        await event_service.close()

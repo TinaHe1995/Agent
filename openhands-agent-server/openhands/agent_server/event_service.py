@@ -1034,16 +1034,34 @@ class EventService:
         """
         if not self._conversation or self._closing:
             raise ValueError("inactive_service")
-        if self._goal_task is not None and not self._goal_task.done():
-            raise ValueError("goal_already_running")
         if judge_llm is None:
             judge_llm = getattr(self._conversation.agent, "llm", None)
         if judge_llm is None:
             raise ValueError("no_judge_llm")
         # GoalController validates the objective/max_iterations (raises ValueError).
         controller = GoalController(objective, judge_llm, max_iterations=max_iterations)
-        self._goal_outcome = None
-        self._goal_task = asyncio.create_task(self._run_goal(controller))
+        # Under _run_lock, atomically refuse a concurrent goal or an in-flight run
+        # (mirrors run()'s guard); else /goal slips in beside the active run and
+        # ends up judging that unrelated transcript.
+        async with self._run_lock:
+            if self._closing:
+                raise ValueError("inactive_service")
+            if self._goal_task is not None and not self._goal_task.done():
+                raise ValueError("goal_already_running")
+            # _run_task first: a live run holds the state lock across its step,
+            # so reading execution status would block behind it.
+            if (self._run_task is not None and not self._run_task.done()) or (
+                await self._get_execution_status()
+                == ConversationExecutionStatus.RUNNING
+            ):
+                raise ValueError("conversation_already_running")
+            # Re-check after the await above: close() runs without _run_lock, so
+            # it may have begun teardown meanwhile (mirrors run()'s post-status
+            # _closing re-check) -- avoid spawning a task close() won't cancel.
+            if self._closing:
+                raise ValueError("inactive_service")
+            self._goal_outcome = None
+            self._goal_task = asyncio.create_task(self._run_goal(controller))
 
     async def _run_goal(
         self, controller: GoalController, *, resume: bool = False
@@ -1201,8 +1219,6 @@ class EventService:
         """
         if not self._conversation or self._closing:
             raise ValueError("inactive_service")
-        if self._goal_task is not None and not self._goal_task.done():
-            raise ValueError("goal_already_running")
         loop = asyncio.get_running_loop()
         last = await loop.run_in_executor(None, self._last_goal_status)
         if last is None or last.get("status") in ("complete", "capped"):
@@ -1217,8 +1233,23 @@ class EventService:
             max_iterations=max_iterations or int(last["max_iterations"]),
         )
         controller.iteration = int(last["iteration"])
-        self._goal_outcome = None
-        self._goal_task = asyncio.create_task(self._run_goal(controller, resume=True))
+        # Same busy-guard as start_goal: refuse a concurrent goal or in-flight run.
+        async with self._run_lock:
+            if self._closing:
+                raise ValueError("inactive_service")
+            if self._goal_task is not None and not self._goal_task.done():
+                raise ValueError("goal_already_running")
+            if (self._run_task is not None and not self._run_task.done()) or (
+                await self._get_execution_status()
+                == ConversationExecutionStatus.RUNNING
+            ):
+                raise ValueError("conversation_already_running")
+            if self._closing:  # see start_goal: close() may have begun teardown
+                raise ValueError("inactive_service")
+            self._goal_outcome = None
+            self._goal_task = asyncio.create_task(
+                self._run_goal(controller, resume=True)
+            )
 
     async def respond_to_confirmation(self, request: ConfirmationResponseRequest):
         if request.accept:
