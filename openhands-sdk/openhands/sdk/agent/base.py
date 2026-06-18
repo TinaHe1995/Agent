@@ -8,6 +8,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import (
@@ -528,13 +529,7 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         filename = self.security_policy_filename
         if not filename or filename == "security_policy.j2":
             return None
-        path = (
-            filename
-            if os.path.isabs(filename)
-            else os.path.join(self.prompt_dir, filename)
-        )
-        with open(path, encoding="utf-8") as f:
-            return f.read()
+        return (Path(self.prompt_dir) / filename).read_text(encoding="utf-8")
 
     def _build_prompt_context(
         self,
