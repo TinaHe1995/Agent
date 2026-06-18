@@ -23,7 +23,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Iterable
 from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple
@@ -75,7 +75,6 @@ from openhands.sdk.logger import get_logger
 from openhands.sdk.observability.laminar import maybe_init_laminar, observe
 from openhands.sdk.settings.acp_providers import (
     ACPFileSecretSpec,
-    ACPProviderInfo,
     build_session_model_meta,
     default_acp_file_secrets,
     detect_acp_provider_by_agent_name,
@@ -285,6 +284,27 @@ def _codex_auth_file(env: dict[str, str]) -> Path:
     return Path.home() / _CHATGPT_AUTH_PATH
 
 
+def _codex_auth_file_is_chatgpt(env: dict[str, str]) -> bool:
+    """Return True only if ``auth.json`` is in ChatGPT-subscription format.
+
+    Codex itself rewrites ``$CODEX_HOME/auth.json`` during apikey-mode sessions
+    with ``{"auth_mode": "apikey", "OPENAI_API_KEY": "..."}``. That file's mere
+    presence used to make :func:`_select_auth_method` prefer ``chatgpt`` on a
+    restart, after which ``conn.authenticate("chatgpt")`` hung indefinitely
+    waiting for browser-based OAuth (issue #3627). The ChatGPT token blob is
+    keyed by ``tokens``; require that key before claiming the file is usable
+    for the ``chatgpt`` auth method.
+    """
+    path = _codex_auth_file(env)
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "tokens" in data
+
+
 def _select_auth_method(
     auth_methods: list[Any],
     env: dict[str, str],
@@ -309,7 +329,7 @@ def _select_auth_method(
     method_ids = {m.id for m in auth_methods}
     # Prefer file-backed subscription / service-account logins when their
     # credential file is present.
-    if "chatgpt" in method_ids and _codex_auth_file(env).is_file():
+    if "chatgpt" in method_ids and _codex_auth_file_is_chatgpt(env):
         return "chatgpt"
     gac = env.get("GOOGLE_APPLICATION_CREDENTIALS")
     if "vertex-ai" in method_ids and gac and Path(gac).is_file():
@@ -337,7 +357,7 @@ def _codex_base_url_overrides(
     corporate egress, etc.) via ``OPENAI_BASE_URL`` alone would have every turn
     hit the real OpenAI API with the wrong key and fail ``401 invalid_api_key``
     — surfaced opaquely as ACP ``-32603 Internal error``. (codex-acp 0.11.1
-    happened to honour the env var; current releases do not, so the eval/canvas/cloud
+    happened to honour the env var; 0.15.0 does not, so the eval/canvas/cloud
     codex-via-proxy flows broke on the bump.)
 
     The documented one-liner is ``openai_base_url`` — it overrides the built-in
@@ -357,33 +377,6 @@ def _codex_base_url_overrides(
     return ["-c", f'openai_base_url="{base_url}"']
 
 
-_CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
-    {"low", "medium", "high", "xhigh"}
-)
-
-
-def _codex_model_config_options(acp_model: str) -> tuple[tuple[str, str], ...]:
-    """Map Canvas Codex model IDs to codex-acp config options.
-
-    codex-acp 0.16 exposes base model and reasoning effort as separate config
-    options. Agent Canvas keeps a single stable model id such as
-    ``gpt-5.5/high``. Sending that combined id as the raw ``model`` option is
-    accepted at config time but fails the next prompt for ChatGPT-auth sessions.
-    """
-    base_model, sep, effort = acp_model.rpartition("/")
-    if sep and base_model and effort in _CODEX_REASONING_EFFORTS:
-        return (("model", base_model), ("reasoning_effort", effort))
-    return (("model", acp_model),)
-
-
-def _model_config_options(
-    provider: ACPProviderInfo | None, acp_model: str
-) -> tuple[tuple[str, str], ...]:
-    if provider is not None and provider.key == "codex":
-        return _codex_model_config_options(acp_model)
-    return (("model", acp_model),)
-
-
 def _write_secret_file(path: Path, value: str) -> None:
     """Write ``value`` to ``path`` as a ``0600`` file.
 
@@ -399,44 +392,146 @@ def _write_secret_file(path: Path, value: str) -> None:
         f.write(value)
 
 
+# Session config-option id that selects the model on ACP servers that drive
+# model selection through ``configOptions`` / ``session/set_config_option``
+# (codex-acp 0.16+, claude-agent-acp 0.44+) rather than the UNSTABLE ``models``
+# capability + ``session/set_model`` (gemini-cli, older codex/claude).
+_MODEL_CONFIG_OPTION_ID = "model"
+_CODEX_REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
+    {"low", "medium", "high", "xhigh"}
+)
+
+
+def _codex_model_config_options(model: str) -> tuple[tuple[str, str], ...]:
+    """Map combined Canvas Codex model IDs to codex-acp config options."""
+    base_model, sep, effort = model.rpartition("/")
+    if sep and base_model and effort in _CODEX_REASONING_EFFORTS:
+        return (
+            (_MODEL_CONFIG_OPTION_ID, base_model),
+            ("reasoning_effort", effort),
+        )
+    return ((_MODEL_CONFIG_OPTION_ID, model),)
+
+
+def _model_config_options(
+    agent_name: str | None,
+    model: str,
+) -> tuple[tuple[str, str], ...]:
+    provider = detect_acp_provider_by_agent_name(agent_name or "")
+    if provider is not None and provider.key == "codex":
+        return _codex_model_config_options(model)
+    return ((_MODEL_CONFIG_OPTION_ID, model),)
+
+
+def _model_config_option(response: Any) -> Any | None:
+    """Return the ``model`` ``configOptions`` select off a session response.
+
+    Newer ACP CLIs dropped the UNSTABLE ``models`` capability and expose model
+    selection as a ``configOptions`` entry with ``id == "model"`` (``type ==
+    "select"``), switched via ``session/set_config_option`` instead of
+    ``session/set_model``. Returns that option (carrying ``options`` and
+    ``current_value``) or ``None`` when the server uses neither / the old
+    mechanism. ``getattr`` keeps it tolerant of partial structures.
+
+    The ``agent-client-protocol`` Python lib wraps each entry in a
+    ``SessionConfigOption`` ``RootModel`` on 0.8.x (access via ``.root``) but
+    lists the union members directly on 0.10.x; unwrap ``.root`` so detection
+    works on either.
+    """
+    for raw in getattr(response, "config_options", None) or []:
+        opt = getattr(raw, "root", raw)
+        if (
+            getattr(opt, "type", None) == "select"
+            and getattr(opt, "id", None) == _MODEL_CONFIG_OPTION_ID
+        ):
+            return opt
+    return None
+
+
+async def _apply_acp_model(
+    conn: ClientSideConnection,
+    session_id: str,
+    model: str,
+    *,
+    agent_name: str | None = None,
+    via_config_option: bool,
+) -> None:
+    """Apply ``model`` to a live ACP session via the mechanism the session
+    advertised: ``set_config_option(configId="model")`` for configOptions-based
+    servers (codex-acp 0.16+, claude-agent-acp 0.44+), else ``set_session_model``.
+
+    The model id is normally the bare preset id listed by the server. For
+    Codex, callers may still pass a combined Canvas id such as ``gpt-5.5/high``;
+    codex-acp exposes reasoning effort as a separate config option, so split it
+    only on the config-options mechanism.
+    """
+    if via_config_option:
+        for config_id, value in _model_config_options(agent_name, model):
+            await conn.set_config_option(
+                config_id=config_id, value=value, session_id=session_id
+            )
+    else:
+        await conn.set_session_model(model_id=model, session_id=session_id)
+
+
+def _usable_models(infos: Iterable[ACPModelInfo]) -> list[ACPModelInfo]:
+    """Drop entries without a usable ``model_id`` — an empty/missing id is an
+    invalid picker option and an unusable model-switch target."""
+    return [info for info in infos if info.model_id]
+
+
 def _extract_session_models(
     response: Any,
-) -> tuple[str | None, list[ACPModelInfo] | None]:
-    """Extract the model state off a session response.
+    *,
+    default_via_config_option: bool = False,
+) -> tuple[str | None, list[ACPModelInfo] | None, bool]:
+    """Extract the model state off a session response in a single scan.
 
-    Returns a ``(current_model_id, available_models)`` pair, both best-effort.
-    ``available_models`` is normalized into our own stable :class:`ACPModelInfo`
-    type at this boundary so nothing downstream depends on the vendored
-    ``acp.schema`` shape.
+    Returns ``(current_model_id, available_models, via_config_option)``, all
+    best-effort. ``available_models`` is normalized into our own stable
+    :class:`ACPModelInfo` type at this boundary so nothing downstream depends on
+    the vendored ``acp.schema`` shape. Reads whichever mechanism the session
+    advertised: the UNSTABLE ``models`` capability, or the ``model``
+    ``configOptions`` select (codex-acp 0.16+, claude-agent-acp 0.44+).
 
-    The second element distinguishes **absent** from **empty** — this matters
+    ``available_models`` distinguishes **absent** from **empty** — this matters
     for resume persistence (preserve the last-known list when the server didn't
     report one; clear it when the server explicitly says it has none):
 
-    - ``None``  — the (UNSTABLE) ``models`` block was absent from the response
-      (older agent, opted out, or ``load_session`` not carrying it).
-    - ``[]``    — the server *did* report ``models`` but offers no (usable)
-      models this session.
+    - ``None``  — neither mechanism was present in the response (older agent,
+      opted out, or ``load_session`` not carrying it).
+    - ``[]``    — the server reported a mechanism but offers no (usable) models.
     - ``[...]`` — the reported models, minus any with an unusable ``model_id``.
+
+    ``via_config_option`` is the selection mechanism: ``True`` for the
+    configOptions select, ``False`` for the ``models`` capability, and
+    ``default_via_config_option`` when the response carries neither (the
+    resume-path default for a ``load_session`` that omits the model block).
 
     ``getattr`` keeps the helper tolerant of agents that emit a partial
     structure.
     """
     if response is None:
-        return None, None
+        return None, None, default_via_config_option
     models = getattr(response, "models", None)
-    if models is None:
-        return None, None
-    current = getattr(models, "current_model_id", None)
+    if models is not None:
+        current = getattr(models, "current_model_id", None)
+        current = current if isinstance(current, str) and current else None
+        raw = getattr(models, "available_models", None) or []
+        usable = _usable_models(ACPModelInfo.from_protocol(m) for m in raw)
+        return current, usable, False
+    # configOptions mechanism: the ``model`` select carries the same state, with
+    # each option's ``value`` as the model id (== the ``set_config_option`` target).
+    opt = _model_config_option(response)
+    if opt is None:
+        return None, None, default_via_config_option
+    current = getattr(opt, "current_value", None)
     current = current if isinstance(current, str) and current else None
-    raw = getattr(models, "available_models", None) or []
-    # Drop entries without a usable id: an empty/missing ``model_id`` is an
-    # invalid picker option and an unusable model-selection target, so we
-    # filter it out rather than surfacing ``model_id=""``.
-    available = [
-        info for info in (ACPModelInfo.from_protocol(m) for m in raw) if info.model_id
-    ]
-    return current, available
+    options = getattr(opt, "options", None) or []
+    usable = _usable_models(
+        ACPModelInfo.from_protocol(o, id_attr="value") for o in options
+    )
+    return current, usable, True
 
 
 # The ACP MCP server union accepted by new_session() / load_session().
@@ -560,40 +655,52 @@ async def _maybe_set_session_model(
     agent_name: str,
     session_id: str,
     acp_model: str | None,
+    *,
+    via_config_option: bool,
 ) -> bool:
     """Apply the *initial* session model right after session creation.
 
-    This is the session-creation path only, gated on each provider's configured
-    model-selection method. claude-agent-acp used to be skipped on the
-    assumption that it already received the model via ``new_session()`` ``_meta``,
-    but 0.30.0 silently ignores that payload (#3654) — a protocol call is the
-    only path that both validates and applies the model.
+    Session-creation path only, gated on
+    ``ACPProviderInfo.supports_set_session_model``. The model is applied via the
+    mechanism the session advertised (``via_config_option``):
+    ``set_config_option(configId="model")`` for configOptions-based servers
+    (codex-acp 0.16+, claude-agent-acp 0.44+), else ``set_session_model``. The
+    ``_meta`` model payload is ignored by the pinned CLIs, so this protocol call
+    is what actually applies the model (#3654). A rejection is tolerated for
+    any provider — the curated model list is a pre-session suggestion, not an
+    access check (a server's model menu is dynamic/account-dependent), so the
+    session keeps the server default rather than failing to start. Runtime
+    switches go through :meth:`ACPAgent.set_acp_model`.
 
-    For unknown/custom providers (e.g. Devin CLI), we fall back to the generic
-    ``set_config_option`` method with configId="model", which is a standard ACP
-    method that many custom ACP servers support.
-
-    Runtime, mid-conversation switches go through
-    :meth:`ACPAgent.set_acp_model` instead, which is gated on the separate
-    ``supports_runtime_model_switch`` capability flag.
-
-    Returns ``True`` only when this issued a model-setting call that succeeded — i.e.
-    the override was actually pushed to the server via *this* path. ``False``
-    when there is nothing to apply (no ``acp_model``) or the provider selects
-    its model another way (``_meta``) or the server rejected the call, so
-    the caller can tell whether the live session is really running ``acp_model``.
+    Returns ``True`` only when a model-setting call succeeded (the override
+    reached the server); ``False`` when there is nothing to apply or the call
+    was rejected, so the caller knows whether the live session runs ``acp_model``.
     """
     if not acp_model:
         return False
     provider = detect_acp_provider_by_agent_name(agent_name)
+    # Known providers gate on supports_set_session_model; unknown/custom servers
+    # always attempt (best-effort).
+    if provider is not None and not provider.supports_set_session_model:
+        return False
+    # A rejection is tolerated so session creation can't break: the curated model
+    # list is a suggestion, not an access check — a server's model menu is
+    # dynamic/account-dependent (claude-agent-acp validates set_config_option
+    # against the live select and rejects an absent id), so a model the live
+    # session won't accept degrades to the server default rather than failing.
     try:
-        return await _apply_acp_model(conn, provider, agent_name, session_id, acp_model)
+        await _apply_acp_model(
+            conn,
+            session_id,
+            acp_model,
+            agent_name=agent_name,
+            via_config_option=via_config_option,
+        )
+        return True
     except ACPRequestError as e:
-        if provider is not None:
-            raise
         logger.warning(
-            "Could not set model %r on unknown/custom ACP server %s via "
-            "set_config_option (%s); the session will use the server default",
+            "Could not set model %r on ACP server %s (%s); "
+            "the session will use the server default",
             acp_model,
             agent_name,
             e,
@@ -601,80 +708,34 @@ async def _maybe_set_session_model(
         return False
 
 
-async def _apply_acp_model(
-    conn: ClientSideConnection,
-    provider: ACPProviderInfo | None,
-    agent_name: str,
-    session_id: str,
-    acp_model: str,
-) -> bool:
-    """Apply a model with the provider's configured ACP model-selection method."""
-    if provider is not None:
-        if provider.model_selection_method == "set_config_option":
-            for config_id, value in _model_config_options(provider, acp_model):
-                await conn.set_config_option(
-                    config_id=config_id,
-                    value=value,
-                    session_id=session_id,
-                )
-            logger.info(
-                "Set model %r on ACP provider %s via set_config_option",
-                acp_model,
-                provider.key,
-            )
-            return True
-        elif provider.supports_set_session_model:
-            await conn.set_session_model(model_id=acp_model, session_id=session_id)
-            return True
-        else:
-            return False
-
-    # For unknown/custom providers, try set_config_option as a best-effort
-    # standard ACP configuration method. Some custom servers may still reject it.
-    await conn.set_config_option(
-        config_id="model",
-        value=acp_model,
-        session_id=session_id,
-    )
-    logger.info(
-        "Set model %r on unknown/custom ACP server %s via set_config_option",
-        acp_model,
-        agent_name,
-    )
-    return True
-
-
 async def _reapply_session_model_on_resume(
     conn: ClientSideConnection,
     agent_name: str,
     session_id: str,
     acp_model: str | None,
+    *,
+    via_config_option: bool,
 ) -> bool:
     """Reapply the persisted model to a *resumed* session.
 
     ``load_session()`` carries no model ``_meta``, so a session resumed after a
     runtime switch (or with any persisted ``acp_model``) would otherwise run on
-    the ACP server's default. This issues the provider's model-selection method
-    so the resumed live session matches the serialized ``acp_model``.
+    the ACP server's default. This applies the model via the mechanism the
+    resumed session uses (``via_config_option``: ``set_config_option`` for
+    codex-acp 0.16+/claude-agent-acp 0.44+, else ``set_session_model``) so the
+    live session matches the serialized ``acp_model``. The caller derives
+    ``via_config_option`` from the ``load_session`` response, falling back to the
+    persisted mechanism hint when that response omits the model block.
 
-    For unknown/custom providers (e.g. Devin CLI), we fall back to the generic
-    ``set_config_option`` method with configId="model", which is a standard ACP
-    method that many custom ACP servers support.
-
-    The gating mirrors :meth:`ACPAgent.set_acp_model` (attempt for custom/unknown
-    servers and known providers that support runtime switching; skip only known
-    providers that don't), deliberately differing from the initial-selection
-    gate: claude-agent-acp sends initial model ``_meta`` yet still needs a
-    protocol-level model-selection call. A server that rejects the call is
-    tolerated (logged) — like the ``load_session`` fallback above — so resume
-    can't break; the session keeps the server default until the next switch.
+    Gated on runtime-switch support (skip only known providers that don't); a
+    server that rejects the call is tolerated (logged) — like the
+    ``load_session`` fallback — so resume can't break and the session keeps the
+    server default until the next switch.
 
     Returns ``True`` only when a model-setting call was issued and accepted, so
     the caller knows the resumed live session is actually running ``acp_model``.
     ``False`` when there is nothing to reapply, the provider doesn't support the
-    switch, or the server rejected the call (swallowed) — in those cases the
-    session keeps the server default and the override must not be surfaced as
-    the current model.
+    switch, or the server rejected the call (swallowed).
     """
     if not acp_model:
         return False
@@ -682,7 +743,14 @@ async def _reapply_session_model_on_resume(
     if provider is not None and not provider.supports_runtime_model_switch:
         return False
     try:
-        return await _apply_acp_model(conn, provider, agent_name, session_id, acp_model)
+        await _apply_acp_model(
+            conn,
+            session_id,
+            acp_model,
+            agent_name=agent_name,
+            via_config_option=via_config_option,
+        )
+        return True
     except ACPRequestError as e:
         logger.warning(
             "Could not reapply model %r on resumed session %s (%s); the live "
@@ -1308,6 +1376,20 @@ class ACPAgent(AgentBase):
             " ['npx', '-y', '@agentclientprotocol/claude-agent-acp']"
         ),
     )
+    acp_server: str | None = Field(
+        default=None,
+        description=(
+            "Provider registry key identifying which ACP CLI this agent runs "
+            "('claude-code', 'codex', 'gemini-cli', or 'custom'); None when the "
+            "agent is built directly rather than via ACPAgentSettings. Set by "
+            "ACPAgentSettings.create_agent() from ACPAgentSettings.acp_server so "
+            "the authoritative key survives onto the agent — and thus onto "
+            "ConversationInfo.agent — because the launch command in acp_command "
+            "does not reliably reverse-map to a provider. Informational only: "
+            "consumers use it to resolve a provider brand label / model list; "
+            "the subprocess is still launched from acp_command."
+        ),
+    )
     acp_args: list[str] = Field(
         default_factory=list,
         description="Additional arguments for the ACP server command",
@@ -1378,10 +1460,10 @@ class ACPAgent(AgentBase):
     acp_model: str | None = Field(
         default=None,
         description=(
-            "Model for the ACP server to use (e.g. 'claude-opus-4-6' or "
-            "'gpt-5.4'). For Claude ACP, also passed via session _meta. For "
-            "Codex ACP, applied via session/set_config_option configId='model'. "
-            "If None, the server picks its default."
+            "Model for the ACP server to use (e.g. 'sonnet' or 'gpt-5.5'). "
+            "Applied via the protocol — set_config_option(model) for "
+            "configOptions-based servers (codex, claude), else "
+            "set_session_model. If None, the server picks its default."
         ),
     )
     acp_resume_session_id: str | None = Field(
@@ -1503,10 +1585,16 @@ class ACPAgent(AgentBase):
     _agent_version: str = PrivateAttr(
         default=""
     )  # ACP server version from InitializeResponse
+    # Which protocol this session uses to select the model: ``True`` ⇒
+    # ``session/set_config_option(configId="model")`` (codex-acp 0.16+,
+    # claude-agent-acp 0.44+); ``False`` ⇒ ``session/set_model`` (gemini-cli and
+    # older codex/claude). Detected from the session/new (or load_session)
+    # response at init and reused by runtime ``set_acp_model`` switches.
+    _model_via_config_option: bool = PrivateAttr(default=False)
     # The model the ACP server reported as active for this session, captured
     # from ``models.currentModelId`` on the new_session / load_session
     # response.  Overridden by ``self.acp_model`` when the caller explicitly
-    # chose one (via the provider's model-selection method or session ``_meta``).
+    # chose one (either via ``set_session_model`` or via session ``_meta``).
     # ``None`` when the server doesn't surface model state — the field is
     # marked UNSTABLE in the ACP spec, so older agents may omit it.
     #
@@ -1526,7 +1614,7 @@ class ACPAgent(AgentBase):
     # list on resume. The public ``available_models`` property coerces to ``[]``.
     _available_models: list[ACPModelInfo] | None = PrivateAttr(default=None)
     # Whether the caller's ``acp_model`` was actually pushed to the server in
-    # the most recent session init (via session ``_meta`` or a model-selection call).
+    # the most recent session init (via session ``_meta`` or ``set_session_model``).
     # ``False`` when there's no override, the provider can't apply it (unknown
     # server on a fresh session), or the server rejected the call on resume — in
     # those cases the live session runs its own default, so neither
@@ -1678,6 +1766,13 @@ class ACPAgent(AgentBase):
         through ``model_dump()``.  Consumers that need to read it across the
         API boundary should look at ``ConversationInfo.current_model_id``,
         which the agent-server lifts off the agent into the response.
+
+        This (the protocol-reported session model) is the authoritative model
+        id — trust it over what the model says about itself. Provider models
+        introspect their own identity unreliably: gemini-cli reports a stale
+        ``gemini-1.5-flash-latest`` regardless of the active model, and codex
+        won't name its tier. Verified across all three providers; the switch is
+        honored even when the model's self-description disagrees.
         """
         return self._current_model_id
 
@@ -1691,8 +1786,8 @@ class ACPAgent(AgentBase):
         server's ``model_id`` plus an optional ``name``/``description`` —
         enough for a client to render a model picker and resolve
         ``current_model_id`` to a display label without any server-side
-        curation.  ``current_model_id`` is the value to pass to
-        the provider's model-selection method to switch.
+        curation.  ``current_model_id`` is the value to pass back to the server
+        to switch to that model.
 
         Same lifecycle and serialization caveats as ``current_model_id``:
         in-process runtime state, lifted onto
@@ -1707,10 +1802,10 @@ class ACPAgent(AgentBase):
         """Whether a live, mid-conversation model switch will be attempted.
 
         Tells a client whether to offer the inline picker's live-switch control.
-        ``True`` only for known providers that explicitly declare runtime model
-        switching support. Unknown/custom providers use ``set_config_option`` for
-        *initial* model selection but that RPC is a generic config write, not a
-        guaranteed live-switch primitive, so the picker is hidden for them.
+        ``True`` only for known providers that explicitly declare support for
+        runtime model switching. Unknown/custom providers use ``set_config_option``
+        for *initial* model selection but that RPC is a generic config write, not
+        a guaranteed live-switch primitive, so the picker is hidden for them.
         ``False`` before a session exists (nothing to switch yet).
 
         See
@@ -1720,6 +1815,29 @@ class ACPAgent(AgentBase):
             return False
         provider = detect_acp_provider_by_agent_name(self._agent_name)
         return provider is not None and provider.supports_runtime_model_switch
+
+    @property
+    def has_live_acp_session(self) -> bool:
+        """Whether a live ACP session exists to act on right now.
+
+        ``True`` only once the subprocess-backed session is fully wired —
+        connection, session id, and executor all present — which happens during
+        the first ``run()`` (see :meth:`init_state`). ``False`` before that
+        (created but not yet run) and after teardown.
+
+        Lets callers branch on session state instead of catching the
+        ``RuntimeError`` that :meth:`set_acp_model` raises pre-session or
+        reaching into the ``_conn`` / ``_session_id`` / ``_executor``
+        PrivateAttrs. In particular
+        :meth:`~openhands.sdk.conversation.impl.local_conversation.LocalConversation.switch_acp_model`
+        uses it to decide between a live in-place switch and a deferred persist
+        that the next session start applies.
+        """
+        return (
+            self._conn is not None
+            and self._session_id is not None
+            and self._executor is not None
+        )
 
     def get_all_llms(self) -> Generator[LLM]:
         yield self.llm
@@ -1854,6 +1972,10 @@ class ACPAgent(AgentBase):
             # conversation list can tell the picker whether to offer live
             # switching without re-detecting the provider server-side.
             "acp_supports_runtime_model_switch": self.supports_runtime_model_switch,
+            # Detected model-selection mechanism — persisted so a resume whose
+            # load_session omits the model block reapplies the model via the
+            # right call instead of defaulting to set_session_model.
+            "acp_model_via_config_option": self._model_via_config_option,
         }
         # When starting a fresh session, clear stale suffix marker so the next
         # launch knows to re-inject it (PR behavior: suffix state is per-session).
@@ -2408,8 +2530,21 @@ class ACPAgent(AgentBase):
                         mcp_servers=acp_mcp_servers,
                     )
                     session_id = prior_session_id
-                    reported_model_id, available_models = _extract_session_models(
-                        load_response
+                    # load_session often omits the model block; fall back to the
+                    # mechanism detected at session creation (persisted alongside
+                    # the session id) so a config-option session still reapplies
+                    # via the right call rather than defaulting to
+                    # set_session_model and silently running the server default.
+                    persisted_via_config_option = bool(
+                        state.agent_state.get("acp_model_via_config_option", False)
+                    )
+                    (
+                        reported_model_id,
+                        available_models,
+                        self._model_via_config_option,
+                    ) = _extract_session_models(
+                        load_response,
+                        default_via_config_option=persisted_via_config_option,
                     )
                     logger.info(
                         "Resumed ACP session %s (cwd=%s)",
@@ -2426,7 +2561,7 @@ class ACPAgent(AgentBase):
             # Track whether ``acp_model`` was actually pushed to the server so
             # ``current_model_id`` below can stay honest: a caller override that
             # never reached the server (unknown provider on a fresh session, or
-            # a resume whose model-selection call the server rejected) must not
+            # a resume whose ``set_session_model`` the server rejected) must not
             # be surfaced as the live model.
             override_applied = False
             if session_id is None:
@@ -2441,28 +2576,46 @@ class ACPAgent(AgentBase):
                     **session_meta,
                 )
                 session_id = response.session_id
-                reported_model_id, available_models = _extract_session_models(response)
-                # Initial-selection protocol call for providers that use it
-                # (codex-acp, gemini-cli); no-op for claude, which selected its
-                # model via the _meta above.
+                # Detect the model-selection protocol the server advertised (in
+                # the same scan) so init and later runtime switches use the right
+                # call.
+                (
+                    reported_model_id,
+                    available_models,
+                    self._model_via_config_option,
+                ) = _extract_session_models(response)
+                # Initial-model protocol call for every built-in provider
+                # (codex, gemini, claude-code). The pinned claude/codex CLIs
+                # ignore the _meta above, so this protocol call is what actually
+                # applies the model (#3654) — via set_config_option for
+                # configOptions-based servers, else set_session_model; _meta is
+                # kept only as backward-compat for older claude CLIs.
                 applied_via_call = await _maybe_set_session_model(
                     conn,
                     agent_name,
                     session_id,
                     self.acp_model,
+                    via_config_option=self._model_via_config_option,
                 )
-                override_applied = bool(session_meta) or applied_via_call
+                # set_session_model is the authoritative signal that acp_model
+                # reached the server. _meta is a no-op on the pinned claude CLI,
+                # so it must not by itself claim the override took effect. (For
+                # claude+acp_model the two always agree: the call returns True or
+                # raises before we reach here.)
+                override_applied = applied_via_call
             else:
                 # Resumed session. load_session() does not carry model _meta, so
                 # reapply the persisted (possibly runtime-switched) acp_model via
                 # the runtime-switch capability — otherwise the resumed live
                 # session would run on the server default while serialized state
-                # claims the switched model.
+                # claims the switched model. ``_model_via_config_option`` was set
+                # from the load_session response above.
                 override_applied = await _reapply_session_model_on_resume(
                     conn,
                     agent_name,
                     session_id,
                     self.acp_model,
+                    via_config_option=self._model_via_config_option,
                 )
 
             # Resolve the model the agent will actually use.
@@ -2472,10 +2625,9 @@ class ACPAgent(AgentBase):
                 else reported_model_id
             )
 
-            # Resolve the permission mode.  Known providers each have their
-            # own mode ID (bypassPermissions, full-access, yolo …).
-            # Unknown/custom servers get None — skip the call rather than
-            # sending a provider-specific string they won't recognise.
+            # Resolve the permission mode. Known providers each have their own
+            # mode ID; unknown/custom servers get None — skip the call rather
+            # than sending a provider-specific string they won't recognise.
             provider = detect_acp_provider_by_agent_name(agent_name)
             mode_id = self.acp_session_mode or (
                 provider.default_session_mode if provider else None
@@ -2690,6 +2842,20 @@ class ACPAgent(AgentBase):
         # subprocess can load_session() and retain conversation memory.
         self.init_state(state, on_event=on_event)
         self._restart_session_on_next_turn = False
+
+    async def _arestart_session_after_drain_timeout(
+        self,
+        state: ConversationState,
+        on_event: ConversationCallbackType,
+    ) -> None:
+        """Restart ACP without blocking the async conversation loop."""
+        # Restart calls init_state(), which may synchronously resolve LookupSecret
+        # values through HTTP loopback to this same agent server. Keep it off the
+        # server loop for the same reason LocalConversation.arun() offloads the
+        # initial _ensure_agent_ready() path.
+        await asyncio.to_thread(
+            self._restart_session_after_drain_timeout, state, on_event
+        )
 
     def _request_session_cancel(self) -> None:
         """Ask the ACP server to cancel the active session prompt."""
@@ -3196,7 +3362,7 @@ class ACPAgent(AgentBase):
         if self._restart_session_on_next_turn:
             # If restart initialization fails, let the conversation transition
             # to ERROR rather than reusing an ambiguous ACP session.
-            self._restart_session_after_drain_timeout(state, on_event)
+            await self._arestart_session_after_drain_timeout(state, on_event)
 
         prompt_blocks: list[Any] | None = None
         if prompt_message is not None:
@@ -3433,9 +3599,11 @@ class ACPAgent(AgentBase):
     def set_acp_model(self, model: str) -> None:
         """Switch the model on the running ACP session (mid-conversation).
 
-        Issues the provider's protocol-level model-selection call on the live
-        connection so the new model takes effect for subsequent turns in the
-        *same* session — no subprocess restart, no loss of conversation
+        Issues a protocol-level model-switch call on the live connection (the
+        mechanism the session advertised — ``set_config_option(model)`` or
+        ``set_session_model``) so the new model takes effect for subsequent
+        turns in the *same* session — no subprocess restart, no loss of
+        conversation
         context. Verified against claude-agent-acp and codex-acp.
 
         This is the low-level agent primitive; prefer
@@ -3450,12 +3618,12 @@ class ACPAgent(AgentBase):
 
         Args:
             model: Provider-specific model id to switch to (e.g.
-                ``"claude-haiku-4-5-20251001"`` or ``"gpt-5.4/low"``).
+                ``"sonnet"`` or ``"gpt-5.5"``).
 
         Raises:
             ValueError: If ``model`` is empty or whitespace-only, if the
                 detected provider does not support runtime model switching, or
-                if the ACP server rejects the model-selection call (e.g.
+                if the ACP server rejects the model-switch call (e.g.
                 method-not-found on a custom server, or an invalid model id).
             RuntimeError: If the ACP session has not been initialized yet
                 (i.e. before the first ``run()``).
@@ -3464,18 +3632,25 @@ class ACPAgent(AgentBase):
 
         Note:
             A timeout means the client stopped waiting, not that the switch was
-            rejected: the model-selection request may already have been written
-            and could still be applied server-side. The connection and session
-            stay alive and the local sentinel model is intentionally left
-            unchanged, so a timed-out switch leaves the server-side model
+            rejected: the switch request may already have been written and
+            could still be applied server-side. The connection and
+            session stay alive and the local sentinel model is intentionally
+            left unchanged, so a timed-out switch leaves the server-side model
             indeterminate. The conservative choice (treat it as failed locally)
             keeps cost/token accounting on the previously-known model and
             self-heals on the next successful switch; the agent itself always
             runs whatever model the live ACP session holds.
+
+            claude-agent-acp caveat: a live switch changes the session model
+            and the inference target, but the model-naming system context is
+            injected at session *start* and is not refreshed here, so the
+            agent's self-reported identity can lag (e.g. still says "haiku"
+            after switching to sonnet) until a new session. The switch itself
+            is applied; only the model's self-description is stale.
         """
         if not model or not model.strip():
             raise ValueError("model must be a non-empty string")
-        if self._conn is None or self._session_id is None or self._executor is None:
+        if not self.has_live_acp_session:
             raise RuntimeError(
                 "ACP session is not initialized; the model can only be switched "
                 "after the conversation has started (first run())."
@@ -3486,50 +3661,45 @@ class ACPAgent(AgentBase):
                 f"ACP provider '{provider.key}' does not support runtime model "
                 "switching."
             )
+        # ``has_live_acp_session`` above guarantees a session id; narrow for the
+        # type checker.
+        assert self._session_id is not None
         # Bounded round-trip: this runs while LocalConversation.switch_acp_model
         # holds the state lock, so a server that accepts the call but never
         # answers must not wedge the lock indefinitely. On timeout / protocol
         # error we propagate *before* mutating any local state, so the sentinel
         # LLM is only updated once the live session has actually switched.
-        if (
-            provider is not None
-            and provider.model_selection_method == "set_config_option"
-        ):
-
-            async def _set_config_options() -> None:
-                assert self._conn is not None
-                assert self._session_id is not None
-                for config_id, value in _model_config_options(provider, model):
-                    await self._conn.set_config_option(
-                        config_id=config_id,
-                        value=value,
-                        session_id=self._session_id,
-                    )
-
-            model_selection_call = _set_config_options()
-        else:
-            model_selection_call = self._conn.set_session_model(
-                model_id=model, session_id=self._session_id
-            )
         try:
             self._executor.run_async(
-                model_selection_call,
+                _apply_acp_model(
+                    self._conn,
+                    self._session_id,
+                    model,
+                    agent_name=self._agent_name,
+                    via_config_option=self._model_via_config_option,
+                ),
                 timeout=self.acp_prompt_timeout,
             )
         except ACPRequestError as e:
             # Server-internal failures (JSON-RPC -32603) are not the caller's
             # fault, and the prompt path already treats them as retriable. Let
-            # them propagate (-> 5xx) instead of mislabeling them as a 400
-            # client error.
+            # them propagate (-> 5xx) instead of mislabeling them as a 400.
             if e.code in _RETRIABLE_SERVER_ERROR_CODES:
                 raise
             # acp.exceptions.RequestError derives from Exception (not
-            # RuntimeError); surface a true client/protocol rejection (e.g.
-            # method-not-found, invalid model id) as a ValueError so callers —
-            # and the agent-server route — treat it as a 400-class client error
-            # rather than an opaque 500.
+            # RuntimeError); surface a true client/protocol rejection (invalid
+            # model id, or method-not-found on a mis-detected server) as a
+            # ValueError so callers — and the agent-server route — treat it as a
+            # 400-class client error rather than an opaque 500. The mechanism is
+            # the one the session advertised (``_model_via_config_option``), so
+            # the message names the call that actually failed.
+            method = (
+                "set_config_option(model)"
+                if self._model_via_config_option
+                else "set_session_model"
+            )
             raise ValueError(
-                f"ACP server rejected model switch to {model!r}: {e}"
+                f"ACP server rejected {method}(model={model!r}): {e}"
             ) from e
         # Reflect the live model on the sentinel LLM + metrics so cost/token
         # accounting and serialized state show the model actually in use

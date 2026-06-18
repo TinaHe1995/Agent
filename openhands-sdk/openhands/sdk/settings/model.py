@@ -1322,10 +1322,10 @@ class ACPAgentSettings(AgentSettingsBase):
     acp_model: str | None = Field(
         default=None,
         description=(
-            "Model identifier for the ACP server to use (e.g. "
-            "``'claude-opus-4-6'``). Providers apply it through their "
-            "configured ACP model-selection method. "
-            "Leave blank to let the server pick its default."
+            "Model identifier for the ACP server to use (e.g. ``'sonnet'`` or "
+            "``'gpt-5.5'``). Applied via the protocol — set_config_option(model) "
+            "for configOptions-based servers (codex, claude), else "
+            "set_session_model. Leave blank to let the server pick its default."
         ),
         json_schema_extra={
             SETTINGS_METADATA_KEY: SettingsFieldMetadata(
@@ -1724,6 +1724,11 @@ class ACPAgentSettings(AgentSettingsBase):
         return ACPAgent(
             llm=self.llm,
             acp_command=self.resolve_acp_command(),
+            # Carry the authoritative provider key onto the agent: acp_command
+            # alone does not reliably reverse-map to a provider, so consumers
+            # (e.g. the conversation UI resolving a brand label / model list)
+            # read it from ConversationInfo.agent.acp_server.
+            acp_server=self.acp_server,
             acp_args=list(self.acp_args),
             # Pass acp_env directly rather than via resolve_acp_env() so the
             # deprecation warning is not emitted twice on the create_agent path:

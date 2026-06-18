@@ -522,6 +522,64 @@ def test_patch_settings_rejects_invalid_active_profile(client_with_settings):
     assert response.status_code == 422
 
 
+def test_patch_settings_active_agent_profile_id_independent(client_with_settings):
+    """active_agent_profile_id sets/clears independently of active_profile."""
+    agent_id = "12345678-1234-1234-1234-1234567890ab"
+    set_response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_profile": "fast-profile", "active_agent_profile_id": agent_id},
+    )
+    assert set_response.status_code == 200
+    body = set_response.json()
+    assert body["active_profile"] == "fast-profile"
+    assert body["active_agent_profile_id"] == agent_id
+
+    # Clearing the agent pointer must leave the LLM profile pointer untouched.
+    clear_response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_agent_profile_id": None},
+    )
+    assert clear_response.status_code == 200
+    cleared = clear_response.json()
+    assert cleared["active_agent_profile_id"] is None
+    assert cleared["active_profile"] == "fast-profile"
+
+    refetch = client_with_settings.get("/api/settings").json()
+    assert refetch["active_agent_profile_id"] is None
+    assert refetch["active_profile"] == "fast-profile"
+
+
+def test_patch_settings_rejects_malformed_active_agent_profile_id(client_with_settings):
+    """A non-UUID active_agent_profile_id is rejected at the HTTP layer."""
+    response = client_with_settings.patch(
+        "/api/settings",
+        json={"active_agent_profile_id": "not-a-uuid"},
+    )
+    assert response.status_code == 422
+
+
+def test_existing_settings_load_with_null_active_agent_profile_id(
+    temp_persistence_dir, config_with_settings
+):
+    """A settings file predating the field loads with active_agent_profile_id=None."""
+    _write_settings_file(
+        temp_persistence_dir,
+        {
+            "schema_version": PERSISTED_SETTINGS_SCHEMA_VERSION,
+            "agent_settings": {"agent_kind": "openhands"},
+            "active_profile": "legacy-profile",
+        },
+    )
+
+    client = TestClient(create_app(config_with_settings))
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_profile"] == "legacy-profile"
+    assert body["active_agent_profile_id"] is None
+
+
 def test_patch_settings_updates_condenser_config(client_with_settings):
     """PATCH /api/settings can update condenser constructor settings."""
     response = client_with_settings.patch(
@@ -642,7 +700,7 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     assert response.json()["detail"] == (
         "At least one of agent_settings_diff, "
         "conversation_settings_diff, misc_settings_diff, "
-        "or active_profile must be provided"
+        "active_profile, or active_agent_profile_id must be provided"
     )
 
 
@@ -868,6 +926,99 @@ def test_deep_merge_non_null_still_wins():
     assert merged == {"a": 2, "b": {"x": 1, "y": 2}}
 
 
+# ── apply_agent_settings_diff parity (PersistedSettings.update) ─────────
+
+
+def test_update_agent_settings_same_kind_merge() -> None:
+    """Same-kind update deep-merges within the variant."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-4o"}}})
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_kind_switch_replaces_fresh() -> None:
+    """Kind switch starts from fresh variant; old fields are not carried."""
+    settings = PersistedSettings()
+    settings.update({"agent_settings_diff": {"llm": {"model": "gpt-x"}}})
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "claude-code"}}
+    )
+
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_server == "claude-code"
+
+
+def test_update_agent_settings_switch_back_to_openhands() -> None:
+    """Switching back to openhands starts fresh; ACP fields are not leaked."""
+    from openhands.sdk.settings.model import OpenHandsAgentSettings
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "acp", "acp_server": "gemini-cli"}}
+    )
+
+    settings.update(
+        {"agent_settings_diff": {"agent_kind": "openhands", "llm": {"model": "gpt-4o"}}}
+    )
+
+    assert isinstance(settings.agent_settings, OpenHandsAgentSettings)
+    assert settings.agent_settings.llm.model == "gpt-4o"
+
+
+def test_update_agent_settings_null_unsets_optional_field() -> None:
+    """A null value on an optional field resets it to default (RFC 7386 semantics)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_model": "claude-opus-4-8",
+            }
+        }
+    )
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_model == "claude-opus-4-8"
+
+    settings.update({"agent_settings_diff": {"acp_model": None}})
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+    assert settings.agent_settings.acp_model is None
+
+
+def test_update_agent_settings_nested_null_removes_map_entry() -> None:
+    """A null inside a nested map removes that entry (acp_env key removal)."""
+    settings = PersistedSettings()
+    settings.update(
+        {
+            "agent_settings_diff": {
+                "agent_kind": "acp",
+                "acp_server": "claude-code",
+                "acp_env": {"KEEP": "yes", "DROP": "bye"},
+            }
+        }
+    )
+    assert isinstance(settings.agent_settings, ACPAgentSettings)
+
+    settings.update({"agent_settings_diff": {"acp_env": {"DROP": None}}})
+    assert settings.agent_settings.acp_env == {"KEEP": "yes"}
+
+
+def test_update_agent_settings_secret_survives_same_kind_merge() -> None:
+    """An existing api_key in agent_settings is preserved across a same-kind update."""
+    from pydantic import SecretStr
+
+    settings = PersistedSettings()
+    settings.update(
+        {"agent_settings_diff": {"llm": {"model": "gpt-4o", "api_key": "sk-SECRET"}}}
+    )
+
+    settings.update({"agent_settings_diff": {"llm": {"temperature": 0.5}}})
+
+    assert isinstance(settings.agent_settings.llm.api_key, SecretStr)
+    assert settings.agent_settings.llm.api_key.get_secret_value() == "sk-SECRET"
+
+
 def _seed_acp_settings(persistence_dir: Path, acp_env: dict[str, str]) -> None:
     """Write a settings.json with an active ACP agent carrying ``acp_env``."""
     acp = ACPAgentSettings(acp_command=["echo", "hi"], acp_env=acp_env)
@@ -923,22 +1074,21 @@ def test_patch_settings_unset_then_add_acp_env_key(
     assert set(response.json()["agent_settings"]["acp_env"]) == {"OLD", "NEW"}
 
 
-def test_patch_settings_null_on_acp_env_field_itself_is_rejected(
+def test_patch_settings_null_on_acp_env_field_resets_to_default(
     client_with_settings, temp_persistence_dir
 ):
-    """A ``null`` on the ``acp_env`` *field* (not an entry) is not an unset —
-    it flows to validation. ``acp_env`` is a non-optional dict, so it 422s
-    rather than wiping the map; clients clear a map by sending ``{}``."""
+    """A ``null`` on the ``acp_env`` field itself resets it to its default ``{}``
+    (RFC 7386 semantics via apply_agent_settings_diff). This is a change from the
+    old _deep_merge behavior where top-level null would flow to validation and 422."""
     _seed_acp_settings(temp_persistence_dir, {"KEEP_ME": "keep"})
 
     response = client_with_settings.patch(
         "/api/settings",
         json={"agent_settings_diff": {"acp_env": None}},
     )
-    assert response.status_code == 422
-    # The pre-existing value is untouched (atomic validate-then-apply).
+    assert response.status_code == 200
     after = client_with_settings.get("/api/settings").json()
-    assert set(after["agent_settings"]["acp_env"]) == {"KEEP_ME"}
+    assert after["agent_settings"]["acp_env"] == {}
 
 
 def test_patch_settings_null_on_scalar_field_fails_loudly(client_with_settings):
