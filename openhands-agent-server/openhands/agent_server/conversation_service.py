@@ -241,20 +241,54 @@ def _prepare_request_workspace(
 logger = logging.getLogger(__name__)
 
 
+def _load_mcp_config(
+    conversations_dir: Path,
+    cipher: "Cipher | None",
+) -> "Any":
+    """Load the global MCP config using the server's cipher.
+
+    Derives the persistence dir from ``conversations_dir`` (or ``OH_PERSISTENCE_DIR``
+    env var), exactly mirroring :func:`_get_persistence_dir` in the store module,
+    and builds a short-lived ``FileSettingsStore`` instance with the caller-supplied
+    cipher.  This avoids touching the singleton — which may not yet have been
+    initialised with the correct cipher if this is the first settings-store access
+    after boot.
+    """
+    import os
+
+    from openhands.agent_server.persistence import FileSettingsStore, PersistedSettings
+
+    env_dir = os.environ.get("OH_PERSISTENCE_DIR")
+    persistence_dir = (
+        Path(env_dir) if env_dir else conversations_dir.parent / ".openhands"
+    )
+    settings = (
+        FileSettingsStore(persistence_dir=persistence_dir, cipher=cipher).load()
+        or PersistedSettings()
+    )
+    return settings.agent_settings.mcp_config
+
+
 def _resolve_agent_from_profile(
     profile_id: "UUID",
     cipher: "Cipher | None",
+    mcp_config: "Any",
 ) -> "tuple[AgentBase, LaunchedProfile]":
     """Load and resolve an agent profile by id, returning the built agent + provenance.
 
     Runs synchronously (call via ``asyncio.to_thread`` from async context).
+
+    Args:
+        mcp_config: Global MCP config already loaded by the caller using the
+            server's cipher.  Passed explicitly so this free function never
+            touches the settings-store singleton (which may not have been
+            initialised with the correct cipher yet).
 
     Raises:
         ProfileNotFound: No stored profile has ``profile_id``.
         DanglingMcpServerRef: A referenced MCP server is absent from the global config.
         ValueError: Profile load or settings validation failure.
     """
-    from openhands.agent_server.persistence import PersistedSettings, get_settings_store
     from openhands.sdk.llm.llm_profile_store import LLMProfileStore
     from openhands.sdk.profiles.agent_profile_store import AgentProfileStore
     from openhands.sdk.profiles.resolver import (
@@ -278,11 +312,6 @@ def _resolve_agent_from_profile(
         raise ValueError(
             f"Failed to load agent profile '{profile_name}': {exc}"
         ) from exc
-
-    # Global MCP config — already decrypted by the FileSettingsStore cipher context.
-    settings_store = get_settings_store()
-    settings = settings_store.load() or PersistedSettings()
-    mcp_config = settings.agent_settings.mcp_config
 
     llm_store = LLMProfileStore()
     try:
@@ -679,10 +708,15 @@ class ConversationService:
         # agent is captured in request_data.
         launched_profile: LaunchedProfile | None = None
         if request.agent_profile_id is not None:
+            # Load mcp_config using the service's own cipher so the free function
+            # never touches the settings-store singleton, which may not yet be
+            # initialised with the server cipher if this is the first request.
+            mcp_config = _load_mcp_config(self.conversations_dir, self.cipher)
             resolved_agent, launched_profile = await asyncio.to_thread(
                 _resolve_agent_from_profile,
                 request.agent_profile_id,
                 self.cipher,
+                mcp_config,
             )
             request = request.model_copy(update={"agent": resolved_agent})
 

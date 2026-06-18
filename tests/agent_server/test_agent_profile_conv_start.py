@@ -149,7 +149,6 @@ class TestStartConversationRequestValidation:
 # The helper does local imports inside the function body; patch at the source modules.
 _STORE_PATH = "openhands.sdk.profiles.agent_profile_store.AgentProfileStore"
 _LLM_STORE_PATH = "openhands.sdk.llm.llm_profile_store.LLMProfileStore"
-_SETTINGS_STORE_PATH = "openhands.agent_server.persistence.get_settings_store"
 _RESOLVE_PATH = "openhands.sdk.profiles.resolver.resolve_agent_profile"
 
 
@@ -162,7 +161,7 @@ class TestResolveAgentFromProfile:
         with patch(_STORE_PATH) as MockStore:
             MockStore.return_value.name_for_id.return_value = None
             with pytest.raises(ProfileNotFound, match="not found"):
-                _resolve_agent_from_profile(uuid4(), cipher=None)
+                _resolve_agent_from_profile(uuid4(), cipher=None, mcp_config=None)
 
     def test_openhands_profile_resolves_to_agent_and_stamps_launched(self):
         from openhands.agent_server.conversation_service import (
@@ -175,22 +174,18 @@ class TestResolveAgentFromProfile:
         with (
             patch(_STORE_PATH) as MockStore,
             patch(_LLM_STORE_PATH),
-            patch(_SETTINGS_STORE_PATH) as MockSettings,
             patch(_RESOLVE_PATH) as MockResolve,
         ):
             store_inst = MockStore.return_value
             store_inst.name_for_id.return_value = profile.name
             store_inst.load.return_value = profile
 
-            MockSettings.return_value.load.return_value = MagicMock(
-                agent_settings=MagicMock(mcp_config=None)
-            )
             mock_config = MagicMock()
             mock_config.create_agent.return_value = agent
             MockResolve.return_value = mock_config
 
             result_agent, launched = _resolve_agent_from_profile(
-                profile.id, cipher=None
+                profile.id, cipher=None, mcp_config=None
             )
 
         assert result_agent is agent
@@ -206,19 +201,15 @@ class TestResolveAgentFromProfile:
         with (
             patch(_STORE_PATH) as MockStore,
             patch(_LLM_STORE_PATH),
-            patch(_SETTINGS_STORE_PATH) as MockSettings,
             patch(_RESOLVE_PATH) as MockResolve,
         ):
             store_inst = MockStore.return_value
             store_inst.name_for_id.return_value = profile.name
             store_inst.load.return_value = profile
-            MockSettings.return_value.load.return_value = MagicMock(
-                agent_settings=MagicMock(mcp_config=None)
-            )
             MockResolve.side_effect = DanglingMcpServerRef(["missing-server"])
 
             with pytest.raises(DanglingMcpServerRef) as exc_info:
-                _resolve_agent_from_profile(profile.id, cipher=None)
+                _resolve_agent_from_profile(profile.id, cipher=None, mcp_config=None)
         assert "missing-server" in exc_info.value.missing
 
     def test_acp_profile_resolves_to_acp_agent(self):
@@ -233,21 +224,17 @@ class TestResolveAgentFromProfile:
         with (
             patch(_STORE_PATH) as MockStore,
             patch(_LLM_STORE_PATH),
-            patch(_SETTINGS_STORE_PATH) as MockSettings,
             patch(_RESOLVE_PATH) as MockResolve,
         ):
             store_inst = MockStore.return_value
             store_inst.name_for_id.return_value = profile.name
             store_inst.load.return_value = profile
-            MockSettings.return_value.load.return_value = MagicMock(
-                agent_settings=MagicMock(mcp_config=None)
-            )
             mock_config = MagicMock()
             mock_config.create_agent.return_value = acp_agent
             MockResolve.return_value = mock_config
 
             result_agent, launched = _resolve_agent_from_profile(
-                profile.id, cipher=None
+                profile.id, cipher=None, mcp_config=None
             )
 
         assert result_agent is acp_agent
