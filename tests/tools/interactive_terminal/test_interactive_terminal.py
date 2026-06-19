@@ -5,6 +5,7 @@ starts a long-running command, receives a session_id, and polls for progress
 — mirroring Codex's exec_command / write_stdin / yield_time_ms design.
 """
 
+import platform
 from uuid import uuid4
 
 import pytest
@@ -25,6 +26,12 @@ from openhands.tools.interactive_terminal import (
     WriteStdinTool,
 )
 from openhands.tools.interactive_terminal.impl import _clamp_yield
+
+
+_unix_only = pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="Test uses bash syntax or Unix signal semantics not supported on Windows",
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -126,8 +133,9 @@ def test_fast_command_returns_exit_code(manager):
     assert wall > 0
 
 
+@_unix_only
 def test_fast_command_nonzero_exit_code(manager):
-    # Use a subshell so the shell session itself is not terminated.
+    # Use a bash subshell so the shell session itself is not terminated.
     out, wall, sid, ec = manager.exec_command("(exit 42)", yield_time_ms=5_000)
 
     assert sid is None
@@ -216,6 +224,7 @@ def test_write_stdin_polls_running_process(manager):
     manager.write_stdin(sid, chars="\x03", yield_time_ms=1_000)
 
 
+@_unix_only
 def test_write_stdin_interrupt_ctrl_c(manager):
     """Sending Ctrl+C (\\x03) stops the running process."""
     _, _, sid, _ = manager.exec_command("sleep 60", yield_time_ms=500)
@@ -230,6 +239,7 @@ def test_write_stdin_interrupt_ctrl_c(manager):
     assert ec is not None  # 130 = SIGINT on most shells
 
 
+@_unix_only
 def test_write_stdin_session_removed_after_completion(manager):
     """After a process finishes, its session is cleaned up from the manager."""
     _, _, sid, _ = manager.exec_command("sleep 60", yield_time_ms=500)
@@ -249,6 +259,7 @@ def test_write_stdin_session_removed_after_completion(manager):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@_unix_only
 def test_background_monitoring_pattern(manager):
     """Simulate the Codex agent pattern: start command, poll to completion.
 
@@ -365,6 +376,7 @@ def test_full_tool_exec_command_completes(tmp_dir):
     assert "codex_parity" in obs.output
 
 
+@_unix_only
 def test_full_tool_write_stdin_polls(tmp_dir):
     state = _conv_state(tmp_dir)
     tools = InteractiveTerminalToolSet.create(state)
