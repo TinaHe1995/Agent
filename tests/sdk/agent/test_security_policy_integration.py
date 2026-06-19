@@ -115,6 +115,34 @@ def test_custom_security_policy_in_system_message():
         assert "Download and run code from a repository" not in system_message
 
 
+def test_custom_security_policy_is_inserted_verbatim_not_rendered():
+    """Custom policy files are injected as raw text -- Jinja syntax is NOT evaluated.
+
+    Intentional contract (a security policy should not be a template-injection
+    surface); the legacy ``{% include %}`` path used to render it.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        policy_path = Path(temp_dir) / "custom_policy.j2"
+        policy_path.write_text(
+            "# Policy for {{ model_name }}\n- {% if cli_mode %}rule{% endif %}",
+            encoding="utf-8",
+        )
+        agent = Agent(
+            llm=LLM(
+                usage_id="test-llm",
+                model="test-model",
+                api_key=SecretStr("test-key"),
+                base_url="http://test",
+            ),
+            security_policy_filename=str(policy_path),
+        )
+        system_message = agent.static_system_message
+
+        # Jinja is left literal, not evaluated.
+        assert "# Policy for {{ model_name }}" in system_message
+        assert "{% if cli_mode %}rule{% endif %}" in system_message
+
+
 def test_llm_security_analyzer_template_kwargs():
     """Test that agent sets template_kwargs appropriately when security analyzer is LLMSecurityAnalyzer."""  # noqa: E501
     agent = Agent(

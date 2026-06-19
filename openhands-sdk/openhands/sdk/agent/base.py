@@ -248,7 +248,8 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
     security_policy_filename: str = Field(
         default="security_policy.j2",
         description=(
-            "Security policy template filename. Can be either:\n"
+            "Security policy filename. A custom policy file's contents are inserted "
+            "verbatim (NOT rendered as a Jinja template). Can be either:\n"
             "- A relative filename (e.g., 'security_policy.j2') loaded from the "
             "agent's prompts directory\n"
             "- An absolute path (e.g., '/path/to/custom_security_policy.j2')\n"
@@ -521,7 +522,8 @@ class AgentBase(DiscriminatedUnionMixin, ABC):
         return template_kwargs
 
     def _read_custom_security_policy(self) -> str | None:
-        """Content of a custom security policy file, or ``None`` for the default
+        """Raw contents of a custom security policy file -- inserted verbatim, NOT
+        rendered as a Jinja template -- or ``None`` for the default
         (``security_policy.j2`` sentinel) or disabled (empty) policy.
 
         Relative names resolve against ``prompt_dir``; absolute paths are used as-is.
