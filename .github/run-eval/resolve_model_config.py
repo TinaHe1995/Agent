@@ -458,7 +458,8 @@ def resolve_model_config(model_id: str) -> dict[str, Any]:
     entry.
     """
     if model_id in EXPLICIT_MODELS:
-        return dict(EXPLICIT_MODELS[model_id])
+        entry = EXPLICIT_MODELS[model_id]
+        return {**entry, "llm_config": dict(entry["llm_config"])}
 
     family = _resolve_family(model_id)
     if family is not None:
