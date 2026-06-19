@@ -456,21 +456,28 @@ class TerminalSession(TerminalSessionBase):
                     is_error=True,
                 )
 
-        # Check if the command is a single command or multiple commands
-        splited_commands = split_bash_commands(command)
-        if len(splited_commands) > 1:
-            commands_list = "\n".join(
-                f"({i + 1}) {cmd}" for i, cmd in enumerate(splited_commands)
-            )
-            return TerminalObservation.from_text(
-                text=(
-                    "Cannot execute multiple commands at once.\n"
-                    "Please run each command separately OR chain them into a single "
-                    f"command via && or ;\nProvided commands:\n{commands_list}"
-                ),
-                command=command,
-                is_error=True,
-            )
+        # Check if the command is a single command or multiple commands.
+        # Skip this check for raw stdin input (is_input=True): stdin bytes are
+        # not shell commands and may legitimately contain embedded newlines
+        # (e.g. write_stdin(chars="hello\nworld")). Running split_bash_commands
+        # on stdin would reject such input as "multiple commands" and break the
+        # byte-accurate delivery contract.
+        if not is_input:
+            splited_commands = split_bash_commands(command)
+            if len(splited_commands) > 1:
+                commands_list = "\n".join(
+                    f"({i + 1}) {cmd}" for i, cmd in enumerate(splited_commands)
+                )
+                return TerminalObservation.from_text(
+                    text=(
+                        "Cannot execute multiple commands at once.\n"
+                        "Please run each command separately OR chain them "
+                        f"into a single command via && or ;\n"
+                        f"Provided commands:\n{commands_list}"
+                    ),
+                    command=command,
+                    is_error=True,
+                )
 
         # Get initial state before sending command
         initial_terminal_output = self.terminal.read_screen()

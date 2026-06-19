@@ -365,6 +365,43 @@ def test_write_stdin_delivers_bytes_without_enter(manager):
     assert "GOT:'abcd'" in combined, f"Expected GOT:'abcd' in output, got: {combined!r}"
 
 
+@_unix_only
+def test_write_stdin_delivers_embedded_newline(manager):
+    """write_stdin must deliver input containing embedded newlines verbatim.
+
+    Regression test: the raw-stdin path wraps chars in a TerminalAction with
+    is_input=True. TerminalSession.execute() previously ran split_bash_commands()
+    on every action, so chars="hello\\nworld" was rejected as "multiple commands"
+    and nothing reached the process. Now the multi-command split is skipped for
+    is_input=True, so embedded newlines are delivered to the process byte-for-byte.
+    """
+    # Process reads two lines and prints their concatenation.
+    cmd = (
+        'python3 -c "import sys; '
+        "l1 = sys.stdin.readline(); l2 = sys.stdin.readline(); "
+        "sys.stdout.write('GOT:' + repr(l1 + l2)); sys.stdout.flush()\""
+    )
+    _, _, sid, ec, _ = manager.exec_command(cmd, yield_time_ms=2_000)
+    assert sid is not None, "Process should be blocked waiting for two stdin lines"
+    assert ec is None
+
+    # Send two lines with an embedded newline + trailing newline to flush both.
+    out, _, sid_final, ec_final, _ = manager.write_stdin(
+        sid, chars="hello\nworld\n", yield_time_ms=3_000
+    )
+    # Must NOT be rejected as "multiple commands".
+    assert "Cannot execute multiple commands" not in out, (
+        f"Embedded-newline stdin was rejected by split_bash_commands; got: {out!r}"
+    )
+    assert ec_final == 0, (
+        f"Process should finish after receiving both lines; got: {out!r}"
+    )
+    clean = out.replace("\r", "")
+    assert "GOT:'hello\\nworld\\n'" in clean, (
+        f"Expected GOT:'hello\\nworld\\n' in output, got: {clean!r}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Integration: full background-monitoring pattern
 # ──────────────────────────────────────────────────────────────────────────────
