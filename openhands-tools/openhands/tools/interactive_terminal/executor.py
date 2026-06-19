@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from openhands.tools.interactive_terminal.impl import InteractiveTerminalManager
 
 
+def _mask_output(output: str, conversation: LocalConversation | None) -> str:
+    """Apply registered-secret masking to *output* if a conversation is available."""
+    if not output or conversation is None:
+        return output
+    try:
+        masked = conversation.state.secret_registry.mask_secrets_in_output(output)
+        return masked or output
+    except Exception:  # noqa: BLE001
+        return output
+
+
 class ExecCommandExecutor(
     ToolExecutor[ExecCommandAction, InteractiveTerminalObservation]
 ):
@@ -26,7 +37,7 @@ class ExecCommandExecutor(
     def __call__(
         self,
         action: ExecCommandAction,
-        conversation: LocalConversation | None = None,  # noqa: ARG002
+        conversation: LocalConversation | None = None,
     ) -> InteractiveTerminalObservation:
         output, wall, session_id, exit_code = self._manager.exec_command(
             action.cmd,
@@ -34,9 +45,16 @@ class ExecCommandExecutor(
             yield_time_ms=action.yield_time_ms,
             max_output_tokens=action.max_output_tokens,
         )
+        output = _mask_output(output, conversation)
         return InteractiveTerminalObservation.create(
             output, wall, session_id, exit_code
         )
+
+    def close(self) -> None:
+        self._manager.close()
+
+    def interrupt(self) -> None:
+        self._manager.interrupt()
 
 
 class WriteStdinExecutor(
@@ -48,7 +66,7 @@ class WriteStdinExecutor(
     def __call__(
         self,
         action: WriteStdinAction,
-        conversation: LocalConversation | None = None,  # noqa: ARG002
+        conversation: LocalConversation | None = None,
     ) -> InteractiveTerminalObservation:
         output, wall, session_id, exit_code = self._manager.write_stdin(
             action.session_id,
@@ -56,6 +74,13 @@ class WriteStdinExecutor(
             yield_time_ms=action.yield_time_ms,
             max_output_tokens=action.max_output_tokens,
         )
+        output = _mask_output(output, conversation)
         return InteractiveTerminalObservation.create(
             output, wall, session_id, exit_code
         )
+
+    def close(self) -> None:
+        self._manager.close()
+
+    def interrupt(self) -> None:
+        self._manager.interrupt()

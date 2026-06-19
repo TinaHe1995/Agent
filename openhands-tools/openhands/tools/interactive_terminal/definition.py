@@ -277,12 +277,21 @@ class ExecCommandTool(
     """Executes a shell command and returns output or a session ID."""
 
     @classmethod
-    def create(
+    def create(  # type: ignore[override]
         cls,
-        manager: InteractiveTerminalManager,
+        conv_state: ConversationState,
+        manager: InteractiveTerminalManager | None = None,
     ) -> Sequence[ExecCommandTool]:
-        from openhands.tools.interactive_terminal.executor import ExecCommandExecutor
+        """Create an ExecCommandTool.
 
+        Pass *manager* to share a process manager with a ``WriteStdinTool``; omit
+        it (or use :class:`InteractiveTerminalToolSet`) to get a fresh manager.
+        """
+        from openhands.tools.interactive_terminal.executor import ExecCommandExecutor
+        from openhands.tools.interactive_terminal.impl import InteractiveTerminalManager
+
+        if manager is None:
+            manager = InteractiveTerminalManager(str(conv_state.workspace.working_dir))
         return [
             cls(
                 description=_EXEC_COMMAND_DESCRIPTION,
@@ -303,12 +312,21 @@ class WriteStdinTool(ToolDefinition[WriteStdinAction, InteractiveTerminalObserva
     """Sends input to or polls a running terminal session."""
 
     @classmethod
-    def create(
+    def create(  # type: ignore[override]
         cls,
-        manager: InteractiveTerminalManager,
+        conv_state: ConversationState,
+        manager: InteractiveTerminalManager | None = None,
     ) -> Sequence[WriteStdinTool]:
-        from openhands.tools.interactive_terminal.executor import WriteStdinExecutor
+        """Create a WriteStdinTool.
 
+        Pass *manager* to share a process manager with an ``ExecCommandTool``; omit
+        it (or use :class:`InteractiveTerminalToolSet`) to get a fresh manager.
+        """
+        from openhands.tools.interactive_terminal.executor import WriteStdinExecutor
+        from openhands.tools.interactive_terminal.impl import InteractiveTerminalManager
+
+        if manager is None:
+            manager = InteractiveTerminalManager(str(conv_state.workspace.working_dir))
         return [
             cls(
                 description=_WRITE_STDIN_DESCRIPTION,
@@ -351,8 +369,8 @@ class InteractiveTerminalToolSet(
         work_dir = str(conv_state.workspace.working_dir)
         manager = InteractiveTerminalManager(work_dir)
         tools: list[ToolDefinition] = []
-        tools.extend(ExecCommandTool.create(manager))
-        tools.extend(WriteStdinTool.create(manager))
+        tools.extend(ExecCommandTool.create(conv_state, manager))
+        tools.extend(WriteStdinTool.create(conv_state, manager))
         return tools
 
 

@@ -118,9 +118,10 @@ class InteractiveTerminalManager:
             if mapped is not None:
                 action = TerminalAction(command=mapped, is_input=True, timeout=yield_s)
             else:
-                # Strip a single trailing newline; the terminal adds Enter for us.
-                text = chars.rstrip("\n") if chars.endswith("\n") else chars
-                action = TerminalAction(command=text, is_input=True, timeout=yield_s)
+                # Pass chars as-is.  The tmux send_keys implementation adds an Enter
+                # keystroke only when the text does NOT already end with '\n', so
+                # multi-newline sequences ("a\n\n") are preserved correctly.
+                action = TerminalAction(command=chars, is_input=True, timeout=yield_s)
 
         t0 = time.monotonic()
         obs = session.execute(action)
@@ -128,8 +129,18 @@ class InteractiveTerminalManager:
 
         return self._build_result(obs, wall, session, session_id, max_output_tokens)
 
+    def interrupt(self) -> None:
+        """Send interrupt (Ctrl+C) to all active sessions."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            try:
+                session.interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+
     def close(self) -> None:
-        """Close all managed sessions."""
+        """Close all managed sessions. Safe to call more than once."""
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
@@ -167,9 +178,14 @@ class InteractiveTerminalManager:
         if session.is_running():
             return output, wall, session_id, None
 
-        # Process finished — remove from the sessions map.
+        # Process finished — remove from the sessions map and close the session
+        # so the underlying tmux pane / subprocess shell is torn down promptly.
         with self._lock:
             self._sessions.pop(session_id, None)
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            pass
 
         # metadata.exit_code is the real exit code when PS1 appeared, or -1
         # if the process was interrupted before the prompt could be captured.
