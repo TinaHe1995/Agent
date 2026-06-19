@@ -1093,6 +1093,162 @@ def test_run_conversation_not_found(
         client.app.dependency_overrides.clear()
 
 
+def test_start_goal_in_conversation_success(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """/goal endpoint forwards the objective to the event service."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.start_goal_loop.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal",
+            json={"objective": "build x"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        mock_event_service.start_goal_loop.assert_awaited_once_with(
+            "build x", max_iterations=10
+        )
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_start_goal_in_conversation_not_found(
+    client, mock_conversation_service, sample_conversation_id
+):
+    """/goal returns 404 when the conversation is unknown."""
+    mock_conversation_service.get_event_service.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal",
+            json={"objective": "build x"},
+        )
+        assert response.status_code == 404
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_start_goal_in_conversation_rejects_busy_loop(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """/goal returns 409 when a goal loop or conversation run is active."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.start_goal_loop.side_effect = ValueError("goal_already_running")
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal",
+            json={"objective": "build x"},
+        )
+        assert response.status_code == 409
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stop_goal_in_conversation_success(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """/goal/stop endpoint forwards to the event service."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.stop_goal_loop.return_value = True
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(f"/api/conversations/{sample_conversation_id}/goal/stop")
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        mock_event_service.stop_goal_loop.assert_awaited_once()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stop_goal_in_conversation_not_found(
+    client, mock_conversation_service, sample_conversation_id
+):
+    """/goal/stop returns 404 when the conversation is unknown."""
+    mock_conversation_service.get_event_service.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(f"/api/conversations/{sample_conversation_id}/goal/stop")
+        assert response.status_code == 404
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_resume_goal_in_conversation_success(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """/goal/resume endpoint forwards to the event service."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.resume_goal_loop.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal/resume"
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        mock_event_service.resume_goal_loop.assert_awaited_once()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_resume_goal_in_conversation_not_found(
+    client, mock_conversation_service, sample_conversation_id
+):
+    """/goal/resume returns 404 when the conversation is unknown."""
+    mock_conversation_service.get_event_service.return_value = None
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal/resume"
+        )
+        assert response.status_code == 404
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_resume_goal_in_conversation_no_resumable(
+    client, mock_conversation_service, mock_event_service, sample_conversation_id
+):
+    """/goal/resume returns 400 when there is nothing to resume."""
+    mock_conversation_service.get_event_service.return_value = mock_event_service
+    mock_event_service.resume_goal_loop.side_effect = ValueError("no_resumable_goal")
+
+    client.app.dependency_overrides[get_conversation_service] = (
+        lambda: mock_conversation_service
+    )
+    try:
+        response = client.post(
+            f"/api/conversations/{sample_conversation_id}/goal/resume"
+        )
+        assert response.status_code == 400
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_switch_acp_model_success(
     client, mock_conversation_service, mock_event_service, sample_conversation_id
 ):
@@ -1211,7 +1367,7 @@ def test_switch_acp_model_inactive_service_returns_400(
 def test_switch_acp_model_protocol_error_returns_400(
     client, mock_conversation_service, mock_event_service, sample_conversation_id
 ):
-    """A rejected ACP ``session/set_model`` call maps to 400, not 500.
+    """A rejected ACP model-selection call maps to 400, not 500.
 
     ``ACPAgent.set_acp_model`` translates ``acp.exceptions.RequestError`` (e.g.
     method-not-found on a custom server, or an invalid model id) into a
@@ -1220,7 +1376,7 @@ def test_switch_acp_model_protocol_error_returns_400(
     """
     mock_conversation_service.get_event_service.return_value = mock_event_service
     mock_event_service.switch_acp_model.side_effect = ValueError(
-        "ACP server rejected set_session_model(model='bogus'): method not found"
+        "ACP server rejected model switch to 'bogus': method not found"
     )
 
     client.app.dependency_overrides[get_conversation_service] = (
@@ -1241,13 +1397,13 @@ def test_switch_acp_model_timeout_returns_504(
 ):
     """A TimeoutError (wedged/slow ACP server) maps to 504, not 500.
 
-    ``ACPAgent.set_acp_model`` bounds the ``session/set_model`` round-trip with
-    ``acp_prompt_timeout``; an expired call raises ``TimeoutError``, which the
-    route surfaces as a Gateway Timeout rather than an opaque 500.
+    ``ACPAgent.set_acp_model`` bounds the provider model-selection round-trip
+    with ``acp_prompt_timeout``; an expired call raises ``TimeoutError``, which
+    the route surfaces as a Gateway Timeout rather than an opaque 500.
     """
     mock_conversation_service.get_event_service.return_value = mock_event_service
     mock_event_service.switch_acp_model.side_effect = TimeoutError(
-        "ACP server did not answer set_session_model within 600s"
+        "ACP server did not answer model switch within 600s"
     )
 
     client.app.dependency_overrides[get_conversation_service] = (
