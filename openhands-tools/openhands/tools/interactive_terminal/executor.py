@@ -36,6 +36,25 @@ def _mask_output(output: str, conversation: LocalConversation | None) -> str:
         return output
 
 
+def _resolve_env_vars(
+    command: str, conversation: LocalConversation | None
+) -> dict[str, str]:
+    """Resolve secrets referenced by *command* into env vars for session export.
+
+    Mirrors ``TerminalExecutor._export_envs``: secrets whose names appear in
+    the command are resolved from the conversation's secret registry and
+    returned as a ``{name: value}`` dict for ``InteractiveTerminalManager`` to
+    export before the command runs.
+    """
+    if not command.strip() or conversation is None:
+        return {}
+    try:
+        return conversation.state.secret_registry.get_secrets_as_env_vars(command)
+    except Exception:  # noqa: BLE001
+        _log.warning("Failed to resolve env vars for command", exc_info=True)
+        return {}
+
+
 class ExecCommandExecutor(
     ToolExecutor[ExecCommandAction, InteractiveTerminalObservation]
 ):
@@ -47,13 +66,14 @@ class ExecCommandExecutor(
         action: ExecCommandAction,
         conversation: LocalConversation | None = None,
     ) -> InteractiveTerminalObservation:
-        # TODO(issue): pre-export secrets here as TerminalExecutor._export_envs() does.
+        env_vars = _resolve_env_vars(action.cmd, conversation)
         output, wall, session_id, exit_code, original_token_count = (
             self._manager.exec_command(
                 action.cmd,
                 workdir=action.workdir,
                 yield_time_ms=action.yield_time_ms,
                 max_output_tokens=action.max_output_tokens,
+                env_vars=env_vars or None,
             )
         )
         output = _mask_output(output, conversation)

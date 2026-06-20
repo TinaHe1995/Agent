@@ -6,6 +6,7 @@ from typing import NamedTuple
 from weakref import WeakValueDictionary
 
 from openhands.tools.terminal.definition import TerminalAction
+from openhands.tools.terminal.impl import TerminalExecutor
 from openhands.tools.terminal.terminal import TerminalSession, create_terminal_session
 
 
@@ -109,18 +110,31 @@ class InteractiveTerminalManager:
         workdir: str | None = None,
         yield_time_ms: int = 10_000,
         max_output_tokens: int | None = None,
+        env_vars: dict[str, str] | None = None,
     ) -> TerminalResult:
         """Start *cmd* in a new session and return after *yield_time_ms*.
 
         Returns a :class:`TerminalResult` whose ``session_id`` is set when the
         process is still running (pass it to ``write_stdin``) or whose
         ``exit_code`` is set when the process has completed.
+
+        If *env_vars* is provided, the secrets are exported into the new session
+        before *cmd* runs, mirroring ``TerminalExecutor._export_envs``. This
+        keeps interactive sessions consistent with the regular ``TerminalTool``
+        so commands that reference registered secrets resolve them in-process.
         """
         session = create_terminal_session(work_dir=workdir or self._work_dir)
         session.initialize()
         session_id = self._allocate_id()
         with self._lock:
             self._sessions[session_id] = session
+
+        if env_vars:
+            exports_cmd = TerminalExecutor._build_env_exports(env_vars, session)
+            if exports_cmd:
+                session.execute(
+                    TerminalAction(command=exports_cmd, is_input=False, timeout=5.0)
+                )
 
         yield_s = _clamp_yield(yield_time_ms)
         action = TerminalAction(command=cmd, timeout=yield_s)

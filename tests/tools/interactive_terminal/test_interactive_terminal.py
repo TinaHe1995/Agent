@@ -553,3 +553,68 @@ def test_full_tool_write_stdin_polls(tmp_dir):
     )
     assert isinstance(kill_obs, InteractiveTerminalObservation)
     assert kill_obs.exit_code is not None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Secret env-var export passthrough (mirrors TerminalExecutor._export_envs)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@_unix_only
+def test_exec_command_exports_conversation_secrets(tmp_dir):
+    """exec_command must export registered secrets into the session before running.
+
+    Mirrors ``TerminalExecutor._export_envs``: a command that references a
+    registered secret by name must see the secret's value in its environment,
+    and the secret value must be masked in the returned observation.
+    """
+    from openhands.sdk.conversation import Conversation
+
+    llm = LLM(model="gpt-4o", api_key=SecretStr("test-key"), usage_id="t")
+    agent = Agent(llm=llm, tools=[])
+    conversation = Conversation(
+        agent=agent,
+        workspace=tmp_dir,
+        persistence_dir=tmp_dir,
+        secrets={"MY_SECRET_TOKEN": "secret-value-123"},
+    )
+    try:
+        state = conversation.state
+        tools = InteractiveTerminalToolSet.create(state)
+        exec_tool = next(t for t in tools if t.name == "exec_command")
+
+        # Reference the secret by name; the executor must export it into the
+        # session so the shell resolves $MY_SECRET_TOKEN. Pass the conversation
+        # so the executor can resolve secrets from the secret registry.
+        obs = exec_tool(
+            ExecCommandAction(cmd="echo $MY_SECRET_TOKEN", yield_time_ms=5_000),
+            conversation=conversation,
+        )
+
+        assert isinstance(obs, InteractiveTerminalObservation)
+        assert obs.exit_code == 0
+        # The secret value must NOT appear unmasked in the observation.
+        assert "secret-value-123" not in obs.output
+        assert "<secret-hidden>" in obs.output
+    finally:
+        conversation.close()
+
+
+@_unix_only
+def test_exec_command_env_vars_passthrough_to_manager(tmp_dir):
+    """InteractiveTerminalManager.exec_command must honor env_vars directly.
+
+    Unit-level check that the manager exports the provided env vars into the
+    session before running the command, independent of the conversation layer.
+    """
+    manager = InteractiveTerminalManager(tmp_dir)
+    try:
+        out, _wall, _sid, ec, _ = manager.exec_command(
+            "echo $MANAGER_SECRET",
+            yield_time_ms=5_000,
+            env_vars={"MANAGER_SECRET": "mgr-secret-xyz"},
+        )
+        assert ec == 0
+        assert "mgr-secret-xyz" in out
+    finally:
+        manager.close()
