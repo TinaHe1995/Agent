@@ -2720,7 +2720,7 @@ class TestAutoTitle:
 
     @pytest.mark.asyncio
     async def test_autotitle_integration_routes_through_profile_store(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, request
     ):
         """End-to-end: profile on disk → LLMProfileStore.load → title LLM call.
 
@@ -2786,6 +2786,9 @@ class TestAutoTitle:
 
         monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path))
         reset_stores()
+        # Clear the singleton at teardown even if an assertion raises, so the
+        # stale store (pointing at the soon-deleted tmp_path) can't leak.
+        request.addfinalizer(reset_stores)
 
         with patch(
             "openhands.sdk.llm.llm.LLM.completion",
@@ -2801,8 +2804,6 @@ class TestAutoTitle:
                 if service.stored.title is not None:
                     break
 
-        reset_stores()
-
         # The profile's LLM (usage_id="title-llm") was called — not agent.llm
         # (usage_id="test-llm"). This is the regression-sensitive assertion.
         assert calls == ["title-llm"], (
@@ -2813,7 +2814,7 @@ class TestAutoTitle:
 
     @pytest.mark.asyncio
     async def test_autotitle_decrypts_cipher_encrypted_title_profile(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, request
     ):
         """Regression for #3164: a cipher-encrypted title-LLM profile must be
         decrypted on load so the title LLM sees the plaintext API key, not
@@ -2879,6 +2880,9 @@ class TestAutoTitle:
 
         monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path))
         reset_stores()
+        # Clear the singleton at teardown even if an assertion raises, so the
+        # stale store (pointing at the soon-deleted tmp_path) can't leak.
+        request.addfinalizer(reset_stores)
 
         with patch(
             "openhands.sdk.llm.llm.LLM.completion",
@@ -2891,8 +2895,6 @@ class TestAutoTitle:
                 await asyncio.sleep(0.02)
                 if service.stored.title is not None:
                     break
-
-        reset_stores()
 
         assert seen_keys == ["plaintext-title-key"], (
             f"Expected title LLM to receive decrypted key, got: {seen_keys}"
