@@ -1,3 +1,4 @@
+from typing import Any, cast
 from unittest.mock import Mock
 
 import mcp.types
@@ -57,8 +58,11 @@ def test_mcp_action_from_arguments_preserves_schema_kind_argument():
         name="gitnexus_context",
     )
 
-    openai_schema = tool.to_openai_tool()["function"]["parameters"]
-    assert "kind" in openai_schema["properties"]
+    function = tool.to_openai_tool()["function"]
+    openai_schema = cast(dict[str, Any], function.get("parameters"))
+    properties = cast(dict[str, Any], openai_schema["properties"])
+    kind_schema = cast(dict[str, Any], properties["kind"])
+    assert kind_schema["description"] == "Symbol kind hint, such as Function or Method"
 
     action = tool.action_from_arguments(
         {

@@ -1,3 +1,4 @@
+import copy
 from abc import ABC
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
@@ -208,6 +209,26 @@ class Schema(DiscriminatedUnionMixin):
                 if "required" in result and f in result["required"]:
                     result["required"].remove(f)
 
+        alias_specs: dict[str, dict[str, Any]] = getattr(
+            cls, "__mcp_schema_alias_specs__", {}
+        )
+        if alias_specs:
+            result.setdefault("properties", {})
+            for alias, spec in alias_specs.items():
+                result["properties"][alias] = _process_schema_node(
+                    copy.deepcopy(spec),
+                    full_schema.get("$defs", {}),
+                )
+
+            alias_required: set[str] = getattr(
+                cls, "__mcp_schema_alias_required__", set()
+            )
+            if alias_required:
+                required_fields = result.setdefault("required", [])
+                for alias in alias_required:
+                    if alias not in required_fields:
+                        required_fields.append(alias)
+
         return result
 
     @classmethod
@@ -228,6 +249,9 @@ class Schema(DiscriminatedUnionMixin):
         fields: dict[str, tuple] = {}
         discriminator_fields = cls._discriminator_field_names()
         used_field_names = set(props.keys())
+        has_aliased_field = False
+        alias_specs: dict[str, dict[str, Any]] = {}
+        alias_required: set[str] = set()
         for fname, spec in props.items():
             spec = spec if isinstance(spec, dict) else {}
             tp = py_type(spec)
@@ -242,6 +266,10 @@ class Schema(DiscriminatedUnionMixin):
                 # "kind"), keep the external name as an alias and use a safe
                 # internal field name for Pydantic.
                 field_alias = fname
+                has_aliased_field = True
+                alias_specs[fname] = copy.deepcopy(spec)
+                if fname in required:
+                    alias_required.add(fname)
                 field_name = f"mcp_arg_{fname}"
                 suffix = 2
                 while field_name in used_field_names or field_name in fields:
@@ -268,7 +296,28 @@ class Schema(DiscriminatedUnionMixin):
                 Field(default=default, **field_kwargs),
             )
 
-        return create_model(model_name, __base__=cls, **fields)  # type: ignore[return-value]
+        field_definitions: Any = fields
+        if has_aliased_field:
+            model = create_model(  # type: ignore[reportCallIssue, return-value]
+                model_name,
+                __base__=cls,
+                __config__=ConfigDict(
+                    extra="forbid",
+                    frozen=True,
+                    populate_by_name=True,
+                ),
+                **field_definitions,
+            )
+        else:
+            model = create_model(  # type: ignore[reportCallIssue, return-value]
+                model_name,
+                __base__=cls,
+                **field_definitions,
+            )
+        if alias_specs:
+            setattr(model, "__mcp_schema_alias_specs__", alias_specs)
+            setattr(model, "__mcp_schema_alias_required__", alias_required)
+        return model
 
 
 class Action(Schema, ABC):
