@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -115,6 +116,37 @@ def test_get_marketplace_fetches_and_caches_manifest(tmp_path: Path) -> None:
     assert cached_marketplace is marketplace
     assert cached_path == marketplace_dir
     assert registry.list_plugins("team") == ["first"]
+
+
+def test_get_marketplace_with_resolution_preserves_resolved_ref(tmp_path: Path) -> None:
+    marketplace_dir = _create_marketplace(tmp_path / "marketplace")
+    registry = MarketplaceRegistry(
+        [
+            MarketplaceRegistration(
+                name="team",
+                source="github:example/marketplaces",
+                ref="main",
+                repo_path="catalogs/team",
+            )
+        ]
+    )
+
+    with patch(
+        "openhands.sdk.marketplace.registry.fetch_plugin_with_resolution",
+        return_value=(marketplace_dir, "abc123"),
+    ) as mock_fetch:
+        fetched = registry.get_marketplace_with_resolution("team")
+        cached = registry.get_marketplace_with_resolution("team")
+
+    assert fetched is cached
+    assert fetched.marketplace.name == "test-marketplace"
+    assert fetched.path == marketplace_dir
+    assert fetched.resolved_ref == "abc123"
+    mock_fetch.assert_called_once_with(
+        source="github:example/marketplaces",
+        ref="main",
+        repo_path="catalogs/team",
+    )
 
 
 def test_get_marketplace_unknown_name_raises() -> None:
@@ -282,6 +314,20 @@ def test_list_plugins_from_all_marketplaces(tmp_path: Path) -> None:
     )
 
     assert registry.list_plugins() == ["formatter", "linter"]
+
+
+def test_list_plugins_returns_successful_empty_marketplaces_when_others_fail(
+    tmp_path: Path,
+) -> None:
+    empty = _create_marketplace(tmp_path / "empty")
+    registry = MarketplaceRegistry(
+        [
+            MarketplaceRegistration(name="empty", source=str(empty)),
+            MarketplaceRegistration(name="broken", source=str(tmp_path / "missing")),
+        ]
+    )
+
+    assert registry.list_plugins() == []
 
 
 def test_list_plugins_raises_when_all_marketplaces_fail(tmp_path: Path) -> None:

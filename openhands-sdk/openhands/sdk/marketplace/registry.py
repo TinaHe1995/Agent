@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from openhands.sdk.logger import get_logger
@@ -12,6 +13,13 @@ from openhands.sdk.utils.redact import redact_url_credentials
 
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedMarketplace:
+    marketplace: Marketplace
+    path: Path
+    resolved_ref: str | None
 
 
 class PluginResolutionError(Exception):
@@ -72,7 +80,7 @@ class MarketplaceRegistry:
 
     def __init__(self, registrations: list[MarketplaceRegistration] | None = None):
         self._registrations: dict[str, MarketplaceRegistration] = {}
-        self._cache: dict[str, tuple[Marketplace, Path]] = {}
+        self._cache: dict[str, FetchedMarketplace] = {}
         for registration in registrations or []:
             if registration.name in self._registrations:
                 raise ValueError(
@@ -92,6 +100,10 @@ class MarketplaceRegistry:
         ]
 
     def get_marketplace(self, name: str) -> tuple[Marketplace, Path]:
+        result = self.get_marketplace_with_resolution(name)
+        return result.marketplace, result.path
+
+    def get_marketplace_with_resolution(self, name: str) -> FetchedMarketplace:
         registration = self._registrations.get(name)
         if registration is None:
             raise MarketplaceNotFoundError(name)
@@ -117,16 +129,18 @@ class MarketplaceRegistry:
 
         plugin_names: list[str] = []
         fetch_errors: dict[str, Exception] = {}
+        loaded_count = 0
         for name, registration in self._registrations.items():
             try:
-                marketplace, _ = self._fetch_marketplace(registration)
+                fetched = self._fetch_marketplace(registration)
             except Exception as exc:
                 fetch_errors[name] = exc
                 logger.warning("Failed to list plugins from '%s': %s", name, exc)
                 continue
-            plugin_names.extend(plugin.name for plugin in marketplace.plugins)
+            loaded_count += 1
+            plugin_names.extend(plugin.name for plugin in fetched.marketplace.plugins)
 
-        if fetch_errors and not plugin_names and self._registrations:
+        if fetch_errors and loaded_count == 0 and self._registrations:
             raise PluginResolutionError(
                 "Failed to list plugins; all marketplace fetches failed: "
                 + "; ".join(f"{name}: {error}" for name, error in fetch_errors.items())
@@ -135,7 +149,7 @@ class MarketplaceRegistry:
 
     def _fetch_marketplace(
         self, registration: MarketplaceRegistration
-    ) -> tuple[Marketplace, Path]:
+    ) -> FetchedMarketplace:
         if registration.name in self._cache:
             return self._cache[registration.name]
 
@@ -144,15 +158,18 @@ class MarketplaceRegistry:
             registration.name,
             redact_url_credentials(registration.source),
         )
-        path, _ = fetch_plugin_with_resolution(
+        path, resolved_ref = fetch_plugin_with_resolution(
             source=registration.source,
             ref=registration.ref,
             repo_path=registration.repo_path,
         )
-        marketplace = Marketplace.load(path)
-        resolved = (marketplace, path)
-        self._cache[registration.name] = resolved
-        return resolved
+        fetched = FetchedMarketplace(
+            marketplace=Marketplace.load(path),
+            path=path,
+            resolved_ref=resolved_ref,
+        )
+        self._cache[registration.name] = fetched
+        return fetched
 
     def _resolve_from_marketplace(
         self, plugin_name: str, marketplace_name: str
@@ -171,7 +188,7 @@ class MarketplaceRegistry:
 
         for name, registration in self._registrations.items():
             try:
-                marketplace, _ = self._fetch_marketplace(registration)
+                fetched = self._fetch_marketplace(registration)
             except Exception as exc:
                 fetch_errors[name] = exc
                 logger.warning(
@@ -183,10 +200,10 @@ class MarketplaceRegistry:
                 continue
 
             searched_count += 1
-            plugin = marketplace.get_plugin(plugin_name)
+            plugin = fetched.marketplace.get_plugin(plugin_name)
             if plugin is None:
                 continue
-            source, ref, repo_path = marketplace.resolve_plugin_source(plugin)
+            source, ref, repo_path = fetched.marketplace.resolve_plugin_source(plugin)
             matches.append(
                 (name, PluginSource(source=source, ref=ref, repo_path=repo_path))
             )

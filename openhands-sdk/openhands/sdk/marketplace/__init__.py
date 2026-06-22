@@ -25,6 +25,7 @@ Example marketplace.json:
 
 from openhands.sdk.marketplace.registry import (
     AmbiguousPluginError,
+    FetchedMarketplace,
     MarketplaceNotFoundError,
     MarketplaceRegistry,
     PluginNotFoundError,
@@ -56,6 +57,7 @@ __all__ = [
     "MarketplaceMetadata",
     "MarketplaceRegistration",
     # Marketplace registry
+    "FetchedMarketplace",
     "MarketplaceRegistry",
     "PluginResolutionError",
     "AmbiguousPluginError",
