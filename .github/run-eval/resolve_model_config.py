@@ -14,6 +14,7 @@ Outputs to GITHUB_OUTPUT:
 
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -41,11 +42,84 @@ if sigalrm := getattr(signal, "SIGALRM", None):
 # SDK-specific parameters that should not be passed to litellm.
 # These parameters are used by the SDK's LLM wrapper but are not part of litellm's API.
 # Keep this list in sync with SDK LLM config parameters that are SDK-internal.
-SDK_ONLY_PARAMS = {"disable_vision"}
+SDK_ONLY_PARAMS = {"disable_vision", "inline_image_urls"}
 
 
-# Model configurations dictionary
-MODELS = {
+def _humanize_parts(model_id: str, prefix: str) -> str:
+    """Capitalize each hyphen-separated part after stripping ``prefix``.
+
+    Example: ``_humanize_parts("kimi-k2-thinking", "kimi-")`` -> ``"K2 Thinking"``.
+    """
+    rest = model_id.removeprefix(prefix)
+    return " ".join(part.capitalize() for part in rest.split("-"))
+
+
+# Family patterns for models whose config is fully derivable from the model ID.
+# A new version in an existing family (e.g. ``glm-5.2``) resolves automatically
+# without an explicit entry. First match wins.
+#
+# Each family defines:
+#   proxy_prefix  – LiteLLM proxy path prefix (model string = proxy_prefix + model_id)
+#   display_name  – callable(model_id) -> human-readable name
+#   llm_config    – default llm_config fields (temperature, top_p, disable_vision, …)
+FAMILIES: list[tuple[re.Pattern, dict[str, Any]]] = [
+    (
+        re.compile(r"^glm-"),
+        {
+            "proxy_prefix": "litellm_proxy/openrouter/z-ai/",
+            "display_name": lambda mid: "GLM-" + mid.removeprefix("glm-"),
+            "llm_config": {
+                "temperature": 0.0,
+                # OpenRouter GLM models are text-only despite LiteLLM reporting
+                # vision support. See #2110 (GLM-5), #1898 (GLM-4.7).
+                "disable_vision": True,
+            },
+        },
+    ),
+    (
+        re.compile(r"^kimi-k"),
+        {
+            "proxy_prefix": "litellm_proxy/moonshot/",
+            "display_name": lambda mid: "Kimi " + _humanize_parts(mid, "kimi-"),
+            "llm_config": {"temperature": 1.0},
+        },
+    ),
+    (
+        re.compile(r"^deepseek-"),
+        {
+            "proxy_prefix": "litellm_proxy/deepseek/",
+            "display_name": lambda mid: "DeepSeek " + _humanize_parts(mid, "deepseek-"),
+            "llm_config": {},
+        },
+    ),
+    (
+        re.compile(r"^claude-opus-"),
+        {
+            "proxy_prefix": "litellm_proxy/anthropic/",
+            "display_name": lambda mid: "Claude Opus "
+            + mid.removeprefix("claude-opus-").replace("-", "."),
+            "llm_config": {},
+        },
+    ),
+]
+
+
+def _resolve_family(model_id: str) -> dict[str, Any] | None:
+    """Return a copy of the matching family's defaults, or ``None``."""
+    for pattern, family in FAMILIES:
+        if pattern.match(model_id):
+            return {
+                "proxy_prefix": family["proxy_prefix"],
+                "display_name": family["display_name"](model_id),
+                "llm_config": dict(family["llm_config"]),
+            }
+    return None
+
+
+# Explicit model entries for models that **deviate** from their family pattern
+# (variant proxy strings, model-specific quirks, or families without a clean
+# pattern). Models that match a FAMILIES pattern do NOT need to be listed here.
+EXPLICIT_MODELS: dict[str, dict[str, Any]] = {
     "claude-sonnet-4-5-20250929": {
         "id": "claude-sonnet-4-5-20250929",
         "display_name": "Claude Sonnet 4.5",
@@ -54,14 +128,21 @@ MODELS = {
             "temperature": 0.0,
         },
     },
-    "kimi-k2-thinking": {
-        "id": "kimi-k2-thinking",
-        "display_name": "Kimi K2 Thinking",
+    # kimi-k2.6: family default + inline_image_urls quirk
+    # https://www.kimi.com/blog/kimi-k2-6
+    "kimi-k2.6": {
+        "id": "kimi-k2.6",
+        "display_name": "Kimi K2.6",
         "llm_config": {
-            "model": "litellm_proxy/moonshot/kimi-k2-thinking",
+            "model": "litellm_proxy/moonshot/kimi-k2.6",
             "temperature": 1.0,
+            # Moonshot's public Kimi API rejects http(s) image URLs and only
+            # accepts base64 ``data:`` URLs. This makes the SDK fetch each
+            # image URL and inline it as base64 before sending. See #3155.
+            "inline_image_urls": True,
         },
     },
+    # kimi-k2.5: family default + top_p override
     # https://www.kimi.com/blog/kimi-k2-5.html
     "kimi-k2.5": {
         "id": "kimi-k2.5",
@@ -72,16 +153,6 @@ MODELS = {
             "top_p": 0.95,
         },
     },
-    # https://www.kimi.com/blog/kimi-k2-6
-    "kimi-k2.6": {
-        "id": "kimi-k2.6",
-        "display_name": "Kimi K2.6",
-        "llm_config": {
-            "model": "litellm_proxy/moonshot/kimi-k2.6",
-            "temperature": 1.0,
-        },
-    },
-    # https://www.alibabacloud.com/help/en/model-studio/deep-thinking
     "qwen3-max-thinking": {
         "id": "qwen3-max-thinking",
         "display_name": "Qwen3 Max Thinking",
@@ -122,19 +193,12 @@ MODELS = {
             "temperature": 0.0,
         },
     },
-    "claude-opus-4-7": {
-        "id": "claude-opus-4-7",
-        "display_name": "Claude Opus 4.7",
+    # https://www.anthropic.com/news/claude-fable-5
+    "claude-fable-5": {
+        "id": "claude-fable-5",
+        "display_name": "Claude Fable 5",
         "llm_config": {
-            "model": "litellm_proxy/anthropic/claude-opus-4-7",
-        },
-    },
-    # https://www.anthropic.com/news/claude-opus-4-8
-    "claude-opus-4-8": {
-        "id": "claude-opus-4-8",
-        "display_name": "Claude Opus 4.8",
-        "llm_config": {
-            "model": "litellm_proxy/anthropic/claude-opus-4-8",
+            "model": "litellm_proxy/anthropic/claude-fable-5",
         },
     },
     "claude-sonnet-4-6": {
@@ -167,6 +231,14 @@ MODELS = {
         "llm_config": {
             "model": "litellm_proxy/gemini-3.5-flash",
             "temperature": 0.0,
+            # SWE-bench Multimodal runs against this model fail ~97% of
+            # image-bearing instances with an opaque Vertex 500
+            # "Internal error encountered" on the very first LLM call,
+            # while text-only instances complete normally. Fetching the
+            # image client-side and sending it as a base64 ``data:`` URL
+            # bypasses LiteLLM's server-side URL fetch path, which is the
+            # most plausible failure point. See run #26931958101 analysis.
+            "inline_image_urls": True,
         },
     },
     "gpt-5.2": {
@@ -251,21 +323,11 @@ MODELS = {
             "top_p": 0.95,
         },
     },
+    # deepseek-v3.2-reasoner: variant proxy string (deepseek-reasoner)
     "deepseek-v3.2-reasoner": {
         "id": "deepseek-v3.2-reasoner",
         "display_name": "DeepSeek V3.2 Reasoner",
         "llm_config": {"model": "litellm_proxy/deepseek/deepseek-reasoner"},
-    },
-    # https://api-docs.deepseek.com/news/news260424
-    "deepseek-v4-pro": {
-        "id": "deepseek-v4-pro",
-        "display_name": "DeepSeek V4 Pro",
-        "llm_config": {"model": "litellm_proxy/deepseek/deepseek-v4-pro"},
-    },
-    "deepseek-v4-flash": {
-        "id": "deepseek-v4-flash",
-        "display_name": "DeepSeek V4 Flash",
-        "llm_config": {"model": "litellm_proxy/deepseek/deepseek-v4-flash"},
     },
     "qwen-3-coder": {
         "id": "qwen-3-coder",
@@ -281,36 +343,6 @@ MODELS = {
         "llm_config": {
             "model": "litellm_proxy/openai/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
             "temperature": 0.0,
-        },
-    },
-    "glm-4.7": {
-        "id": "glm-4.7",
-        "display_name": "GLM-4.7",
-        "llm_config": {
-            "model": "litellm_proxy/openrouter/z-ai/glm-4.7",
-            "temperature": 0.0,
-            # OpenRouter glm-4.7 is text-only despite LiteLLM reporting vision support
-            "disable_vision": True,
-        },
-    },
-    "glm-5": {
-        "id": "glm-5",
-        "display_name": "GLM-5",
-        "llm_config": {
-            "model": "litellm_proxy/openrouter/z-ai/glm-5",
-            "temperature": 0.0,
-            # OpenRouter glm-5 is text-only despite LiteLLM reporting vision support
-            "disable_vision": True,
-        },
-    },
-    "glm-5.1": {
-        "id": "glm-5.1",
-        "display_name": "GLM-5.1",
-        "llm_config": {
-            "model": "litellm_proxy/openrouter/z-ai/glm-5.1",
-            "temperature": 0.0,
-            # OpenRouter glm-5.1 is text-only despite LiteLLM reporting vision support
-            "disable_vision": True,
         },
     },
     "qwen3-coder-next": {
@@ -371,6 +403,18 @@ MODELS = {
             "top_p": 0.95,
         },
     },
+    # Paid OpenRouter route (no training, smaller 262k context):
+    # https://openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b
+    # Backed by the `nemotron-3-ultra-550b-a55b-or-paid` model on the LiteLLM proxy.
+    "nemotron-3-ultra-550b-a55b-or-paid": {
+        "id": "nemotron-3-ultra-550b-a55b-or-paid",
+        "display_name": "NVIDIA Nemotron-3 Ultra 550B (OpenRouter, paid)",
+        "llm_config": {
+            "model": "litellm_proxy/nemotron-3-ultra-550b-a55b-or-paid",
+            "temperature": 1.0,
+            "top_p": 0.95,
+        },
+    },
     "converse-nemotron-super-3-120b": {
         "id": "converse-nemotron-super-3-120b",
         "display_name": "NVIDIA Converse Nemotron Super 3 120B",
@@ -402,6 +446,40 @@ MODELS = {
 }
 
 
+def resolve_model_config(model_id: str) -> dict[str, Any]:
+    """Resolve a model ID to its full configuration.
+
+    Models that match a ``FAMILIES`` pattern are derived automatically from
+    the family defaults — no explicit entry needed. Models that deviate from
+    their family pattern (variant proxy strings, quirks) or belong to a family
+    without a clean pattern must have an explicit entry in ``EXPLICIT_MODELS``.
+
+    Raises ``KeyError`` if the model ID matches no family and has no explicit
+    entry.
+    """
+    if model_id in EXPLICIT_MODELS:
+        entry = EXPLICIT_MODELS[model_id]
+        return {**entry, "llm_config": dict(entry["llm_config"])}
+
+    family = _resolve_family(model_id)
+    if family is not None:
+        llm_config = dict(family["llm_config"])
+        llm_config["model"] = family["proxy_prefix"] + model_id
+        return {
+            "id": model_id,
+            "display_name": family["display_name"],
+            "llm_config": llm_config,
+        }
+
+    raise KeyError(model_id)
+
+
+# Backward-compatible dict of explicitly-registered models. Models that are
+# derived purely from a family pattern (e.g. glm-5, kimi-k2-thinking) are NOT
+# listed here but still resolve via ``find_models_by_id`` / ``resolve_model_config``.
+MODELS: dict[str, dict[str, Any]] = dict(EXPLICIT_MODELS)
+
+
 def error_exit(msg: str, exit_code: int = 1) -> None:
     """Print error message and exit."""
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -419,6 +497,10 @@ def get_required_env(key: str) -> str:
 def find_models_by_id(model_ids: list[str]) -> list[dict]:
     """Find models by ID. Fails fast on missing ID.
 
+    Checks the ``MODELS`` dict first (which may be patched in tests), then
+    falls back to ``resolve_model_config`` for family-pattern-derived models
+    that are not explicitly registered.
+
     Args:
         model_ids: List of model IDs to find
 
@@ -430,12 +512,19 @@ def find_models_by_id(model_ids: list[str]) -> list[dict]:
     """
     resolved = []
     for model_id in model_ids:
-        if model_id not in MODELS:
-            available = ", ".join(sorted(MODELS.keys()))
+        if model_id in MODELS:
+            resolved.append(MODELS[model_id])
+            continue
+        try:
+            resolved.append(resolve_model_config(model_id))
+        except KeyError:
+            available = ", ".join(sorted(EXPLICIT_MODELS.keys()))
             error_exit(
-                f"Model ID '{model_id}' not found. Available models: {available}"
+                f"Model ID '{model_id}' not found. "
+                f"Available explicit models: {available}. "
+                f"Models matching a family pattern (e.g. glm-*) "
+                f"also resolve automatically."
             )
-        resolved.append(MODELS[model_id])
     return resolved
 
 
