@@ -15,10 +15,16 @@ def select_chat_options(
     """
     # First pass: apply simple defaults without touching user-supplied values
     max_output_tokens = llm.effective_max_output_tokens
+    model_features = get_features(llm.model)
+    temperature = (
+        llm.temperature
+        if llm.temperature is not None
+        else model_features.default_temperature
+    )
     defaults: dict[str, Any] = {
         "top_k": llm.top_k,
         "top_p": llm.top_p,
-        "temperature": llm.temperature,
+        "temperature": temperature,
         # OpenAI-compatible param is `max_completion_tokens`
         "max_completion_tokens": max_output_tokens,
     }
@@ -42,8 +48,7 @@ def select_chat_options(
         out["extra_headers"] = {**openrouter_headers, **existing}
 
     # Reasoning-model quirks
-    supports_reasoning_effort = get_features(llm.model).supports_reasoning_effort
-    if supports_reasoning_effort:
+    if model_features.supports_reasoning_effort:
         # LiteLLM automatically handles reasoning_effort for all models, including
         # Claude Opus 4.5 (maps to output_config and adds beta header automatically)
         if llm.reasoning_effort is not None:
@@ -55,7 +60,7 @@ def select_chat_options(
             out.pop("top_p", None)
 
     # Extended thinking models
-    if get_features(llm.model).supports_extended_thinking:
+    if model_features.supports_extended_thinking:
         if llm.extended_thinking_budget and max_output_tokens:
             # Anthropic throws errors if thinking budget equals or exceeds max output
             # tokens -- force the thinking budget lower if there's a conflict
@@ -86,10 +91,7 @@ def select_chat_options(
         out.pop("tool_choice", None)
 
     # Send prompt_cache_retention only if model supports it
-    if (
-        get_features(llm.model).supports_prompt_cache_retention
-        and llm.prompt_cache_retention
-    ):
+    if model_features.supports_prompt_cache_retention and llm.prompt_cache_retention:
         out["prompt_cache_retention"] = llm.prompt_cache_retention
 
     # Pass through user-provided extra_body unchanged
