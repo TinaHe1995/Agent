@@ -211,7 +211,7 @@ class EventService:
         try:
             return events[index]
         except (FileNotFoundError, UnicodeDecodeError, ValidationError) as exc:
-            logger.error(
+            logger.warning(
                 "Skipping unreadable event at index %d for conversation %s (%s)",
                 index,
                 self.stored.id,

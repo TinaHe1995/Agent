@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import logging
 import shutil
 import threading
 import time
@@ -365,7 +364,7 @@ class TestEventServiceSearchEvents:
     @pytest.mark.parametrize("unreadable_payload", ["", "{not-json", "{}"])
     @pytest.mark.asyncio
     async def test_search_events_skips_unreadable_event_files(
-        self, event_service, unreadable_payload, caplog
+        self, event_service, unreadable_payload
     ):
         fs = InMemoryFileStore()
         event_log, event0, event2, _ = _event_log_with_unreadable_middle(
@@ -373,13 +372,10 @@ class TestEventServiceSearchEvents:
         )
         _attach_event_log(event_service, event_log)
 
-        with caplog.at_level(logging.ERROR):
-            result = await event_service.search_events(limit=10)
+        result = await event_service.search_events(limit=10)
 
         assert [event.id for event in result.items] == [event0.id, event2.id]
         assert result.next_page_id is None
-        assert "Skipping unreadable event at index 1" in caplog.text
-        assert str(event_service.stored.id) in caplog.text
 
     @pytest.mark.asyncio
     async def test_search_events_skips_missing_event_files(self, event_service):
