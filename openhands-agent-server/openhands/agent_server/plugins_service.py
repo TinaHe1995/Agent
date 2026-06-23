@@ -154,15 +154,24 @@ def _fetch_plugin_catalog_entries(marketplace_path: str) -> list[_PluginCatalogE
         logger.warning("Failed to access public extensions repository")
         return []
 
-    marketplace_file = repo_path / marketplace_path
-    if not marketplace_file.exists():
-        logger.warning(f"Marketplace file not found: {marketplace_file}")
-        return []
-
+    # Primary loader: ``Marketplace.load`` discovers the manifest in
+    # ``.plugin/`` or ``.claude-plugin/`` — the real OpenHands/extensions layout,
+    # where ``.plugin/marketplace.json`` points at the published catalog. We must
+    # NOT gate on ``marketplace_path`` (``marketplaces/default.json``) existing
+    # first: that file is absent in the current extensions repo, so an early
+    # return there would blank the catalog even though the manifest is present.
+    # The explicit ``marketplace_path`` file is only a fallback for layouts that
+    # ship it instead of a ``.plugin/`` manifest.
     try:
         marketplace = Marketplace.load(repo_path)
     except (FileNotFoundError, ValueError) as e:
-        # Fallback to loading from the specific marketplace path.
+        marketplace_file = repo_path / marketplace_path
+        if not marketplace_file.exists():
+            logger.warning(
+                f"Failed to load marketplace via manifest discovery ({e}); "
+                f"fallback file not found: {marketplace_file}"
+            )
+            return []
         try:
             with open(marketplace_file, encoding="utf-8") as f:
                 data = json.load(f)

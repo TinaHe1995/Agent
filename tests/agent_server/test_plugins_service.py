@@ -38,6 +38,21 @@ def _write_marketplace(repo_dir: Path, plugins: list[dict]) -> Path:
     return repo_dir
 
 
+def _write_manifest_marketplace(repo_dir: Path, plugins: list[dict]) -> Path:
+    """Write the catalog as a ``.plugin/marketplace.json`` manifest.
+
+    Mirrors the real OpenHands/extensions layout, where the catalog is
+    discovered via ``Marketplace.load`` (``.plugin/marketplace.json``) and
+    ``marketplaces/default.json`` is absent.
+    """
+    mp_file = repo_dir / ".plugin" / "marketplace.json"
+    mp_file.parent.mkdir(parents=True, exist_ok=True)
+    mp_file.write_text(
+        json.dumps({"name": "test-mp", "owner": {"name": "Test"}, "plugins": plugins})
+    )
+    return repo_dir
+
+
 def _make_installable_plugin(plugin_dir: Path, name: str) -> Path:
     """Create a minimal installable plugin directory."""
     manifest_dir = plugin_dir / ".plugin"
@@ -72,6 +87,33 @@ def test_catalog_returns_only_true_plugins(tmp_path: Path, monkeypatch):
     assert catalog[0].source.endswith("plugins/local-plugin")
     assert catalog[0].ref is None
     assert catalog[0].repo_path is None
+
+
+def test_catalog_loads_from_plugin_manifest_layout(tmp_path: Path, monkeypatch):
+    # Regression: the real extensions repo ships the catalog as
+    # .plugin/marketplace.json (discovered by Marketplace.load) and has NO
+    # marketplaces/default.json. The service must not early-return on the
+    # missing default.json and blank the catalog.
+    repo = _write_manifest_marketplace(
+        tmp_path / "ext",
+        [
+            {"name": "city-weather", "source": "./plugins/city-weather"},
+            {"name": "a-skill", "source": "./skills/a-skill"},
+        ],
+    )
+    assert not (repo / "marketplaces" / "default.json").exists()
+    monkeypatch.setattr(
+        plugins_service, "update_skills_repository", lambda *a, **k: repo
+    )
+    installed = tmp_path / "installed"
+    installed.mkdir()
+
+    # Act
+    catalog = service_get_plugins_marketplace_catalog(installed_dir=installed)
+
+    # Assert: the true plugin is returned (not an empty catalog), skill excluded.
+    assert [p.name for p in catalog] == ["city-weather"]
+    assert catalog[0].source.endswith("plugins/city-weather")
 
 
 def test_catalog_resolves_structured_source_and_excludes_structured_skills(
