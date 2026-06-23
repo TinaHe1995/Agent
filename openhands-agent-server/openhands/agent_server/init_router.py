@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from openhands.agent_server.bash_service import BashEventService
 from openhands.agent_server.config import Config, WebhookSpec
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.server_details_router import mark_initialization_complete
@@ -175,6 +176,7 @@ class InitService:
         self._error: str | None = None
         self._lock = asyncio.Lock()
         self._entered_service: ConversationService | None = None
+        self._entered_bash_service: BashEventService | None = None
 
     @property
     def state(self) -> InitState:
@@ -209,10 +211,24 @@ class InitService:
             service = ConversationService.get_instance(new_config)
             cs_mod._conversation_service = service
 
+            # Build a BashEventService from the merged config so the bash
+            # events websocket (and any other consumer) sees the per-user
+            # bash_events_dir delivered by /api/init, not the import-time
+            # default.
+            bash_svc = BashEventService(bash_events_dir=new_config.bash_events_dir)
+            await bash_svc.__aenter__()
+            self._entered_bash_service = bash_svc
+            # Reset the module-level bash singleton so bash_router (which
+            # uses the module-level default) also sees the new instance.
+            from openhands.agent_server import bash_service as bash_mod
+
+            bash_mod._bash_event_service = bash_svc
+
             await service.__aenter__()
             self._entered_service = service
             self._app.state.config = new_config
             self._app.state.conversation_service = service
+            self._app.state.bash_event_service = bash_svc
             # FastAPI sets root_path once at construction; dormant servers
             # boot without a web_url, so re-derive it from the merged config
             # so OpenAPI / Swagger / ReDoc URLs and ASGI scope root_path
@@ -246,6 +262,9 @@ class InitService:
         if self._entered_service is not None:
             await self._entered_service.__aexit__(None, None, None)
             self._entered_service = None
+        if self._entered_bash_service is not None:
+            await self._entered_bash_service.__aexit__(None, None, None)
+            self._entered_bash_service = None
 
 
 def get_init_service(request: Request) -> InitService:

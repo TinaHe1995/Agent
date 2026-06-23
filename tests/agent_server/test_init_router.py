@@ -46,6 +46,13 @@ def _reset_conversation_singleton():
     cs_mod._conversation_service = None
 
 
+def _reset_bash_singleton():
+    """Reset the module-level BashEventService cache so each test starts fresh."""
+    from openhands.agent_server import bash_service as bash_mod
+
+    bash_mod._bash_event_service = None
+
+
 class TestConfigDefaults:
     def test_deferred_init_defaults_false(self):
         assert Config().deferred_init is False
@@ -116,6 +123,9 @@ class TestInitServiceTransitions:
     @pytest.mark.asyncio
     async def test_init_transitions_dormant_to_ready(self, tmp_path):
         _reset_conversation_singleton()
+        _reset_bash_singleton()
+        from openhands.agent_server.bash_service import BashEventService
+
         base = Config(
             deferred_init=True,
             conversations_path=tmp_path / "convs",
@@ -139,9 +149,25 @@ class TestInitServiceTransitions:
             assert app.state.config.deferred_init is False
             assert app.state.config.session_api_keys == ["user-key"]
             assert app.state.conversation_service is not None
+            # BashEventService is registered on app.state so the bash
+            # websocket handler picks up the per-user bash_events_dir
+            # rather than the import-time default.
+            assert isinstance(
+                getattr(app.state, "bash_event_service", None), BashEventService
+            )
+            assert (
+                app.state.bash_event_service.bash_events_dir
+                == tmp_path / "user" / "bash"
+            )
+            # And the module-level default is also refreshed so bash_router
+            # (which reads the module-level singleton) uses the new dir.
+            from openhands.agent_server import bash_service as bash_mod
+
+            assert bash_mod._bash_event_service is app.state.bash_event_service
         finally:
             await svc.teardown()
             _reset_conversation_singleton()
+            _reset_bash_singleton()
 
     @pytest.mark.asyncio
     async def test_second_init_rejected_with_400(self, tmp_path):
@@ -197,6 +223,71 @@ class TestInitServiceTransitions:
             await svc.teardown()
             monkeypatch.delenv("DEFERRED_INIT_TEST_VAR", raising=False)
             _reset_conversation_singleton()
+
+    @pytest.mark.asyncio
+    async def test_init_bash_service_uses_user_supplied_dir(self, tmp_path):
+        """The bash events websocket and bash_router must observe the
+        bash_events_dir supplied via /api/init, not the import-time default."""
+        _reset_conversation_singleton()
+        _reset_bash_singleton()
+        from openhands.agent_server import bash_service as bash_mod
+        from openhands.agent_server.bash_service import BashEventService
+
+        base = Config(
+            deferred_init=True,
+            conversations_path=tmp_path / "convs",
+            bash_events_dir=tmp_path / "boot" / "bash",
+        )
+        app = SimpleNamespace(state=SimpleNamespace(config=base))
+        svc = InitService(app, base_config=base)  # type: ignore[arg-type]
+
+        # Make sure no stale module-level instance leaks in from elsewhere.
+        bash_mod._bash_event_service = None
+
+        user_dir = tmp_path / "user" / "bash"
+        await svc.initialize(
+            InitRequest(
+                conversations_path=tmp_path / "user" / "convs",
+                bash_events_dir=user_dir,
+            )
+        )
+        try:
+            bash_svc = app.state.bash_event_service
+            assert isinstance(bash_svc, BashEventService)
+            assert bash_svc.bash_events_dir == user_dir
+            # bash_router reads through get_default_bash_event_service(),
+            # which uses the module-level cache, so it must be refreshed too.
+            assert bash_mod.get_default_bash_event_service().bash_events_dir == user_dir
+        finally:
+            await svc.teardown()
+            _reset_conversation_singleton()
+            _reset_bash_singleton()
+
+    @pytest.mark.asyncio
+    async def test_init_teardown_releases_bash_service(self, tmp_path):
+        """When /api/init is followed by teardown, the bash service must also
+        be exited so its background tasks are released."""
+        _reset_conversation_singleton()
+        _reset_bash_singleton()
+        base = Config(
+            deferred_init=True,
+            conversations_path=tmp_path / "convs",
+            bash_events_dir=tmp_path / "bash",
+        )
+        app = SimpleNamespace(state=SimpleNamespace(config=base))
+        svc = InitService(app, base_config=base)  # type: ignore[arg-type]
+
+        await svc.initialize(
+            InitRequest(
+                conversations_path=tmp_path / "u" / "convs",
+                bash_events_dir=tmp_path / "u" / "bash",
+            )
+        )
+        assert svc._entered_bash_service is not None
+        await svc.teardown()
+        assert svc._entered_bash_service is None
+        _reset_conversation_singleton()
+        _reset_bash_singleton()
 
 
 class TestEndToEndOverLifespan:
@@ -393,6 +484,7 @@ async def test_lifespan_teardown_releases_conversation_service_after_init(
     """If /api/init succeeds, the lifespan finally clause must release the
     conversation service. If /api/init never runs, teardown is a no-op."""
     _reset_conversation_singleton()
+    _reset_bash_singleton()
     cfg = Config(
         deferred_init=True,
         conversations_path=tmp_path / "convs",
@@ -413,4 +505,7 @@ async def test_lifespan_teardown_releases_conversation_service_after_init(
     # After lifespan exit the conversation service should have been torn
     # down — i.e. _entered_service is cleared.
     assert init_svc._entered_service is None
+    # Same for the bash service: it must be torn down on lifespan exit.
+    assert init_svc._entered_bash_service is None
     _reset_conversation_singleton()
+    _reset_bash_singleton()
