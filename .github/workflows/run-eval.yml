@@ -37,7 +37,7 @@ jobs:
                   INSTANCE_IDS: N/A
                   NUM_INFER_WORKERS: (default)
                   NUM_EVAL_WORKERS: (default)
-                  ENABLE_CONVERSATION_EVENT_LOGGING: 'true'
+                  ENABLE_CONVERSATION_EVENT_LOGGING: 'false'
                   MAX_RETRIES: '3'
                   TOOL_PRESET: default
                   AGENT_TYPE: default
