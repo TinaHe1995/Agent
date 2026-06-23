@@ -564,13 +564,6 @@ class TestLocalConversationPlugins:
             def __init__(self):
                 self.tools = [runtime_tool]
 
-        def mock_create_mcp_tools(config, timeout):
-            mcp_tools_created.append(config)
-            return RuntimeMCPClient()
-
-        monkeypatch.setattr(
-            local_conversation_impl, "create_mcp_tools", mock_create_mcp_tools
-        )
         marketplace_dir = create_test_marketplace(
             tmp_path / "marketplace",
             plugins=[
@@ -599,6 +592,14 @@ class TestLocalConversationPlugins:
         conversation._ensure_agent_ready()
         existing_tools = dict(conversation.agent.tools_map)
 
+        def mock_create_mcp_tools(config, timeout):
+            mcp_tools_created.append((config, conversation.state.locked()))
+            return RuntimeMCPClient()
+
+        monkeypatch.setattr(
+            local_conversation_impl, "create_mcp_tools", mock_create_mcp_tools
+        )
+
         conversation.load_plugin("mcp-plugin")
 
         for name, tool in existing_tools.items():
@@ -607,7 +608,9 @@ class TestLocalConversationPlugins:
         assert conversation.agent.mcp_config is not None
         assert "runtime-server" in conversation.agent.mcp_config["mcpServers"]
         assert len(mcp_tools_created) == 1
-        assert "runtime-server" in mcp_tools_created[0]["mcpServers"]
+        created_config, state_locked = mcp_tools_created[0]
+        assert not state_locked
+        assert "runtime-server" in created_config["mcpServers"]
 
         conversation.close()
 

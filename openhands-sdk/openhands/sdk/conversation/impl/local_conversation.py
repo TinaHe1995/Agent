@@ -939,15 +939,16 @@ class LocalConversation(BaseConversation):
         self._hook_processor.set_conversation_state(self._state)
         self._hook_processor.run_session_start()
 
-    def _runtime_tools_for_plugin(
+    def _runtime_mcp_tools_for_plugin(
         self, plugin_mcp_config: dict[str, Any] | None
     ) -> list[ToolDefinition]:
-        runtime_tools: list[ToolDefinition] = []
-        if plugin_mcp_config:
-            runtime_tools.extend(
-                create_mcp_tools(plugin_mcp_config, _RUNTIME_MCP_TIMEOUT_SECS).tools
-            )
+        if not plugin_mcp_config:
+            return []
+        return list(
+            create_mcp_tools(plugin_mcp_config, _RUNTIME_MCP_TIMEOUT_SECS).tools
+        )
 
+    def _runtime_skill_tools_for_agent(self) -> list[ToolDefinition]:
         agent_context = self.agent.agent_context
         has_invocable_skills = bool(
             agent_context
@@ -957,8 +958,21 @@ class LocalConversation(BaseConversation):
             )
         )
         if has_invocable_skills and InvokeSkillTool.name not in self.agent.tools_map:
-            runtime_tools.extend(InvokeSkillTool.create(self._state))
-        return runtime_tools
+            return list(InvokeSkillTool.create(self._state))
+        return []
+
+    def _close_runtime_tools(self, tools: Sequence[ToolDefinition]) -> None:
+        for tool in tools:
+            try:
+                tool.as_executable().executor.close()
+            except NotImplementedError:
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "Error closing runtime tool executor for tool '%s': %s",
+                    tool.name,
+                    exc,
+                )
 
     def load_plugin(self, plugin_ref: str) -> None:
         """Load a plugin from the conversation's registered marketplaces."""
@@ -1000,6 +1014,11 @@ class LocalConversation(BaseConversation):
                 get_secret=get_secret,
                 expand_defaults=True,
             )
+        runtime_mcp_tools = (
+            self._runtime_mcp_tools_for_plugin(runtime_plugin_mcp)
+            if self._agent_ready
+            else []
+        )
 
         with self._state:
             self.agent = self.agent.model_copy(
@@ -1024,9 +1043,15 @@ class LocalConversation(BaseConversation):
 
             self._state.agent = self.agent
             if self._agent_ready:
-                self.agent.add_runtime_tools(
-                    self._runtime_tools_for_plugin(runtime_plugin_mcp)
-                )
+                runtime_tools = [
+                    *runtime_mcp_tools,
+                    *self._runtime_skill_tools_for_agent(),
+                ]
+                try:
+                    self.agent.add_runtime_tools(runtime_tools)
+                except Exception:
+                    self._close_runtime_tools(runtime_mcp_tools)
+                    raise
 
     def _register_file_based_agents(self) -> None:
         """Discover and register file-based agents into the agent registry.
