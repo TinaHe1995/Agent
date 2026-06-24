@@ -1075,10 +1075,12 @@ class ConversationService:
             thread_name_prefix="conversation-run",
         )
         self._event_services = {}
+        logger.info(f"ConversationService:__aenter__:conversations_dir:{self.conversations_dir}")
         for conversation_dir in self.conversations_dir.iterdir():
             stored: StoredConversation | None = None
             try:
                 meta_file = conversation_dir / "meta.json"
+                logger.info(f"ConversationService:__aenter__:meta_file:{meta_file}")
                 if not meta_file.exists():
                     continue
                 json_str = meta_file.read_text()
@@ -1132,7 +1134,7 @@ class ConversationService:
                 conversation_id = (
                     stored.id if stored is not None else conversation_dir.name
                 )
-                logger.debug(
+                logger.info(
                     "Skipping active conversation %s owned by %s until %s",
                     conversation_id,
                     exc.owner_instance_id,
