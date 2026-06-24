@@ -104,7 +104,7 @@ class SkillsRequest(BaseModel):
         default_factory=list,
         description=(
             "Marketplace registrations for plugin-based skill loading. When set, "
-            "registrations with auto_load='all' replace legacy public skills."
+            "registrations with auto_load=True replace legacy public skills."
         ),
     )
 
