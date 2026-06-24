@@ -226,6 +226,23 @@ def test_load_from_dir_and_save_to_dir(tmp_path: Path):
     assert metadata == loaded_metadata
 
 
+def test_installed_json_keeps_source_for_update(tmp_path: Path):
+    """.installed.json keeps the real source so ExtensionManager.update() can
+    re-clone (this layer has no cipher); a default dump still redacts."""
+    installation_dir = tmp_path / "installed"
+    installation_dir.mkdir()
+    cred = "https://oauth2:SUPER_SECRET@github.com/org/repo.git"
+    info = InstallationInfo(
+        name="ext", source=cred, install_path=installation_dir / "ext"
+    )
+    InstallationMetadata(extensions={"ext": info}).save_to_dir(installation_dir)
+
+    reloaded = InstallationMetadata.load_from_dir(installation_dir)
+    assert reloaded.extensions["ext"].source == cred  # update() re-clones from this
+
+    assert "SUPER_SECRET" not in info.model_dump_json()  # default dump redacts
+
+
 def test_load_from_dir_invalid_json(tmp_path: Path):
     """Test loading invalid JSON returns empty metadata."""
     installation_dir = tmp_path / "installed"

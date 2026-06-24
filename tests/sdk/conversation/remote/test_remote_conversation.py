@@ -254,6 +254,33 @@ class TestRemoteConversation:
     @patch(
         "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
     )
+    def test_remote_conversation_sends_real_plugin_source(self, mock_ws_client):
+        """The create payload must carry the real plugin source (credential +
+        ${VAR} placeholder) so the server can clone a private plugin (B2)."""
+        from openhands.sdk.plugin import PluginSource
+
+        conversation_id = str(uuid.uuid4())
+        mock_client_instance = self.setup_mock_client(conversation_id=conversation_id)
+        mock_ws_client.return_value = Mock()
+
+        source = "https://x-token-auth:${MY_TOKEN}@host/org/repo.git"
+        RemoteConversation(
+            agent=self.agent,
+            workspace=self.workspace,
+            plugins=[PluginSource(source=source)],
+        )
+
+        create_call = next(
+            call
+            for call in mock_client_instance.request.call_args_list
+            if call[0][0] == "POST" and call[0][1] == "/api/conversations"
+        )
+        payload = create_call.kwargs["json"]
+        assert payload["plugins"][0]["source"] == source
+
+    @patch(
+        "openhands.sdk.conversation.impl.remote_conversation.WebSocketCallbackClient"
+    )
     def test_remote_conversation_user_id_none_sends_explicit_null(self, mock_ws_client):
         """user_id=None sends an explicit null key (not omitted) so the server
         receives a consistent payload regardless of whether user_id was supplied."""

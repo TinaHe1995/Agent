@@ -2,10 +2,22 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+    FieldSerializationInfo,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+)
 
 from openhands.sdk.extensions.installation.interface import ExtensionProtocol
+from openhands.sdk.utils.pydantic_secrets import (
+    serialize_credential_url,
+    validate_credential_url,
+)
 
 
 class InstallationInfo(BaseModel):
@@ -35,6 +47,17 @@ class InstallationInfo(BaseModel):
         description="ISO 8601 timestamp of installation",
     )
     install_path: Path = Field(description="Path where the extension is installed")
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _decrypt_source(cls, v: Any, info: ValidationInfo) -> Any:
+        """Decrypt at-rest ciphertext (see validate_credential_url)."""
+        return validate_credential_url(v, info)
+
+    @field_serializer("source", when_used="always")
+    def _serialize_source(self, source: str, info: FieldSerializationInfo) -> str:
+        """Redact/expose/encrypt by context (see serialize_credential_url)."""
+        return serialize_credential_url(source, info)
 
     @staticmethod
     def from_extension(

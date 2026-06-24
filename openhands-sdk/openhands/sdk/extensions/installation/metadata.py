@@ -156,10 +156,17 @@ class InstallationMetadata(BaseModel):
             return cls()
 
     def save_to_dir(self, installed_dir: Path) -> None:
-        """Save metadata to the installed extensions directory."""
+        """Save metadata to the installed extensions directory.
+
+        Written with ``expose_secrets`` so the stored ``source`` survives for
+        ``ExtensionManager.update()`` (no cipher in this layer); default dumps
+        still redact.
+        """
         metadata_path = self.get_metadata_path(installed_dir)
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(self.model_dump_json(indent=2))
+        metadata_path.write_text(
+            self.model_dump_json(indent=2, context={"expose_secrets": "plaintext"})
+        )
 
     def validate_tracked(self, installed_dir: Path) -> list[InstallationInfo]:
         """Validate tracked extensions exist on disk.
