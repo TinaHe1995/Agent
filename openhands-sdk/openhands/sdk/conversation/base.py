@@ -139,6 +139,7 @@ class BaseConversation(ABC):
     def _start_observability_span(
         self,
         session_id: str,
+        span_name: str = "conversation",
         user_id: str | None = None,
         metadata: dict[str, TraceMetadataValue] | None = None,
         tags: list[str] | None = None,
@@ -148,6 +149,7 @@ class BaseConversation(ABC):
 
         Args:
             session_id: The session ID to associate with the trace
+            span_name: Name for the root span. Keep this low-cardinality.
             user_id: Optional user ID to associate with the trace
             metadata: Optional trace-level metadata to attach to observability backends
             tags: Optional span tags to attach to the conversation root span
@@ -159,7 +161,7 @@ class BaseConversation(ABC):
             # Idempotent: never start two roots for one conversation.
             return
         self._observability_root_span = start_root_span(
-            "conversation",
+            span_name,
             session_id=session_id,
             user_id=user_id,
             metadata=metadata,

@@ -160,6 +160,32 @@ def test_base_conversation_passes_observability_metadata_and_tag_attributes():
         )
 
 
+def test_base_conversation_uses_custom_observability_span_name():
+    """Conversation root span names can be overridden by callers."""
+    conversation = MockConversation()
+
+    with (
+        patch(
+            "openhands.sdk.conversation.base.should_enable_observability",
+            return_value=True,
+        ),
+        patch("openhands.sdk.conversation.base.start_root_span") as mock_start_span,
+    ):
+        conversation._start_observability_span(
+            "test-session-id",
+            span_name="pr_review_evaluation",
+        )
+
+        mock_start_span.assert_called_once_with(
+            "pr_review_evaluation",
+            session_id="test-session-id",
+            user_id=None,
+            metadata=None,
+            tags=None,
+            attributes=None,
+        )
+
+
 def test_base_conversation_span_management_disabled():
     """Test that BaseConversation doesn't perform span operations when observability is disabled."""  # noqa: E501
 

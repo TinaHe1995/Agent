@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from openhands.agent_server.api import _find_http_exception, create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.openai.router import _parse_observability_overrides
 
 
 @pytest.fixture
@@ -139,6 +140,34 @@ def test_openai_routes_accept_bearer_session_key(client_with_auth, monkeypatch):
         "/v1/models", headers={"X-Session-API-Key": "test-key-123"}
     )
     assert response.status_code == 200
+
+
+def test_openai_observability_headers_parse_to_conversation_overrides():
+    overrides = _parse_observability_overrides(
+        span_name="pr_review_evaluation",
+        tags="pr-review,evaluation",
+        metadata='{"repo":"OpenHands/software-agent-sdk","pr_number":123}',
+    )
+
+    assert overrides == {
+        "observability_span_name": "pr_review_evaluation",
+        "observability_tags": ["pr-review", "evaluation"],
+        "observability_metadata": {
+            "repo": "OpenHands/software-agent-sdk",
+            "pr_number": 123,
+        },
+    }
+
+
+def test_openai_observability_headers_reject_invalid_span_name():
+    with pytest.raises(HTTPException) as exc_info:
+        _parse_observability_overrides(
+            span_name="bad span name",
+            tags=None,
+            metadata=None,
+        )
+
+    assert exc_info.value.status_code == 422
 
 
 def test_api_protected_endpoints_require_auth(client_with_auth):
