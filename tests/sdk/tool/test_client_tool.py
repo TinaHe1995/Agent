@@ -222,6 +222,35 @@ def test_client_tool_kind_argument_action_event_roundtrip():
     assert restored.action.kind == "ClientAction_symbol_lookup"
 
 
+def test_client_tool_kind_argument_concrete_action_roundtrip():
+    spec = ClientToolSpec(
+        name="symbol_lookup",
+        description="Lookup a symbol",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "description": "Symbol kind hint, such as Function or Method",
+                },
+            },
+            "required": ["name"],
+        },
+    )
+    tool = ClientTool.from_spec(spec)
+    action_type = tool.action_type
+
+    action = action_type.model_validate({"name": "executeCommand", "kind": "Method"})
+    dumped = action.model_dump()
+    restored = action_type.model_validate(dumped)
+
+    assert dumped["mcp_arg_kind"] == "Method"
+    assert dumped["kind"] == action_type.__name__
+    assert restored.model_dump()["mcp_arg_kind"] == "Method"
+    assert restored.kind == action_type.__name__
+
+
 def test_create_classmethod():
     """The create() classmethod should return a single-element sequence."""
     spec = ClientToolSpec(name="test_tool", description="Test")

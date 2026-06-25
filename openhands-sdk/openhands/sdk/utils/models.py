@@ -212,6 +212,20 @@ class DiscriminatedUnionMixin(OpenHandsModel):
                 for field_name, field_info in cls.model_fields.items()
             )
             if has_kind_alias_field:
+                # Concrete persisted dumps can include both the real aliased
+                # argument and this mixin's computed discriminator.
+                if isinstance(data, dict) and data.get("kind") == cls.__name__:
+                    internal_kind_field = next(
+                        (
+                            field_name
+                            for field_name, field_info in cls.model_fields.items()
+                            if field_name != "kind" and field_info.alias == "kind"
+                        ),
+                        None,
+                    )
+                    if internal_kind_field in data:
+                        data = data.copy()
+                        data.pop("kind", None)
                 return handler(data)
             kind = data.pop("kind", None)
             # Sanity check: if we're validating a concrete class directly,
