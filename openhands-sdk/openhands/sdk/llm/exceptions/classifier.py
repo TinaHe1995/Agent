@@ -20,7 +20,7 @@ from .types import (
 
 
 # Minimal, provider-agnostic context-window detection
-LONG_PROMPT_PATTERNS: list[str] = [
+LONG_PROMPT_PATTERNS: Final[list[str]] = [
     "contextwindowexceedederror",
     "prompt is too long",
     "input length and `max_tokens` exceed context limit",
@@ -35,7 +35,7 @@ LONG_PROMPT_PATTERNS: list[str] = [
 # provider. They are tracked separately from true context-window errors so the
 # logs and agent control flow can preserve that distinction while still routing
 # into condensation-based recovery.
-MALFORMED_HISTORY_PATTERNS: list[str] = [
+MALFORMED_HISTORY_PATTERNS: Final[list[str]] = [
     "tool_use ids were found without `tool_result` blocks immediately after",
     # Anthropic backtick variant
     "`tool_use` ids were found without `tool_result` blocks immediately after",
@@ -55,6 +55,30 @@ MALFORMED_HISTORY_PATTERNS: list[str] = [
     # OpenAI-compatible providers may reject replayed assistant tool calls whose
     # arguments are not valid JSON.
     "failed to parse tool call arguments as json",
+]
+
+# Vertex AI (Gemini) rejects context-caching requests when the cached content
+# is below the provider's minimum token threshold (currently 4096 tokens).
+# Example error: "The cached content is of 1171 tokens. The minimum token
+# count to start caching is 4096." — the `.lower()` comparison handles case
+# variation across providers but won't match reworded messages; update this
+# pattern if the API phrasing changes.
+PROMPT_CACHE_TOO_SMALL_PATTERNS: Final[list[str]] = [
+    "minimum token count to start caching",
+]
+
+AUTH_PATTERNS: Final[list[str]] = [
+    "invalid api key",
+    "unauthorized",
+    "missing api key",
+    "invalid authentication",
+    "access denied",
+]
+
+CONTENT_POLICY_PATTERNS: Final[list[str]] = [
+    "content_policy",
+    "content filtering policy",
+    "output blocked by content filtering",
 ]
 
 
@@ -89,25 +113,6 @@ def looks_like_malformed_conversation_history_error(exception: Exception) -> boo
     return any(p in s for p in MALFORMED_HISTORY_PATTERNS)
 
 
-# Vertex AI (Gemini) rejects context-caching requests when the cached content
-# is below the provider's minimum token threshold (currently 4096 tokens).
-# Example error: "The cached content is of 1171 tokens. The minimum token
-# count to start caching is 4096." — the `.lower()` comparison handles case
-# variation across providers but won't match reworded messages; update this
-# pattern if the API phrasing changes.
-PROMPT_CACHE_TOO_SMALL_PATTERNS: list[str] = [
-    "minimum token count to start caching",
-]
-
-AUTH_PATTERNS: list[str] = [
-    "invalid api key",
-    "unauthorized",
-    "missing api key",
-    "invalid authentication",
-    "access denied",
-]
-
-
 def is_prompt_cache_too_small(exception: Exception) -> bool:
     """Return True if the error indicates the prompt cache content is too small.
 
@@ -137,16 +142,6 @@ def looks_like_auth_error(exception: Exception) -> bool:
         if code in s:
             return True
     return False
-
-
-# Output/input content-policy blocks. Anthropic raises this as a 400 with
-# "Output blocked by content filtering policy"; the typed class may be flattened
-# to a plain BadRequestError by proxies/aliased providers, hence the text fallback.
-CONTENT_POLICY_PATTERNS: Final[list[str]] = [
-    "content_policy",
-    "content filtering policy",
-    "output blocked by content filtering",
-]
 
 
 def is_content_policy_violation(exception: Exception) -> bool:
