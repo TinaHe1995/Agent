@@ -12,8 +12,6 @@ on:
 jobs:
     prepare-release:
         runs-on: ubuntu-24.04
-        env:
-            SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         steps:
             - name: Validate version format
               env:
@@ -135,12 +133,23 @@ jobs:
                   echo "PR_URL=$PR_URL" >> $GITHUB_ENV
                   echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
 
+            - name: Check Slack token availability
+              id: slack_token
+              env:
+                  SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+              run: |
+                  if [ -n "$SLACK_BOT_TOKEN" ]; then
+                    echo "available=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "available=false" >> "$GITHUB_OUTPUT"
+                  fi
+
             - name: Notify Slack
-              if: env.SLACK_BOT_TOKEN != ''
+              if: steps.slack_token.outputs.available == 'true'
               uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
               with:
                   method: chat.postMessage
-                  token: ${{ env.SLACK_BOT_TOKEN }}
+                  token: ${{ secrets.SLACK_BOT_TOKEN }}
                   payload: |
                       channel: "#proj-agent"
                       text: "🛠️ *SDK v${{ inputs.version }} release preparation started*\n\nRelease PR: <${{ steps.create_pr.outputs.pr_url }}|Release v${{ inputs.version }}>\nStarted by: <${{ github.server_url }}/${{ github.actor }}|@${{ github.actor }}>\nRepo: <${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"
