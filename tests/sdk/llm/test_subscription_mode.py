@@ -157,7 +157,10 @@ def test_subscription_retry_does_not_add_temperature(mock_responses: Any):
         _make_responses_api_response("ok"),
     ]
 
-    llm.responses(messages=[Message(role="user", content=[TextContent(text="hi")])])
+    # Subscription auth loads OAuth credentials from disk; stub it out so the
+    # test does not depend on a real ChatGPT login being present.
+    with patch.object(llm, "_get_litellm_auth_values", return_value=(None, {})):
+        llm.responses(messages=[Message(role="user", content=[TextContent(text="hi")])])
 
     assert mock_responses.call_count == 2
     _, first_kwargs = mock_responses.call_args_list[0]
