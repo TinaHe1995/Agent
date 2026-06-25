@@ -7,9 +7,6 @@ from pathlib import PurePosixPath, PureWindowsPath
 from pydantic import BaseModel, Field, field_validator
 
 
-AutoLoadConfig = bool | list[str]
-
-
 class MarketplaceRegistration(BaseModel):
     """Registration for a marketplace source used for plugin resolution."""
 
@@ -28,7 +25,7 @@ class MarketplaceRegistration(BaseModel):
             "Only relevant for git sources."
         ),
     )
-    auto_load: AutoLoadConfig = Field(
+    auto_load: bool | list[str] = Field(
         default=False,
         description=(
             "Whether to load marketplace plugins at conversation start. Use True "
