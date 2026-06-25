@@ -235,15 +235,18 @@ def _create_git_delta(
             check=True,
             timeout=300,
         )
-        result = subprocess.run(
-            ["git", "diff", "--binary", "--cached", ref, "--", "."],
-            cwd=root,
-            env=env,
-            capture_output=True,
-            check=True,
-            timeout=300,
-        )
-        output_path.write_bytes(result.stdout)
+        # Stream the diff straight to disk so a large binary patch is never
+        # buffered in memory (OOM risk at pause/stop on a fat workspace).
+        with open(output_path, "wb") as out:
+            subprocess.run(
+                ["git", "diff", "--binary", "--cached", ref, "--", "."],
+                cwd=root,
+                env=env,
+                stdout=out,
+                stderr=subprocess.PIPE,
+                check=True,
+                timeout=300,
+            )
     except subprocess.CalledProcessError as e:
         output_path.unlink(missing_ok=True)
         stderr = e.stderr.decode("utf-8", "replace") if e.stderr else ""
@@ -252,6 +255,14 @@ def _create_git_delta(
             command=e.cmd if isinstance(e.cmd, list) else [str(e.cmd)],
             exit_code=e.returncode,
             stderr=stderr.strip(),
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        output_path.unlink(missing_ok=True)
+        raise GitCommandError(
+            message="Timed out generating git delta",
+            command=e.cmd if isinstance(e.cmd, list) else [str(e.cmd)],
+            exit_code=-1,
+            stderr=f"timed out after {e.timeout}s",
         ) from e
     except Exception:
         output_path.unlink(missing_ok=True)
@@ -272,16 +283,23 @@ def _create_git_delta(
         return ""
 
 
-def _path_is_excluded(rel: PurePosixPath, patterns: list[str]) -> bool:
-    """True if any component of ``rel`` matches any glob in ``patterns``.
+def _path_is_excluded(
+    rel: PurePosixPath, patterns: list[str], is_dir: bool
+) -> bool:
+    """True if ``rel`` is excluded by any glob in ``patterns``.
 
-    Patterns are matched per path component with ``fnmatch`` (a trailing ``/``,
-    used to denote directory excludes, is stripped first). Dependency-free so no
-    new package is pulled in.
+    A trailing ``/`` marks a directory-only pattern: it matches a directory
+    component but never a file's own name, so a ``build/`` pattern prunes a
+    ``build`` directory while keeping a file literally named ``build``. Other
+    patterns match any component. Dependency-free so no new package is pulled in.
     """
-    stripped = [p.rstrip("/") for p in patterns]
-    for part in rel.parts:
-        for pattern in stripped:
+    parts = rel.parts
+    for raw in patterns:
+        pattern = raw.rstrip("/")
+        # For a dir-only pattern matched against a file, skip the basename so a
+        # file sharing a directory exclude's name is not dropped.
+        candidates = parts if (is_dir or not raw.endswith("/")) else parts[:-1]
+        for part in candidates:
             if fnmatch.fnmatch(part, pattern):
                 return True
     return False
@@ -318,19 +336,28 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
                 base = PurePosixPath(Path(dirpath).relative_to(root).as_posix())
                 # Prune excluded directories in place so we never descend them.
                 dirnames[:] = [
-                    d for d in dirnames if not _path_is_excluded(base / d, excludes)
+                    d
+                    for d in dirnames
+                    if not _path_is_excluded(base / d, excludes, is_dir=True)
                 ]
                 for name in filenames:
                     rel = base / name
-                    if _path_is_excluded(rel, excludes):
+                    if _path_is_excluded(rel, excludes, is_dir=False):
                         continue
                     file_path = Path(dirpath) / name
                     if file_path.is_symlink() or not file_path.is_file():
                         continue
                     arcname = f"{root.name}/{rel}"
-                    tar.add(file_path, arcname=arcname, recursive=False)
+                    # Best-effort: the workspace may still be mutating, so a file
+                    # that vanishes between listing and add is skipped, not fatal.
+                    try:
+                        size = file_path.stat().st_size
+                        tar.add(file_path, arcname=arcname, recursive=False)
+                    except OSError as e:
+                        logger.warning(f"Skipping unreadable file {file_path}: {e}")
+                        continue
                     file_count += 1
-                    total_bytes += file_path.stat().st_size
+                    total_bytes += size
 
             manifest = _build_archive_manifest(
                 root.name, file_count, total_bytes, excludes
