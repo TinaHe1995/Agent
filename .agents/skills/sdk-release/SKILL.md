@@ -4,13 +4,13 @@ description: >-
   This skill should be used when the user asks to "release the SDK",
   "prepare a release", "publish a new version", "cut a release",
   "do a release", or mentions the SDK release checklist or release process.
-  Guides through the full software-agent-sdk release workflow
+  Guides through the full agent-sdk release workflow
   from version bump to PyPI publication, emphasizing human checkpoints.
 ---
 
 # SDK Release Guide
 
-This skill walks through the software-agent-sdk release process step by step.
+This skill walks through the agent-sdk release process step by step.
 
 > **🚨 CRITICAL**: NEVER merge the release PR or create/publish a GitHub
 > release without the human's explicit approval. Release is the last line
@@ -26,7 +26,7 @@ automatically.
 ### Via GitHub UI
 
 Navigate to
-<https://github.com/OpenHands/software-agent-sdk/actions/workflows/prepare-release.yml>,
+<https://github.com/OpenHands/agent-sdk/actions/workflows/prepare-release.yml>,
 click **Run workflow**, enter the version (e.g. `1.16.0`), and run it.
 
 ### Via GitHub API
@@ -35,7 +35,7 @@ click **Run workflow**, enter the version (e.g. `1.16.0`), and run it.
 curl -X POST \
   -H "Authorization: token $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/OpenHands/software-agent-sdk/actions/workflows/prepare-release.yml/dispatches" \
+  "https://api.github.com/repos/OpenHands/agent-sdk/actions/workflows/prepare-release.yml/dispatches" \
   -d '{
     "ref": "main",
     "inputs": {
@@ -51,13 +51,14 @@ The workflow will:
 4. Update the `sdk_ref` default in the eval workflow
 5. Open a PR titled **"Release v\<version\>"** with labels
    `integration-test`, `behavior-test`, and `test-examples`
+6. Notify `#proj-agent` with the release PR link and workflow actor
 
 ### ⏸ Checkpoint — Confirm PR Created
 
 Verify the PR exists and the version changes look correct before continuing.
 
 ```bash
-gh pr list --repo OpenHands/software-agent-sdk \
+gh pr list --repo OpenHands/agent-sdk \
   --head "rel-<version>" --json number,title,url
 ```
 
@@ -86,7 +87,7 @@ The release PR triggers three labeled test suites. **All three must pass.**
 Monitor status:
 
 ```bash
-gh pr checks <PR_NUMBER> --repo OpenHands/software-agent-sdk
+gh pr checks <PR_NUMBER> --repo OpenHands/agent-sdk
 ```
 
 ### ⏸ Checkpoint — Human Judgment on Failures
@@ -101,11 +102,11 @@ Re-run failed jobs:
 
 ```bash
 # Find the run ID
-gh run list --repo OpenHands/software-agent-sdk \
+gh run list --repo OpenHands/agent-sdk \
   --branch "rel-<version>" --limit 5
 
 # Re-run failed jobs
-gh run rerun <RUN_ID> --repo OpenHands/software-agent-sdk --failed
+gh run rerun <RUN_ID> --repo OpenHands/agent-sdk --failed
 ```
 
 ## Phase 4: Run Evaluation (Optional but Recommended)
@@ -118,7 +119,7 @@ details.
 curl -X POST \
   -H "Authorization: token $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/OpenHands/software-agent-sdk/actions/workflows/run-eval.yml/dispatches" \
+  "https://api.github.com/repos/OpenHands/agent-sdk/actions/workflows/run-eval.yml/dispatches" \
   -d '{
     "ref": "main",
     "inputs": {
@@ -146,7 +147,7 @@ drops should block the release.
 Once the human approves:
 
 ```bash
-gh pr merge <PR_NUMBER> --repo OpenHands/software-agent-sdk --merge
+gh pr merge <PR_NUMBER> --repo OpenHands/agent-sdk --merge
 ```
 
 ## Phase 6: Automated Release Pipeline (no action needed)
@@ -188,7 +189,7 @@ Version bump PRs:
 • <https://github.com/All-Hands-AI/OpenHands/pulls?q=is%3Apr+bump-sdk-<version>|OpenHands>
 • <https://github.com/OpenHands/openhands-cli/pulls?q=is%3Apr+bump-sdk-<version>|OpenHands-CLI>
 
-Release: <https://github.com/OpenHands/software-agent-sdk/releases/tag/v<version>|v<version>>
+Release: <https://github.com/OpenHands/agent-sdk/releases/tag/v<version>|v<version>>
 ```
 
 See `references/post-release-checklist.md` for details on reviewing
