@@ -30,6 +30,16 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, SecretStr
 
+from openhands.sdk.llm.llm_profile_store import PROFILE_NAME_PATTERN
+
+
+# An AgentProfile's stable id is a UUID (the pointer target); reject malformed
+# values at the HTTP layer, mirroring ``active_profile``'s name pattern.
+UUID_PATTERN = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
 
 if TYPE_CHECKING:
     from .model import AgentSettingsConfig, ConversationSettings
@@ -42,8 +52,8 @@ class SettingsResponse(BaseModel):
     """Response model for GET /api/settings.
 
     Contains the full settings payload including agent configuration,
-    conversation settings, miscellaneous frontend-owned settings, and a flag
-    indicating whether an LLM API key is set.
+    conversation settings, active LLM profile, miscellaneous frontend-owned
+    settings, and a flag indicating whether an LLM API key is set.
 
     The ``agent_settings`` and ``conversation_settings`` fields are raw dicts
     because the server controls secret serialization via context. Use the
@@ -63,6 +73,14 @@ class SettingsResponse(BaseModel):
     agent_settings: dict[str, Any]
     conversation_settings: dict[str, Any]
     llm_api_key_is_set: bool
+    active_profile: str | None = Field(
+        default=None,
+        description="Name of the currently active LLM profile, if one is selected.",
+    )
+    active_agent_profile_id: str | None = Field(
+        default=None,
+        description="Stable id of the currently active AgentProfile, if one is set.",
+    )
     misc_settings: dict[str, Any] = Field(default_factory=dict)
 
     def get_agent_settings(self) -> AgentSettingsConfig:
@@ -102,6 +120,16 @@ class SettingsUpdateRequest(BaseModel):
     agent_settings_diff: dict[str, Any] | None = None
     conversation_settings_diff: dict[str, Any] | None = None
     misc_settings_diff: dict[str, Any] | None = None
+    active_profile: str | None = Field(
+        default=None,
+        pattern=PROFILE_NAME_PATTERN,
+        description="Name of the active LLM profile to persist; null clears it.",
+    )
+    active_agent_profile_id: str | None = Field(
+        default=None,
+        pattern=UUID_PATTERN,
+        description="Stable id of the active AgentProfile to persist; null clears it.",
+    )
 
 
 # ── Secrets API Models ────────────────────────────────────────────────────

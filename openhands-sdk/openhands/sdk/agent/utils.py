@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import textwrap
 import types
-from collections.abc import Collection, Sequence
+from collections.abc import Collection
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -24,7 +24,7 @@ from typing import (
 from openhands.sdk.context.condenser.base import CondenserBase
 from openhands.sdk.context.view import View
 from openhands.sdk.conversation.types import ConversationTokenCallbackType
-from openhands.sdk.event.base import Event, LLMConvertibleEvent
+from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.condenser import Condensation
 from openhands.sdk.llm import LLM, LLMResponse, Message
 from openhands.sdk.tool import Action, ToolDefinition
@@ -72,13 +72,36 @@ def sanitize_json_control_chars(raw: str) -> str:
     return _CONTROL_CHAR_RE.sub(_escape_control_char, raw)
 
 
+def _is_chunked_str_field(value: Any, expected_origins: list[Any]) -> bool:
+    """Return True if a str-only field was given a list of string chunks.
+
+    Some models (e.g. minimax-m2.5) split a single string argument such as
+    file_editor's old_str/new_str into a JSON array of chunks. Such a list is
+    rejoined into one string by the caller. ``str | list[str]`` fields are
+    excluded so a genuinely-valid list is never collapsed, and lists holding
+    non-strings are rejected so they fail validation instead of being silently
+    mangled.
+    """
+    return (
+        isinstance(value, list)
+        and str in expected_origins
+        and not any(exp in (list, dict) for exp in expected_origins)
+        and all(isinstance(part, str) for part in value)
+    )
+
+
 def fix_malformed_tool_arguments(
     arguments: dict[str, Any], action_type: type[Action]
 ) -> dict[str, Any]:
-    """Fix malformed tool arguments by decoding JSON strings for list/dict fields.
+    """Fix malformed tool arguments emitted by some LLMs under native fn calling.
 
-    This function handles cases where certain LLMs (such as GLM 4.6) incorrectly
-    encode array/object parameters as JSON strings when using native function calling.
+    Two malformations are repaired:
+
+    1. list/dict parameters encoded as JSON strings (e.g. GLM 4.6), which are
+       decoded back into native arrays/objects (see example below).
+    2. str-only parameters emitted as a JSON array of string chunks (e.g.
+       minimax-m2.5 chunking file_editor's old_str/new_str), which are joined
+       back into a single string.
 
     Example raw LLM output from GLM 4.6:
     {
@@ -125,9 +148,6 @@ def fix_malformed_tool_arguments(
             continue
 
         value = fixed_arguments[data_key]
-        # Skip if value is not a string
-        if not isinstance(value, str):
-            continue
 
         expected_type = field_info.annotation
 
@@ -147,6 +167,15 @@ def fix_malformed_tool_arguments(
         else:
             # For non-Union types, just check the origin
             expected_origins = [origin or expected_type]
+
+        # Rejoin a str-only field that a model chunked into a JSON array.
+        if _is_chunked_str_field(value, expected_origins):
+            fixed_arguments[data_key] = "".join(value)
+            continue
+
+        # Skip non-strings — the JSON decoding below only works on strings.
+        if not isinstance(value, str):
+            continue
 
         # Check if any of the expected types is list or dict
         if any(exp in (list, dict) for exp in expected_origins):
@@ -499,7 +528,7 @@ def normalize_tool_call(
 
 @overload
 def prepare_llm_messages(
-    events: Sequence[Event],
+    view: View,
     condenser: None = None,
     additional_messages: list[Message] | None = None,
     llm: LLM | None = None,
@@ -508,7 +537,7 @@ def prepare_llm_messages(
 
 @overload
 def prepare_llm_messages(
-    events: Sequence[Event],
+    view: View,
     condenser: CondenserBase,
     additional_messages: list[Message] | None = None,
     llm: LLM | None = None,
@@ -516,19 +545,25 @@ def prepare_llm_messages(
 
 
 def prepare_llm_messages(
-    events: Sequence[Event],
+    view: View,
     condenser: CondenserBase | None = None,
     additional_messages: list[Message] | None = None,
     llm: LLM | None = None,
 ) -> list[Message] | Condensation:
-    """Prepare LLM messages from conversation context.
+    """Prepare LLM messages from a conversation view.
 
     This utility function extracts the common logic for preparing conversation
     context that is shared between agent.step() and ask_agent() methods.
     It handles condensation internally and calls the callback when needed.
 
+    Callers should pass the cached `ConversationState.view`, which is
+    maintained incrementally as events are appended. This avoids paying the
+    O(n) `View.from_events` (with `enforce_properties`) cost on every step.
+    See https://github.com/OpenHands/software-agent-sdk/issues/3053.
+
     Args:
-        events: Sequence of events to prepare messages from
+        view: A `View` of the conversation history. The view is treated as
+            read-only — see `CondenserBase.condense` for the same contract.
         condenser: Optional condenser for handling context window limits
         additional_messages: Optional additional messages to append
         llm: Optional LLM instance from the agent, passed to condenser for
@@ -537,12 +572,7 @@ def prepare_llm_messages(
     Returns:
         List of messages ready for LLM completion, or a Condensation event
         if condensation is needed
-
-    Raises:
-        RuntimeError: If condensation is needed but no callback is provided
     """
-
-    view = View.from_events(events)
     llm_convertible_events: list[LLMConvertibleEvent] = view.events
 
     # If a condenser is registered, we need to give it an
@@ -622,7 +652,7 @@ def make_llm_completion(
 
 
 async def aprepare_llm_messages(
-    events: Sequence[Event],
+    view: View,
     condenser: CondenserBase | None = None,
     additional_messages: list[Message] | None = None,
     llm: LLM | None = None,
@@ -632,7 +662,6 @@ async def aprepare_llm_messages(
     Calls ``condenser.acondense()`` so that condensers backed by an LLM can
     use async completions without blocking the event loop.
     """
-    view = View.from_events(events)
     llm_convertible_events: list[LLMConvertibleEvent] = view.events
 
     if condenser is not None:
