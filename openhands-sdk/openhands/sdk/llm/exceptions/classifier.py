@@ -4,6 +4,7 @@ from litellm.exceptions import (
     APIConnectionError,
     AuthenticationError,
     BadRequestError,
+    ContentPolicyViolationError,
     ContextWindowExceededError,
     InternalServerError,
     OpenAIError,
@@ -134,3 +135,22 @@ def looks_like_auth_error(exception: Exception) -> bool:
         if code in s:
             return True
     return False
+
+
+# Output/input content-policy blocks. Anthropic raises this as a 400 with
+# "Output blocked by content filtering policy"; the typed class may be flattened
+# to a plain BadRequestError by proxies/aliased providers, hence the text fallback.
+CONTENT_POLICY_PATTERNS: list[str] = [
+    "content_policy",
+    "content filtering policy",
+    "output blocked by content filtering",
+]
+
+
+def is_content_policy_violation(exception: Exception) -> bool:
+    if isinstance(exception, ContentPolicyViolationError):
+        return True
+    if not isinstance(exception, (BadRequestError, OpenAIError)):
+        return False
+    s = str(exception).lower()
+    return any(p in s for p in CONTENT_POLICY_PATTERNS)

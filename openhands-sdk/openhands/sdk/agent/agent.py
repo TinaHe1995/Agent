@@ -61,6 +61,7 @@ from openhands.sdk.llm import (
 )
 from openhands.sdk.llm.exceptions import (
     FunctionCallValidationError,
+    LLMContentPolicyViolationError,
     LLMContextWindowExceedError,
     LLMMalformedConversationHistoryError,
 )
@@ -607,6 +608,31 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             )
             on_event(error_message)
             return
+        except LLMContentPolicyViolationError as e:
+            # The provider's content filter blocked this completion. It is
+            # deterministic, so re-sending the same request is futile; instead
+            # nudge the model with a user message and let the run loop continue.
+            # A model that keeps tripping the filter is bounded by the stuck
+            # detector rather than emitting a fatal ConversationErrorEvent.
+            logger.warning(f"LLM output blocked by content filter: {e}")
+            on_event(
+                MessageEvent(
+                    source="user",
+                    llm_message=Message(
+                        role="user",
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Your previous response was blocked by the "
+                                    "model's content filter. Please continue, "
+                                    "rephrasing to avoid the flagged content."
+                                )
+                            )
+                        ],
+                    ),
+                )
+            )
+            return
         except LLMMalformedConversationHistoryError as e:
             # The provider rejected the current message history as structurally
             # invalid (for example, broken tool_use/tool_result pairing). Route
@@ -746,6 +772,31 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 ),
             )
             on_event(error_message)
+            return
+        except LLMContentPolicyViolationError as e:
+            # The provider's content filter blocked this completion. It is
+            # deterministic, so re-sending the same request is futile; instead
+            # nudge the model with a user message and let the run loop continue.
+            # A model that keeps tripping the filter is bounded by the stuck
+            # detector rather than emitting a fatal ConversationErrorEvent.
+            logger.warning(f"LLM output blocked by content filter: {e}")
+            on_event(
+                MessageEvent(
+                    source="user",
+                    llm_message=Message(
+                        role="user",
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Your previous response was blocked by the "
+                                    "model's content filter. Please continue, "
+                                    "rephrasing to avoid the flagged content."
+                                )
+                            )
+                        ],
+                    ),
+                )
+            )
             return
         except LLMMalformedConversationHistoryError as e:
             # The provider rejected the current message history as
