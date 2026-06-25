@@ -609,11 +609,8 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             on_event(error_message)
             return
         except LLMContentPolicyViolationError as e:
-            # The provider's content filter blocked this completion. It is
-            # deterministic, so re-sending the same request is futile; instead
-            # nudge the model with a user message and let the run loop continue.
-            # A model that keeps tripping the filter is bounded by the stuck
-            # detector rather than emitting a fatal ConversationErrorEvent.
+            # Content-policy blocks are deterministic; nudge the model and let the
+            # run loop continue instead of emitting a fatal error.
             logger.warning(f"LLM output blocked by content filter: {e}")
             on_event(
                 MessageEvent(
@@ -774,11 +771,8 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             on_event(error_message)
             return
         except LLMContentPolicyViolationError as e:
-            # The provider's content filter blocked this completion. It is
-            # deterministic, so re-sending the same request is futile; instead
-            # nudge the model with a user message and let the run loop continue.
-            # A model that keeps tripping the filter is bounded by the stuck
-            # detector rather than emitting a fatal ConversationErrorEvent.
+            # Content-policy blocks are deterministic; nudge the model and let the
+            # run loop continue instead of emitting a fatal error.
             logger.warning(f"LLM output blocked by content filter: {e}")
             on_event(
                 MessageEvent(

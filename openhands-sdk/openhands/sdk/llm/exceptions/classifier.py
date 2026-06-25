@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Final
+
 from litellm.exceptions import (
     APIConnectionError,
     AuthenticationError,
@@ -140,7 +142,7 @@ def looks_like_auth_error(exception: Exception) -> bool:
 # Output/input content-policy blocks. Anthropic raises this as a 400 with
 # "Output blocked by content filtering policy"; the typed class may be flattened
 # to a plain BadRequestError by proxies/aliased providers, hence the text fallback.
-CONTENT_POLICY_PATTERNS: list[str] = [
+CONTENT_POLICY_PATTERNS: Final[list[str]] = [
     "content_policy",
     "content filtering policy",
     "output blocked by content filtering",
