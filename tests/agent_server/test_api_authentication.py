@@ -3,12 +3,15 @@ Integration tests for API authentication using dependency-based authentication.
 Tests the complete authentication flow through the FastAPI application.
 """
 
+import json
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from openhands.agent_server.api import _find_http_exception, create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.dependencies import get_conversation_service
 from openhands.agent_server.openai.router import _parse_observability_overrides
 
 
@@ -168,6 +171,32 @@ def test_openai_observability_headers_reject_invalid_span_name():
         )
 
     assert exc_info.value.status_code == 422
+    json.dumps(exc_info.value.detail)
+
+
+def test_openai_route_invalid_observability_header_returns_422(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("run_chat_completion should not run for invalid headers")
+
+    monkeypatch.setattr(
+        "openhands.agent_server.openai.router.run_chat_completion",
+        fail_if_called,
+    )
+    app = create_app(Config(session_api_keys=[]))
+    app.dependency_overrides[get_conversation_service] = lambda: object()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-OpenHands-Observability-Span-Name": "bad span name"},
+        json={
+            "model": "openhands/test",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Observability span name" in response.text
 
 
 def test_api_protected_endpoints_require_auth(client_with_auth):

@@ -106,7 +106,7 @@ def _parse_observability_overrides(
     except ValidationError as exc:
         raise HTTPException(
             status_code=422,
-            detail=exc.errors(),
+            detail=exc.errors(include_context=False),
         ) from exc
     return overrides
 

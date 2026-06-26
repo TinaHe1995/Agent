@@ -190,10 +190,10 @@ class LocalConversation(BaseConversation):
         client_tools: list[ClientToolSpec] | None = None,
         observability_metadata: dict[str, TraceMetadataValue] | None = None,
         observability_tags: list[str] | None = None,
-        observability_span_name: str = "conversation",
         # Appended at the end (not grouped with max_iteration_per_run) to avoid
         # shifting the position of any existing positional argument.
         max_budget_per_run: float | None = None,
+        observability_span_name: str = "conversation",
         **_: object,
     ):
         """Initialize the conversation.

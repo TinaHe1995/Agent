@@ -173,7 +173,8 @@ class BaseConversation(ABC):
         """End the observability span if it hasn't been ended already."""
         if self._span_ended:
             return
-        end_root_span(self._observability_root_span)
+        if self._observability_root_span is not None:
+            end_root_span(self._observability_root_span)
         self._observability_root_span = None
         self._span_ended = True
 

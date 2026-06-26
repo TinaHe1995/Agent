@@ -208,11 +208,10 @@ def test_base_conversation_span_management_disabled():
         assert conversation._span_ended is False
         assert conversation._observability_root_span is None
 
-        # End is always called (it's a no-op for None) and marks ended.
-        # The important property is that no observability call is made when
-        # observability is disabled.
+        # Ending without a started root span is a no-op and marks ended.
         conversation._end_observability_span()
-        mock_end_span.assert_called_once_with(None)
+        mock_end_span.assert_not_called()
+        assert conversation._span_ended is True
 
 
 def test_base_conversation_no_span_warnings(caplog):
