@@ -735,6 +735,8 @@ class EventService:
 
         # self.stored contains an Agent configuration we can instantiate
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
+        # lease_ttl_seconds=0 disables leasing for single-instance deployments
+        # where shared-storage stale leases would otherwise block pod restarts.
         if self.lease_ttl_seconds > 0:
             self._lease = ConversationLease(
                 conversation_dir=self.conversation_dir,

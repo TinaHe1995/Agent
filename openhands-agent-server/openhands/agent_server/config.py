@@ -6,6 +6,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from openhands.agent_server.conversation_lease import DEFAULT_LEASE_TTL_SECONDS
 from openhands.agent_server.env_parser import (
     MISSING,
     _get_default_parsers,
@@ -248,7 +249,7 @@ class Config(BaseModel):
         ),
     )
     lease_ttl_seconds: float = Field(
-        default=45.0,
+        default=DEFAULT_LEASE_TTL_SECONDS,
         ge=0.0,
         description=(
             "How long (in seconds) a conversation ownership lease remains valid "
@@ -256,7 +257,9 @@ class Config(BaseModel):
             "concurrently owning the same conversation when storage is shared "
             "across instances. Set to 0 to disable leasing entirely, which is "
             "appropriate for single-instance deployments where concurrent "
-            "ownership is impossible."
+            "ownership is impossible. Values between 0 and "
+            "LEASE_RENEW_INTERVAL_SECONDS (15 s) are valid but cause the lease "
+            "to expire before the first renewal, effectively making it one-shot."
         ),
     )
     model_config: ClassVar[ConfigDict] = {"frozen": True}
