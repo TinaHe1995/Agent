@@ -165,10 +165,10 @@ ARCHIVE_MANIFEST_NAME = "archive_manifest.json"
 # Heavy / generated directories that usually bloat an archive without helping
 # eval replay. These are the default excludes, not a minimum exclusion set:
 # callers can disable them with ``use_default_excludes=false`` when they need a
-# full workspace capture. For git-delta they are applied via a scratch
-# ``core.excludesFile`` so they are skipped even when the repo itself does not
-# ``.gitignore`` them (the repo's own .gitignore still applies on top of this).
-# For tar.gz they prune the walk.
+# full workspace capture. Both formats apply the same set: git-delta as
+# ``:(exclude)`` pathspecs (dropping tracked *and* untracked copies, on top of
+# the repo's own .gitignore) and tar.gz by pruning the walk — so the two
+# archives capture the same files.
 _DEFAULT_ARCHIVE_EXCLUDES = (
     ".git/",
     "node_modules/",
@@ -186,18 +186,37 @@ _DEFAULT_ARCHIVE_EXCLUDES = (
 )
 
 # Credential-bearing git internals that must NEVER be persisted to a shared
-# archive bucket, even when the caller disables the default excludes for a full
-# capture (``use_default_excludes=false``). A repo cloned with a tokenized
-# remote (``https://x-access-token:TOKEN@github.com/...``) keeps that token in
-# ``.git/config``; reflogs and saved credentials are equally sensitive. These
-# are stripped from every tar.gz regardless of the exclude settings. (git-delta
-# never includes ``.git`` — it is a working-tree diff — so this only matters for
-# the full-archive format.)
-_ALWAYS_EXCLUDE_TAR = (
-    ".git/config",
-    ".git/credentials",
-    ".git/logs/",
+# archive bucket, even for a full capture (``use_default_excludes=false``). A
+# tokenized clone (``https://x-access-token:TOKEN@github.com/...``) keeps that
+# token in ``.git/config`` and ``.git/FETCH_HEAD``; reflogs and saved
+# credentials are equally sensitive. These live under the superproject ``.git``
+# AND under ``.git/modules/<name>`` for submodules, so the match is by position
+# within any ``.git`` directory rather than a fixed top-level path. (git-delta
+# is a working-tree diff and never includes ``.git``, so this only matters for
+# tar.gz.)
+_SENSITIVE_GIT_INTERNALS = frozenset(
+    {"config", "config.worktree", "credentials", ".git-credentials", "FETCH_HEAD"}
 )
+
+
+def _is_sensitive_git_internal(rel: PurePosixPath) -> bool:
+    """True if ``rel`` is a credential-bearing file inside any ``.git`` dir.
+
+    Covers the superproject (``.git/...``) and submodules
+    (``.git/modules/<name>/...``) at any depth: the sensitive config/credential
+    files and every reflog under a ``logs/`` subtree.
+    """
+    parts = rel.parts
+    for i, part in enumerate(parts):
+        if part == ".git":
+            internal = parts[i + 1 :]
+            if not internal:
+                return False
+            if "logs" in internal:
+                return True
+            return internal[-1] in _SENSITIVE_GIT_INTERNALS
+    return False
+
 
 # Directory names never worth descending when auto-resolving the repo root under
 # a workspace path: they can legitimately contain vendored/nested git repos that
@@ -247,10 +266,39 @@ def _resolve_git_repo_root(target: Path, max_depth: int = 3) -> Path:
                 found.append(child)
                 if len(found) > 1:
                     # Ambiguous — don't guess which repo to archive.
+                    logger.warning(
+                        f"Multiple git repos under {target}; cannot pick one to "
+                        "archive — using the path as given. Caller should pass "
+                        "the repo path explicitly."
+                    )
                     return target
             else:
                 frontier.append((child, depth + 1))
     return found[0] if len(found) == 1 else target
+
+
+def _excludes_to_git_pathspecs(excludes: list[str]) -> list[str]:
+    """Translate the archive excludes into git ``:(exclude)`` pathspecs.
+
+    Using pathspecs instead of ``core.excludesFile`` drops excluded paths
+    whether they are tracked or untracked, so git-delta and tar.gz capture the
+    same file set. ``glob`` magic keeps ``*`` from crossing ``/`` while ``**``
+    spans directories, mirroring the tar.gz matcher's gitignore semantics: a
+    bare name matches at any depth; a multi-segment pattern is anchored at the
+    repo root.
+    """
+    specs: list[str] = []
+    for raw in excludes:
+        pat = raw.rstrip("/")
+        if not pat:
+            continue
+        if "/" in pat:
+            specs.append(f":(glob,exclude){pat}")
+            specs.append(f":(glob,exclude){pat}/**")
+        else:
+            specs.append(f":(glob,exclude)**/{pat}")
+            specs.append(f":(glob,exclude)**/{pat}/**")
+    return specs
 
 
 def _create_git_delta(
@@ -262,10 +310,11 @@ def _create_git_delta(
     deletions relative to ``base_ref`` (defaulting to the auto-detected
     comparison ref — origin branch, merge-base, or the empty tree for a fresh
     repo). A throwaway index (``GIT_INDEX_FILE``) is used so the repository's
-    real index is never touched. ``excludes`` are applied via a scratch
-    ``core.excludesFile`` — on top of the repo's own ``.gitignore`` — so callers
-    can keep the delta compact by default while still disabling the default
-    archive excludes when they intentionally want a fuller capture.
+    real index is never touched. ``excludes`` are applied as ``:(exclude)``
+    pathspecs — on top of the repo's own ``.gitignore`` — so excluded paths are
+    dropped whether tracked or untracked, matching the tar.gz format. Callers
+    can disable the default excludes when they intentionally want a fuller
+    capture.
 
     Returns the full base commit SHA the patch applies against, or "" when the
     base is the empty tree (fresh repo) or cannot resolve to a commit.
@@ -278,8 +327,7 @@ def _create_git_delta(
         # server fault; surface it so the caller gets a 4xx.
         raise ValueError(f"base_ref {base_ref!r} could not be resolved") from e
     index_path = output_path.with_name(output_path.name + ".index")
-    excludes_path = output_path.with_name(output_path.name + ".excludes")
-    excludes_path.write_text("\n".join(excludes) + "\n")
+    pathspecs = _excludes_to_git_pathspecs(excludes)
     env = {**os.environ, "GIT_INDEX_FILE": str(index_path)}
     try:
         # Seed the scratch index from the base ref, stage the working tree on
@@ -296,7 +344,7 @@ def _create_git_delta(
             timeout=60,
         )
         subprocess.run(
-            ["git", "-c", f"core.excludesFile={excludes_path}", "add", "-A", "--", "."],
+            ["git", "add", "-A", "--", ".", *pathspecs],
             cwd=root,
             env=env,
             capture_output=True,
@@ -307,7 +355,7 @@ def _create_git_delta(
         # buffered in memory (OOM risk at pause/stop on a fat workspace).
         with open(output_path, "wb") as out:
             subprocess.run(
-                ["git", "diff", "--binary", "--cached", ref, "--", "."],
+                ["git", "diff", "--binary", "--cached", ref, "--", ".", *pathspecs],
                 cwd=root,
                 env=env,
                 stdout=out,
@@ -337,7 +385,6 @@ def _create_git_delta(
         raise
     finally:
         index_path.unlink(missing_ok=True)
-        excludes_path.unlink(missing_ok=True)
 
     if ref == GIT_EMPTY_TREE_HASH:
         return ""
@@ -382,6 +429,10 @@ def _path_is_excluded(rel: PurePosixPath, patterns: list[str], is_dir: bool) -> 
             if len(parts) >= len(pattern_parts) and all(
                 fnmatch.fnmatch(part, pat) for part, pat in zip(parts, pattern_parts)
             ):
+                # A dir-only pattern matches the directory and anything nested
+                # under it, but not a file whose own path equals the pattern.
+                if dir_only and not is_dir and len(parts) == len(pattern_parts):
+                    continue
                 return True
         else:
             # Bare name: match any single component. For a dir-only pattern on a
@@ -421,9 +472,6 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
     total_bytes = 0
     manifest_arcname = f"{root.name}/{ARCHIVE_MANIFEST_NAME}"
     manifest_collision = False
-    # Always strip credential-bearing git internals, even when the caller
-    # disabled the default excludes for a full capture.
-    excludes = list(excludes) + list(_ALWAYS_EXCLUDE_TAR)
     try:
         with tarfile.open(output_path, "w:gz") as tar:
             for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -433,6 +481,7 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
                     d
                     for d in dirnames
                     if not _path_is_excluded(base / d, excludes, is_dir=True)
+                    and not _is_sensitive_git_internal(base / d)
                 ]
                 # Emit a directory member for every surviving directory so empty
                 # authored directories round-trip (the byte-for-byte full-capture
@@ -445,7 +494,9 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
                     tar.add(dirpath, arcname=dir_arcname, recursive=False)
                 for name in filenames:
                     rel = base / name
-                    if _path_is_excluded(rel, excludes, is_dir=False):
+                    if _path_is_excluded(
+                        rel, excludes, is_dir=False
+                    ) or _is_sensitive_git_internal(rel):
                         continue
                     file_path = Path(dirpath) / name
                     if file_path.is_symlink() or not file_path.is_file():
@@ -784,13 +835,14 @@ async def archive_directory(
     os.close(fd)
     output_path = Path(tmp_name)
 
+    # The caller passes the workspace base, but a repo-backed conversation clones
+    # into a subdirectory; resolve to the actual repo so both formats root the
+    # archive at the repo (consistent paths across git-delta, tar.gz, and the
+    # initial snapshot) and git-delta does not 400 on the non-repo parent.
+    repo_root = await asyncio.to_thread(_resolve_git_repo_root, target)
     base_commit = ""
     try:
         if archive_format == "git-delta":
-            # The caller passes the workspace base, but a repo-backed conversation
-            # clones into a subdirectory; resolve to the actual repo so git-delta
-            # does not 400 on the non-repo parent (and capture nothing).
-            repo_root = await asyncio.to_thread(_resolve_git_repo_root, target)
             base_commit = await asyncio.to_thread(
                 _create_git_delta,
                 repo_root,
@@ -800,7 +852,7 @@ async def archive_directory(
             )
         else:
             await asyncio.to_thread(
-                _create_tar_gz_archive, target, output_path, effective_excludes
+                _create_tar_gz_archive, repo_root, output_path, effective_excludes
             )
     except GitRepositoryError as e:
         output_path.unlink(missing_ok=True)
@@ -838,7 +890,7 @@ async def archive_directory(
 
     return FileResponse(
         path=output_path,
-        filename=f"{target.name}{_ARCHIVE_SUFFIX[archive_format]}",
+        filename=f"{repo_root.name}{_ARCHIVE_SUFFIX[archive_format]}",
         media_type=_ARCHIVE_MEDIA_TYPE[archive_format],
         headers=headers,
         background=BackgroundTask(output_path.unlink, missing_ok=True),
