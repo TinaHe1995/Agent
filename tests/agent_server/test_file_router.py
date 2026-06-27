@@ -1203,6 +1203,63 @@ def test_tar_gz_strips_credentials_file_and_reflog_with_tokens(client, tmp_path)
         assert token not in resp.content
 
 
+def test_tar_gz_strips_fetch_head_and_submodule_credentials(client, tmp_path):
+    # enyst review (#3867): the strip must also cover .git/FETCH_HEAD (git writes
+    # the fetched URL — token and all — there) and submodule git dirs under
+    # .git/modules/<name>/, not just the top-level .git/config. Built by hand so
+    # those exact leak surfaces are exercised in a full capture.
+    root = tmp_path / "project"
+    git_dir = root / ".git"
+    sub = git_dir / "modules" / "libfoo"
+    (sub / "logs").mkdir(parents=True)
+    (root / "README.md").write_text("# p\n", encoding="utf-8")
+    (git_dir / "FETCH_HEAD").write_text(
+        "abc\tbranch 'main' of https://x-access-token:ghs_FETCHTOK@github.com/o/r\n",
+        encoding="utf-8",
+    )
+    (sub / "config").write_text(
+        '[remote "origin"]\n'
+        "\turl = https://x-access-token:ghs_SUBCFGTOK@github.com/o/sub\n",
+        encoding="utf-8",
+    )
+    (sub / "FETCH_HEAD").write_text(
+        "def\tbranch 'main' of "
+        "https://x-access-token:ghs_SUBFETCHTOK@github.com/o/sub\n",
+        encoding="utf-8",
+    )
+    (sub / "logs" / "HEAD").write_text(
+        "0 1 t <t@t.dev> 0 +0000\tclone: from "
+        "https://x-access-token:ghs_SUBLOGTOK@github.com/o/sub\n",
+        encoding="utf-8",
+    )
+    # A non-credential .git internal must still survive the strip.
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    resp = client.get(
+        "/api/file/archive",
+        params={
+            "path": str(root),
+            "format": "tar.gz",
+            "use_default_excludes": "false",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    names = _tar_members(resp.content)
+    assert not any(n.endswith("/.git/FETCH_HEAD") for n in names)
+    assert not any("/.git/modules/" in n and n.endswith("/config") for n in names)
+    assert not any("/.git/modules/" in n and n.endswith("/FETCH_HEAD") for n in names)
+    assert not any("/.git/modules/libfoo/logs/" in n for n in names)
+    assert any(n.endswith("/.git/HEAD") for n in names)
+    for token in (
+        b"ghs_FETCHTOK",
+        b"ghs_SUBCFGTOK",
+        b"ghs_SUBFETCHTOK",
+        b"ghs_SUBLOGTOK",
+    ):
+        assert token not in resp.content
+
+
 # =============================================================================
 # Archive Tests - tar.gz empty-dir round-trip + per-segment exclude (infra#1444
 # L4 / L5)
