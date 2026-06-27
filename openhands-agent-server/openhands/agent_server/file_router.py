@@ -3,6 +3,7 @@ import fnmatch
 import io
 import json
 import os
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -286,19 +287,40 @@ def _excludes_to_git_pathspecs(excludes: list[str]) -> list[str]:
     spans directories, mirroring the tar.gz matcher's gitignore semantics: a
     bare name matches at any depth; a multi-segment pattern is anchored at the
     repo root.
+
+    A trailing ``/`` marks a directory-only pattern: we emit only the
+    contents form (``.../**``) and NOT the bare entry form, so a regular file
+    that happens to share the name (e.g. an authored file literally named
+    ``build``) is kept — matching ``_path_is_excluded``'s dir-only carve-out.
+    Emitting the bare entry too would silently drop such files from the
+    git-delta while the tar.gz keeps them.
     """
     specs: list[str] = []
     for raw in excludes:
+        dir_only = raw.endswith("/")
         pat = raw.rstrip("/")
         if not pat:
             continue
         if "/" in pat:
-            specs.append(f":(glob,exclude){pat}")
+            if not dir_only:
+                specs.append(f":(glob,exclude){pat}")
             specs.append(f":(glob,exclude){pat}/**")
         else:
-            specs.append(f":(glob,exclude)**/{pat}")
+            if not dir_only:
+                specs.append(f":(glob,exclude)**/{pat}")
             specs.append(f":(glob,exclude)**/{pat}/**")
     return specs
+
+
+def _head_is_detached(root: Path) -> bool:
+    """True if the repo at ``root`` has a detached HEAD (no current branch)."""
+    try:
+        branch = run_git_command(
+            ["git", "--no-pager", "rev-parse", "--abbrev-ref", "HEAD"], root
+        )
+    except GitCommandError:
+        return False
+    return branch.strip() == "HEAD"
 
 
 def _create_git_delta(
@@ -320,8 +342,15 @@ def _create_git_delta(
     base is the empty tree (fresh repo) or cannot resolve to a commit.
     """
     validate_git_repository(root)
+    effective_base = base_ref
+    if effective_base is None and _head_is_detached(root):
+        # A pinned base-commit checkout (e.g. a SWE-bench-style eval setup)
+        # leaves HEAD detached; get_valid_ref then skips the branch strategy and
+        # diffs against the remote default-branch TIP, polluting the patch with
+        # base..tip. The pinned HEAD commit is the right base, so request it.
+        effective_base = "HEAD"
     try:
-        ref = get_valid_ref(root, base_ref) or GIT_EMPTY_TREE_HASH
+        ref = get_valid_ref(root, effective_base) or GIT_EMPTY_TREE_HASH
     except GitCommandError as e:
         # An explicit base_ref that does not resolve is client error, not a
         # server fault; surface it so the caller gets a 4xx.
@@ -459,6 +488,65 @@ def _build_archive_manifest(
     return json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
 
 
+class _ExactSizeReader:
+    """File wrapper that always yields exactly ``size`` bytes.
+
+    ``tar.addfile`` writes the member header (declaring ``size``) and then copies
+    bytes from the file; if a concurrent writer truncates the file in between, a
+    short read would raise *mid-member*, after the header and a partial,
+    unpadded body are already on the gzip stream — silently misaligning every
+    member that follows (the trailing manifest included). By padding a short read
+    with NUL (file shrank) and stopping at ``size`` (file grew), the bytes handed
+    to ``addfile`` always match the declared size, so the stream can never
+    desynchronize no matter how the workspace mutates during capture.
+    """
+
+    def __init__(self, fileobj: io.BufferedReader, size: int) -> None:
+        self._fileobj = fileobj
+        self._remaining = size
+
+    def read(self, n: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+        if n is None or n < 0 or n > self._remaining:
+            n = self._remaining
+        data = self._fileobj.read(n)
+        if len(data) < n:
+            data = data + b"\x00" * (n - len(data))
+        self._remaining -= len(data)
+        return data
+
+
+def _add_file_member(tar: tarfile.TarFile, file_path: Path, arcname: str) -> int | None:
+    """Add a regular file to ``tar`` without risking tar-stream corruption.
+
+    ``tar.add`` stats the file, writes a header for that size, then copies the
+    body — a concurrent truncate between the two desynchronizes the stream (see
+    ``_ExactSizeReader``). Instead, size the header from the OPEN fd and copy
+    exactly that many bytes via ``_ExactSizeReader``. Returns the byte count, or
+    ``None`` if the file could not be read / was not a regular file (skipped,
+    best-effort — the workspace may still be mutating).
+    """
+    try:
+        f = open(file_path, "rb")
+    except OSError as e:
+        logger.warning(f"Skipping unreadable file {file_path}: {e}")
+        return None
+    try:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            # Raced into a non-regular path (dir/fifo/socket); skip it.
+            return None
+        info = tar.gettarinfo(arcname=arcname, fileobj=f)
+        tar.addfile(info, _ExactSizeReader(f, info.size))
+        return info.size
+    except OSError as e:
+        logger.warning(f"Skipping unreadable file {file_path}: {e}")
+        return None
+    finally:
+        f.close()
+
+
 def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -> None:
     """Stream a gzip tarball of ``root`` to ``output_path``.
 
@@ -490,8 +578,14 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
                 dir_arcname = (
                     root.name if base == PurePosixPath(".") else f"{root.name}/{base}"
                 )
-                if not (Path(dirpath).is_symlink()):
-                    tar.add(dirpath, arcname=dir_arcname, recursive=False)
+                if not Path(dirpath).is_symlink():
+                    # Guard like the per-file add below: a directory that vanishes
+                    # mid-capture (concurrent mutation) must skip its own member,
+                    # not abort the whole archive.
+                    try:
+                        tar.add(dirpath, arcname=dir_arcname, recursive=False)
+                    except OSError as e:
+                        logger.warning(f"Skipping unreadable directory {dirpath}: {e}")
                 for name in filenames:
                     rel = base / name
                     if _path_is_excluded(
@@ -502,13 +596,11 @@ def _create_tar_gz_archive(root: Path, output_path: Path, excludes: list[str]) -
                     if file_path.is_symlink() or not file_path.is_file():
                         continue
                     arcname = f"{root.name}/{rel}"
-                    # Best-effort: the workspace may still be mutating, so a file
-                    # that vanishes between listing and add is skipped, not fatal.
-                    try:
-                        size = file_path.stat().st_size
-                        tar.add(file_path, arcname=arcname, recursive=False)
-                    except OSError as e:
-                        logger.warning(f"Skipping unreadable file {file_path}: {e}")
+                    # Best-effort and corruption-proof: the workspace may still be
+                    # mutating, so a file that vanishes or is truncated mid-add is
+                    # skipped without desynchronizing the tar stream.
+                    size = _add_file_member(tar, file_path, arcname)
+                    if size is None:
                         continue
                     if arcname == manifest_arcname:
                         manifest_collision = True

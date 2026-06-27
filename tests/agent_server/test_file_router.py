@@ -1306,3 +1306,72 @@ def test_tar_gz_multi_segment_exclude_does_not_cross_slash(client, tmp_path):
     names = _tar_members(resp.content)
     assert f"{root.name}/a/secret.txt" not in names
     assert f"{root.name}/a/b/secret.txt" in names
+
+
+def test_exact_size_reader_pads_short_and_caps_long():
+    """_ExactSizeReader yields EXACTLY the declared size: pad short, cap long."""
+    reader = file_router_module._ExactSizeReader
+    short = reader(io.BytesIO(b"abc"), 5)
+    chunks = []
+    while chunk := short.read(2):
+        chunks.append(chunk)
+    assert b"".join(chunks) == b"abc\x00\x00"
+    long = reader(io.BytesIO(b"abcdefgh"), 4)
+    assert long.read(100) == b"abcd"
+    assert long.read(100) == b""
+
+
+def test_tar_stream_stays_aligned_when_source_shrinks(tmp_path):
+    """A file truncated mid-add must not corrupt the rest of the tar stream.
+
+    Regression for the catch-OSError-and-continue bug: tar.addfile writes the
+    header (declared size) before copying the body, so a short read used to
+    desync every following member and silently ship a corrupt archive.
+    _ExactSizeReader pads the short source so the bytes written always match the
+    header and the archive stays fully readable.
+    """
+    out = tmp_path / "a.tar.gz"
+    body2 = b"second member intact"
+    with tarfile.open(out, "w:gz") as tar:
+        # Member one: header claims 10 bytes but the source only yields 3 (a file
+        # truncated after its size was taken). The reader pads to 10.
+        info1 = tarfile.TarInfo("one")
+        info1.size = 10
+        tar.addfile(info1, file_router_module._ExactSizeReader(io.BytesIO(b"abc"), 10))
+        info2 = tarfile.TarInfo("two")
+        info2.size = len(body2)
+        tar.addfile(
+            info2, file_router_module._ExactSizeReader(io.BytesIO(body2), len(body2))
+        )
+    # Full readback must succeed (no ReadError) and member two must be intact.
+    with tarfile.open(out, "r:gz") as tar:
+        assert tar.getnames() == ["one", "two"]
+        member_two = tar.extractfile("two")
+        assert member_two is not None
+        assert member_two.read() == body2
+        member_one = tar.extractfile("one")
+        assert member_one is not None
+        assert member_one.read() == b"abc" + b"\x00" * 7
+
+
+def test_git_delta_dir_only_exclude_keeps_same_named_file(client, tmp_path):
+    """A 'build/' default exclude drops the build/ dir but KEEPS a file named
+    'build' — git-delta must match the tar.gz dir-only carve-out."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(["init"], root)
+    # A regular file literally named 'build' must be KEPT...
+    (root / "build").write_text("authored marker\n", encoding="utf-8")
+    # ...while an actual build/ directory (the default 'build/' exclude) is dropped.
+    (root / "sub" / "build").mkdir(parents=True)
+    (root / "sub" / "build" / "out.o").write_text("compiled\n", encoding="utf-8")
+
+    resp = client.get(
+        "/api/file/archive", params={"path": str(root), "format": "git-delta"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    patch = resp.content.decode("utf-8")
+    assert "diff --git a/build b/build" in patch  # the file is kept
+    assert "authored marker" in patch
+    assert "sub/build/out.o" not in patch  # the directory is excluded
