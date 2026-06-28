@@ -27,6 +27,7 @@ from openhands.sdk.agent.utils import (
     parse_tool_call_arguments,
     prepare_llm_messages,
 )
+from openhands.sdk.context.prompts.presets import create_registry
 from openhands.sdk.conversation import (
     CancellationToken,
     ConversationCallbackType,
@@ -60,6 +61,7 @@ from openhands.sdk.llm import (
 )
 from openhands.sdk.llm.exceptions import (
     FunctionCallValidationError,
+    LLMContentPolicyViolationError,
     LLMContextWindowExceedError,
     LLMMalformedConversationHistoryError,
 )
@@ -457,7 +459,10 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
 
         This method pulls secrets from the conversation's secret_registry and
         merges them with agent_context to build the dynamic portion of the
-        system prompt.
+        system prompt, assembled from the dynamic-tier sections of the default
+        registry. ``_build_prompt_context`` reproduces the legacy no-agent_context
+        path: with no agent_context but registry secrets present, it resolves a
+        default ``AgentContext()`` so the secrets (and its datetime) still render.
 
         Args:
             state: The conversation state containing the secret_registry.
@@ -468,25 +473,8 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
         # Get secret infos from conversation's secret_registry
         secret_infos = state.secret_registry.get_secret_infos()
 
-        if not self.agent_context:
-            # No agent_context but we might have secrets from registry
-            if secret_infos:
-                from openhands.sdk.context.agent_context import AgentContext
-
-                # Create a minimal context just for secrets
-                temp_context = AgentContext()
-                return temp_context.get_system_message_suffix(
-                    llm_model=self.llm.model,
-                    llm_model_canonical=self.llm.model_canonical_name,
-                    additional_secret_infos=secret_infos,
-                )
-            return None
-
-        return self.agent_context.get_system_message_suffix(
-            llm_model=self.llm.model,
-            llm_model_canonical=self.llm.model_canonical_name,
-            additional_secret_infos=secret_infos,
-        )
+        ctx = self._build_prompt_context(additional_secret_infos=secret_infos)
+        return create_registry().build(ctx).dynamic
 
     def _execute_actions(
         self,
@@ -584,9 +572,10 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 "skipping hook check for legacy conversation state."
             )
 
-        # Prepare LLM messages using the utility function
+        # Prepare LLM messages from the cached, incrementally-maintained view.
+        # See https://github.com/OpenHands/software-agent-sdk/issues/3053.
         _messages_or_condensation = prepare_llm_messages(
-            state.events, condenser=self.condenser, llm=self.llm
+            state.view, condenser=self.condenser, llm=self.llm
         )
 
         # Process condensation event before agent sampels another action
@@ -618,6 +607,28 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 ),
             )
             on_event(error_message)
+            return
+        except LLMContentPolicyViolationError as e:
+            # Content-policy blocks are deterministic; nudge the model and let the
+            # run loop continue instead of emitting a fatal error.
+            logger.warning(f"LLM output blocked by content filter: {e}")
+            on_event(
+                MessageEvent(
+                    source="user",
+                    llm_message=Message(
+                        role="user",
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Your previous response was blocked by the "
+                                    "model's content filter. Please continue, "
+                                    "rephrasing to avoid the flagged content."
+                                )
+                            )
+                        ],
+                    ),
+                )
+            )
             return
         except LLMMalformedConversationHistoryError as e:
             # The provider rejected the current message history as structurally
@@ -724,8 +735,10 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 "skipping hook check for legacy conversation state."
             )
 
+        # Prepare LLM messages from the cached, incrementally-maintained view.
+        # See https://github.com/OpenHands/software-agent-sdk/issues/3053.
         _messages_or_condensation = await aprepare_llm_messages(
-            state.events, condenser=self.condenser, llm=self.llm
+            state.view, condenser=self.condenser, llm=self.llm
         )
 
         if isinstance(_messages_or_condensation, Condensation):
@@ -756,6 +769,28 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 ),
             )
             on_event(error_message)
+            return
+        except LLMContentPolicyViolationError as e:
+            # Content-policy blocks are deterministic; nudge the model and let the
+            # run loop continue instead of emitting a fatal error.
+            logger.warning(f"LLM output blocked by content filter: {e}")
+            on_event(
+                MessageEvent(
+                    source="user",
+                    llm_message=Message(
+                        role="user",
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Your previous response was blocked by the "
+                                    "model's content filter. Please continue, "
+                                    "rephrasing to avoid the flagged content."
+                                )
+                            )
+                        ],
+                    ),
+                )
+            )
             return
         except LLMMalformedConversationHistoryError as e:
             # The provider rejected the current message history as
@@ -955,6 +990,20 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
         thinking_blocks: list[ThinkingBlock | RedactedThinkingBlock] | None = None,
         responses_reasoning_item: ReasoningItemModel | None = None,
     ) -> None:
+        try:
+            json.loads(tool_call.arguments)
+        except json.JSONDecodeError:
+            tool_call = tool_call.model_copy(
+                update={
+                    "arguments": json.dumps(
+                        {
+                            "_openhands_malformed_tool_call": True,
+                            "error": error,
+                        }
+                    )
+                }
+            )
+
         tc_event = ActionEvent(
             source="agent",
             thought=thought or [],

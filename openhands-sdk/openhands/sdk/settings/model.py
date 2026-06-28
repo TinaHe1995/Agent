@@ -36,8 +36,16 @@ from pydantic.fields import FieldInfo
 
 from openhands.sdk.context.agent_context import AgentContext
 from openhands.sdk.conversation.request import SendMessageRequest
+from openhands.sdk.conversation.types import (
+    ConversationObservabilityMetadata,
+    ConversationObservabilitySpanName,
+    ConversationObservabilityTags,
+)
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.utils.openhands_provider import (
+    canonicalize_openhands_llm_payload,
+)
 from openhands.sdk.logger import get_logger
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.subagent.schema import AgentDefinition
@@ -50,7 +58,6 @@ from openhands.sdk.utils.pydantic_secrets import (
     resolve_expose_mode,
     serialize_secret,
     validate_secret,
-    validate_secret_dict,
 )
 from openhands.sdk.utils.redact import sanitize_dict
 from openhands.sdk.workspace import LocalWorkspace
@@ -551,7 +558,7 @@ def _default_llm_settings() -> LLM:
 
 _RequestT = TypeVar("_RequestT")
 
-AGENT_SETTINGS_SCHEMA_VERSION = 3
+AGENT_SETTINGS_SCHEMA_VERSION = 4
 CONVERSATION_SETTINGS_SCHEMA_VERSION = 1
 
 
@@ -698,6 +705,15 @@ def _migrate_agent_settings_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def _migrate_agent_settings_v3_to_v4(payload: dict[str, Any]) -> dict[str, Any]:
+    migrated = dict(payload)
+    llm = migrated.get("llm")
+    if isinstance(llm, dict):
+        migrated["llm"] = canonicalize_openhands_llm_payload(llm)
+    migrated["schema_version"] = 4
+    return migrated
+
+
 def _migrate_conversation_settings_v0_to_v1(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -710,6 +726,7 @@ _AGENT_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_agent_settings_v0_to_v1,
     1: _migrate_agent_settings_v1_to_v2,
     2: _migrate_agent_settings_v2_to_v3,
+    3: _migrate_agent_settings_v3_to_v4,
 }
 _CONVERSATION_SETTINGS_MIGRATIONS: dict[int, PersistedSettingsMigrator] = {
     0: _migrate_conversation_settings_v0_to_v1,
@@ -769,6 +786,21 @@ class ConversationSettings(BaseModel):
         default=None,
         exclude=True,
         description="Repository selected for the conversation.",
+    )
+    observability_metadata: ConversationObservabilityMetadata | None = Field(
+        default=None,
+        exclude=True,
+        description="Trace-level metadata for observability backends.",
+    )
+    observability_tags: ConversationObservabilityTags | None = Field(
+        default=None,
+        exclude=True,
+        description="Tags for the conversation root observability span.",
+    )
+    observability_span_name: ConversationObservabilitySpanName | None = Field(
+        default=None,
+        exclude=True,
+        description="Optional named child span to emit under the conversation root.",
     )
 
     # --- persisted fields ---------------------------------------------------
@@ -890,6 +922,12 @@ class ConversationSettings(BaseModel):
             payload.setdefault("plugins", self.plugins)
         if self.hook_config is not None:
             payload.setdefault("hook_config", self.hook_config)
+        if self.observability_metadata is not None:
+            payload.setdefault("observability_metadata", self.observability_metadata)
+        if self.observability_tags is not None:
+            payload.setdefault("observability_tags", self.observability_tags)
+        if self.observability_span_name is not None:
+            payload.setdefault("observability_span_name", self.observability_span_name)
 
         # --- persisted defaults ---------------------------------------------
         payload.setdefault("confirmation_policy", self._build_confirmation_policy())
@@ -994,6 +1032,23 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             ).model_dump()
         },
     )
+    tool_concurrency_limit: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Maximum number of tool calls to execute concurrently per agent step. "
+            "1 = sequential (default). Values > 1 enable parallel tool calls; "
+            "concurrent tools share the conversation object, filesystem, and "
+            "working directory, so mutations to shared state may race."
+        ),
+        json_schema_extra={
+            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
+                label="Parallel tool calls",
+                prominence=SettingProminence.MAJOR,
+                variant="openhands",
+            ).model_dump()
+        },
+    )
 
     mcp_config: MCPConfig | None = Field(
         default=None,
@@ -1070,6 +1125,7 @@ class OpenHandsAgentSettings(AgentSettingsBase):
             agent = settings.create_agent()
         """
         from openhands.sdk.agent import Agent
+        from openhands.sdk.llm.auth.openai import create_subscription_llm_from_config
         from openhands.sdk.tool.builtins import BUILT_IN_TOOLS, SwitchLLMTool
 
         # Bypass ``_serialize_mcp_config``: MCP servers need real env/headers.
@@ -1082,14 +1138,17 @@ class OpenHandsAgentSettings(AgentSettingsBase):
         if self.enable_switch_llm_tool:
             include_default_tools.append(SwitchLLMTool.__name__)
 
+        llm = create_subscription_llm_from_config(self.llm)
+        condenser = None if llm.is_subscription else self.build_condenser(llm)
         return Agent(
-            llm=self.llm,
+            llm=llm,
             tools=self.tools,
             mcp_config=mcp_config,
             include_default_tools=include_default_tools,
             agent_context=self.agent_context,
-            condenser=self.build_condenser(self.llm),
+            condenser=condenser,
             critic=self.build_critic(),
+            tool_concurrency_limit=self.tool_concurrency_limit,
         )
 
     def build_condenser(self, llm: LLM) -> CondenserBase | None:
@@ -1153,9 +1212,13 @@ class ACPAgentSettings(AgentSettingsBase):
     tools, MCP, and (primary) LLM calls; those fields from
     :class:`OpenHandsAgentSettings` do not apply here.
 
-    The :attr:`llm` field is kept (optional) so that cost/token metrics
-    can be attributed to a real model — ``ACPAgent`` uses this purely for
-    bookkeeping and pricing lookups, not for making LLM requests.
+    The :attr:`llm` field is deprecated (removed in 1.33.0). ``ACPAgent``
+    uses it purely for cost/token attribution, never for LLM requests;
+    :attr:`acp_model` is the model identity. Credentials set on it
+    (``llm.api_key`` / ``llm.base_url``) are ignored — provider credentials
+    ride the conversation secrets channel (``request.secrets`` /
+    ``agent_context.secrets`` → ``state.secret_registry``) keyed by the
+    provider's env var name (:attr:`api_key_env_var`).
     """
 
     agent_kind: Literal["acp"] = Field(
@@ -1223,53 +1286,13 @@ class ACPAgentSettings(AgentSettingsBase):
             ).model_dump(),
         },
     )
-    acp_env: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "DEPRECATED (removed in 1.29.0): extra environment variables passed "
-            "to the ACP subprocess. Provide arbitrary subprocess env vars through "
-            "the conversation secrets channel (agent_context.secrets / "
-            "StartConversationRequest.secrets, which route through "
-            "state.secret_registry) instead."
-        ),
-        json_schema_extra={
-            SETTINGS_METADATA_KEY: SettingsFieldMetadata(
-                label="ACP environment variables",
-                prominence=SettingProminence.MINOR,
-            ).model_dump(),
-            SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
-                key="acp",
-                label="ACP (Agent Client Protocol)",
-                variant="acp",
-            ).model_dump(),
-        },
-    )
-
-    @field_validator("acp_env", mode="before")
-    @classmethod
-    def _decrypt_acp_env_values(cls, value: Any, info: ValidationInfo) -> Any:
-        """Decrypt persisted ACP environment values when a cipher is available.
-
-        Legacy plaintext values pass through unchanged so the next save can
-        re-encrypt them, matching MCP env/header handling. The matching
-        on-the-wire validator on :class:`~openhands.sdk.agent.ACPAgent`
-        handles the conversation-start round-trip; both delegate to the
-        shared :func:`validate_secret_dict` helper.
-        """
-        return validate_secret_dict(value, info, description="ACP env")
-
-    @field_serializer("acp_env", when_used="always")
-    def _serialize_acp_env(self, value: dict[str, str], info):
-        """Mask ``acp_env`` values via :func:`serialize_secret`."""
-        return {k: serialize_secret(SecretStr(v), info) for k, v in value.items()}
-
     acp_model: str | None = Field(
         default=None,
         description=(
-            "Model identifier for the ACP server to use (e.g. "
-            "``'claude-opus-4-6'``). claude-agent-acp receives it via session "
-            "_meta; codex-acp and gemini-cli via ``set_session_model``. "
-            "Leave blank to let the server pick its default."
+            "Model identifier for the ACP server to use (e.g. ``'sonnet'`` or "
+            "``'gpt-5.5'``). Applied via the protocol — set_config_option(model) "
+            "for configOptions-based servers (codex, claude), else "
+            "set_session_model. Leave blank to let the server pick its default."
         ),
         json_schema_extra={
             SETTINGS_METADATA_KEY: SettingsFieldMetadata(
@@ -1304,10 +1327,15 @@ class ACPAgentSettings(AgentSettingsBase):
     acp_prompt_timeout: float = Field(
         default=1800.0,
         gt=0,
-        description="Timeout (seconds) for a single ACP prompt() round-trip.",
+        description=(
+            "Inactivity timeout (seconds) for a single ACP prompt() round-trip. "
+            "The deadline resets on every update from the ACP server, so a "
+            "steadily-progressing agent keeps running; the prompt is only "
+            "aborted after this many seconds with no activity at all."
+        ),
         json_schema_extra={
             SETTINGS_METADATA_KEY: SettingsFieldMetadata(
-                label="ACP prompt timeout (seconds)",
+                label="ACP prompt inactivity timeout (seconds)",
                 prominence=SettingProminence.MINOR,
             ).model_dump(),
             SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
@@ -1384,9 +1412,14 @@ class ACPAgentSettings(AgentSettingsBase):
     llm: LLM = Field(
         default_factory=_default_llm_settings,
         description=(
-            "LLM identity used for cost/token attribution. The ACP subprocess "
-            "makes its own model calls; this field is kept so metrics and "
-            "pricing lookups can point at a real model id."
+            "DEPRECATED (removed in 1.33.0): LLM identity used for cost/token "
+            "attribution. The ACP subprocess makes its own model calls; "
+            "``acp_model`` is the model identity. Credentials set here "
+            "(``api_key`` / ``base_url``) are ignored — route provider "
+            "credentials through the conversation secrets channel "
+            "(agent_context.secrets / StartConversationRequest.secrets, which "
+            "route through state.secret_registry), keyed by the provider's "
+            "env var name."
         ),
         json_schema_extra={
             SETTINGS_SECTION_METADATA_KEY: SettingsSectionMetadata(
@@ -1405,8 +1438,9 @@ class ACPAgentSettings(AgentSettingsBase):
             "``LocalConversation`` seeds ``agent_context.secrets`` into the "
             "registry at conversation init (below ``request.secrets``), so "
             "callers that build the request outside Python (e.g. canvas-local) "
-            "are covered too, not just the ``create_request`` path. "
-            "``create_agent`` also folds provider credentials into these secrets."
+            "are covered too, not just the ``create_request`` path. Provider "
+            "credentials belong here (or in ``request.secrets``) keyed by the "
+            "provider's env var name."
         ),
     )
 
@@ -1421,7 +1455,7 @@ class ACPAgentSettings(AgentSettingsBase):
 
         Delegates to the :data:`~openhands.sdk.settings.acp_providers.ACP_PROVIDERS`
         registry.  Returns ``None`` for ``'custom'`` servers — users manage
-        credentials entirely via :attr:`acp_env` in that case.
+        credentials entirely via the conversation secrets channel in that case.
         """
         info = self.provider_info
         return info.api_key_env_var if info is not None else None
@@ -1443,7 +1477,24 @@ class ACPAgentSettings(AgentSettingsBase):
         provider-specific env var names. This helper translates the generic
         :attr:`llm` settings into that provider-native subprocess environment.
         Custom servers return an empty mapping.
+
+        .. deprecated:: 1.28.0
+            Removed in 1.33.0 together with :attr:`llm`. ``create_agent()``
+            no longer reads ``llm.api_key`` / ``llm.base_url``; supply
+            provider credentials as conversation secrets keyed by
+            :attr:`api_key_env_var` (e.g. ``ANTHROPIC_API_KEY``) instead.
         """
+        warn_deprecated(
+            "ACPAgentSettings.resolve_provider_env",
+            deprecated_in="1.28.0",
+            removed_in="1.33.0",
+            details=(
+                "Supply ACP provider credentials as conversation secrets "
+                "(agent_context.secrets / StartConversationRequest.secrets, "
+                "which route through state.secret_registry) keyed by the "
+                "provider's env var name instead of ACPAgentSettings.llm."
+            ),
+        )
         env: dict[str, str] = {}
 
         api_key = self.llm.api_key
@@ -1464,36 +1515,6 @@ class ACPAgentSettings(AgentSettingsBase):
                 env[self.base_url_env_var] = base_url_value
 
         return env
-
-    def resolve_acp_env(self) -> dict[str, str]:
-        """Return the user-supplied ACP subprocess env vars.
-
-        Only the explicit :attr:`acp_env` entries — the user-facing
-        arbitrary-env-var input that becomes ``ACPAgent.acp_env``. Provider
-        credentials are **no longer** folded in here; :meth:`create_agent`
-        routes them through :attr:`agent_context` secrets →
-        ``state.secret_registry`` instead (the canonical, cipher-protected
-        channel the regular agent uses). At spawn time ``ACPAgent`` injects
-        ``acp_env`` and the registry secrets into the subprocess env.
-
-        .. deprecated:: 1.24.0
-            :attr:`acp_env` is deprecated and will be removed in 1.29.0. Pass
-            arbitrary subprocess env vars through the conversation secrets
-            channel instead.
-        """
-        if self.acp_env:
-            warn_deprecated(
-                "ACPAgentSettings.acp_env",
-                deprecated_in="1.24.0",
-                removed_in="1.29.0",
-                details=(
-                    "Provide arbitrary ACP subprocess env vars through the "
-                    "conversation secrets channel (agent_context.secrets / "
-                    "StartConversationRequest.secrets, which route through "
-                    "state.secret_registry) instead."
-                ),
-            )
-        return dict(self.acp_env)
 
     def resolve_acp_command(self) -> list[str]:
         """Return the effective subprocess command for this settings block.
@@ -1541,6 +1562,19 @@ class ACPAgentSettings(AgentSettingsBase):
         package, *extra_args = rest
         return package, extra_args
 
+    @staticmethod
+    def _npm_package_name(package: str) -> str:
+        """Strip any ``@version`` specifier from an npm package spec.
+
+        ``@scope/pkg@1.2.3`` → ``@scope/pkg``; ``pkg@1.2.3`` → ``pkg``; an
+        unversioned spec is returned unchanged. The version separator is the
+        ``@`` *after* the name — for scoped specs that is the second ``@`` (the
+        first introduces the scope), so a leading ``@`` is skipped.
+        """
+        start = 1 if package.startswith("@") else 0
+        at = package.find("@", start)
+        return package[:at] if at != -1 else package
+
     def _prefer_pinned_binary(self, command: list[str]) -> list[str]:
         """Swap an ``npx -y <pkg>`` command for the provider's pinned binary.
 
@@ -1551,6 +1585,12 @@ class ACPAgentSettings(AgentSettingsBase):
         downloading npm-latest. Returned unchanged otherwise: no pinned binary
         (custom server), a non-matching/non-npx command, or the binary not on
         ``PATH`` (local dev).
+
+        Package matching ignores any ``@version`` suffix: the registry default
+        is version-pinned (so the native fallback can't drift to npm ``latest``),
+        but a client may still send the bare or a differently-pinned package
+        name. In the image the pinned binary stands in for the provider's package
+        regardless of the requested version, so the rewrite compares names only.
         """
         info = get_acp_provider(self.acp_server)
         if info is None or info.binary_name is None:
@@ -1563,7 +1603,10 @@ class ACPAgentSettings(AgentSettingsBase):
 
         default_pkg, _ = default_parsed
         actual_pkg, extra = actual_parsed
-        if actual_pkg != default_pkg or shutil.which(info.binary_name) is None:
+        same_package = self._npm_package_name(actual_pkg) == self._npm_package_name(
+            default_pkg
+        )
+        if not same_package or shutil.which(info.binary_name) is None:
             return command
 
         return [info.binary_name, *extra]
@@ -1575,42 +1618,35 @@ class ACPAgentSettings(AgentSettingsBase):
         which maps :attr:`acp_server` to a default when no explicit
         :attr:`acp_command` is set.
 
-        Provider credentials (``llm.api_key`` → :attr:`api_key_env_var`,
-        ``llm.base_url`` → :attr:`base_url_env_var`) are folded into
-        :attr:`agent_context` secrets rather than ``acp_env``. They then ride
-        the canonical ``agent_context.secrets`` → ``create_request`` →
-        ``request.secrets`` → ``state.secret_registry`` channel (encrypted
-        across the conversation-start boundary), exactly like the regular
-        agent's credentials, and reach the subprocess from the registry.
-        ``acp_env`` carries only the user's explicit arbitrary env vars.
+        Credentials on :attr:`llm` (``api_key`` / ``base_url``) are ignored:
+        provider credentials ride the conversation secrets channel
+        (``agent_context.secrets`` / ``StartConversationRequest.secrets``,
+        which route through ``state.secret_registry``) keyed by the
+        provider's env var name (:attr:`api_key_env_var`), exactly like the
+        regular agent's credentials, and reach the subprocess from the
+        registry.
         """
         from openhands.sdk.agent import ACPAgent
-        from openhands.sdk.secret import StaticSecret
 
-        # Fold provider creds into agent_context.secrets (not acp_env): on
-        # acp_env they would be dropped to ``**********`` by stores that dump
-        # agent_settings without cipher context; on agent_context.secrets they
-        # ride the StoredConversation.secrets + agent-server Cipher boundary.
-        # Wrap as StaticSecret (a SecretSource) so they validate when
-        # create_request lifts agent_context.secrets into request.secrets
-        # (typed dict[str, SecretSource]).
-        provider_secrets: dict[str, StaticSecret] = {
-            name: StaticSecret(value=SecretStr(value))
-            for name, value in self.resolve_provider_env().items()
-        }
-        agent_context = self.agent_context
-        if provider_secrets:
-            existing = (
-                dict(agent_context.secrets)
-                if agent_context is not None and agent_context.secrets
-                else {}
-            )
-            # Explicit context secrets win over provider-derived ones.
-            merged_secrets = {**provider_secrets, **existing}
-            agent_context = (
-                agent_context.model_copy(update={"secrets": merged_secrets})
-                if agent_context is not None
-                else AgentContext(current_datetime=None, secrets=merged_secrets)
+        # llm.api_key/base_url used to be folded into agent_context.secrets
+        # here. Both production clients route credentials via request.secrets
+        # already (canvas never sends llm; OpenHands strips the credentials
+        # before create_agent), so the fold only fired for direct-SDK callers
+        # — warn them toward the secrets channel instead of silently leaking
+        # a profile base_url into the subprocess (#3632).
+        if self.llm.api_key is not None or self.llm.base_url is not None:
+            warn_deprecated(
+                "ACPAgentSettings.llm",
+                deprecated_in="1.28.0",
+                removed_in="1.33.0",
+                details=(
+                    "create_agent() ignores its api_key/base_url. Supply ACP "
+                    "provider credentials as conversation secrets "
+                    "(agent_context.secrets / StartConversationRequest."
+                    "secrets, which route through state.secret_registry) "
+                    "keyed by the provider's env var name (e.g. "
+                    "ANTHROPIC_API_KEY); use acp_model for model identity."
+                ),
             )
 
         # Bypass ``_serialize_mcp_config``: the subprocess needs real
@@ -1624,19 +1660,18 @@ class ACPAgentSettings(AgentSettingsBase):
         return ACPAgent(
             llm=self.llm,
             acp_command=self.resolve_acp_command(),
+            # Carry the authoritative provider key onto the agent: acp_command
+            # alone does not reliably reverse-map to a provider, so consumers
+            # (e.g. the conversation UI resolving a brand label / model list)
+            # read it from ConversationInfo.agent.acp_server.
+            acp_server=self.acp_server,
             acp_args=list(self.acp_args),
-            # Pass acp_env directly rather than via resolve_acp_env() so the
-            # deprecation warning is not emitted twice on the create_agent path:
-            # _start_acp_server already warns (ACPAgent.acp_env) at spawn, and
-            # resolve_acp_env()'s warning (ACPAgentSettings.acp_env) is reserved
-            # for explicit callers of that public method.
-            acp_env=dict(self.acp_env),
             acp_model=self.acp_model,
             acp_session_mode=self.acp_session_mode,
             acp_prompt_timeout=self.acp_prompt_timeout,
             acp_isolate_data_dir=self.acp_isolate_data_dir,
             acp_file_secrets=list(self.acp_file_secrets),
-            agent_context=agent_context,
+            agent_context=self.agent_context,
             mcp_config=mcp_config,
         )
 
