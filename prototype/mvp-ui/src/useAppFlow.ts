@@ -38,7 +38,7 @@ export function useAppFlow() {
 
   const startRequirementsFlow = useCallback(async () => {
     await pushAgentMessage(
-      "欢迎来到 Agent 工坊 MVP 体验版。\n\n我们将走 3 个阶段：做什么 → 长什么样 → 做出来试试。你只需在左侧聊天，右侧会实时展示每个阶段的成果。",
+      "欢迎来到 Agent 工坊 MVP 体验版。\n\n在左侧聊天，在右侧查看和确认成果。你可以随时补充需求、调整风格，或回到之前的内容继续修改。",
       500,
     );
     await pushAgentMessage(QUESTION_FLOW[0].prompt, 900);

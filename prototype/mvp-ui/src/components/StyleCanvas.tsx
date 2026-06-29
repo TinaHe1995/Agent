@@ -77,7 +77,7 @@ export function StyleCanvas({
   const header = (
     <div className="rounded-xl border border-orange-100 bg-gradient-to-r from-orange-50 to-white p-4">
       <div className="text-xs font-medium uppercase tracking-wide text-orange-600">
-        阶段 2 / 长什么样
+        界面风格
       </div>
       <h2 className="text-lg font-semibold text-slate-900">选择界面风格</h2>
       <p className="mt-1 text-sm text-slate-600">

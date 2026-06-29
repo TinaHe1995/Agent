@@ -127,7 +127,7 @@ export function PreviewCanvas({
             <div className="text-3xl">🎉</div>
             <h2 className="mt-2 text-xl font-semibold text-slate-900">MVP 体验完成</h2>
             <p className="mt-2 text-sm text-slate-600">
-              你已经走完三阶段。完整版将增加测试环境部署与上线确认。
+              本次协作体验已完成。完整版将增加测试环境部署与上线确认。
             </p>
           </div>
         )}
@@ -146,7 +146,7 @@ export function PreviewCanvas({
     <div className="space-y-3">
       <div className="rounded-xl border border-violet-100 bg-gradient-to-r from-violet-50 to-white p-4">
         <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
-          阶段 3 / 做出来试试
+          预览与验收
         </div>
         <h2 className="text-lg font-semibold text-slate-900">
           {buildDone ? "请试用并验收" : "正在为你制作第一版"}

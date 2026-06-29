@@ -50,7 +50,7 @@ export default function App() {
             <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
               成果画布
             </div>
-            <h2 className="text-lg font-semibold text-slate-900">通过 Tab 切换查看各部分内容</h2>
+            <h2 className="text-lg font-semibold text-slate-900">通过 Tab 切换查看当前成果</h2>
           </div>
           <div className="min-h-0 flex-1">
             <CanvasPanel

@@ -1,7 +1,6 @@
 import type { ChatMessage, GateType, Stage } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import { GateBar } from "./GateBar";
-import { StageProgress } from "./StageProgress";
 
 interface LeftSidebarProps {
   stage: Stage;
@@ -61,14 +60,6 @@ export function LeftSidebar({
             重新开始
           </button>
         </div>
-      </div>
-
-      <div className="border-b border-slate-100 px-4 py-3">
-        <StageProgress
-          currentStage={stage}
-          projectCompleted={projectCompleted}
-          compact
-        />
       </div>
 
       <div className="min-h-0 flex-1 px-3 py-3">

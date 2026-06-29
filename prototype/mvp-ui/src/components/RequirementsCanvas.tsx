@@ -83,12 +83,12 @@ export function RequirementsCanvas({
   const header = (
     <div className="space-y-3">
       <StageHeader
-        subtitle="阶段 1 / 做什么"
+        subtitle="需求"
         title={complete ? "请确认需求文档" : "需求摘要（实时更新）"}
         accent="indigo"
       />
       <div className="flex items-center justify-between rounded-xl border border-indigo-100 bg-indigo-50/50 px-4 py-3">
-        <span className="text-sm text-slate-600">需求完成度</span>
+        <span className="text-sm text-slate-600">文档完整度</span>
         <span className="text-xl font-bold text-indigo-600">{progress}%</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-slate-100">
