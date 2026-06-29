@@ -1,35 +1,55 @@
-import type { GateType } from "../types";
+import type { GateType, PathChoice, Stage, TechChoice } from "../types";
 
 interface GateBarProps {
-  stage: number;
+  stage: Stage;
   pendingGate: GateType;
+  pathChoice: PathChoice;
+  discoveryReady: boolean;
+  pathEndedBuy: boolean;
   requirementsComplete: boolean;
+  selectedTechId: TechChoice;
   selectedStyleId: "A" | "B" | null;
   buildDone: boolean;
   acceptanceChecks: [boolean, boolean, boolean];
+  stagingReady: boolean;
+  goLiveChecks: [boolean, boolean, boolean];
   projectCompleted: boolean;
+  onConfirmPathSelfBuild: () => void;
+  onConfirmPathBuy: () => void;
   onConfirmRequirements: () => void;
   onConfirmStyle: () => void;
   onRequestChanges: () => void;
-  onCompleteProject: () => void;
+  onCompleteAcceptance: () => void;
+  onConfirmGoLive: () => void;
+  onPauseProject: () => void;
   compact?: boolean;
 }
 
 export function GateBar({
   stage,
   pendingGate,
+  pathChoice,
+  discoveryReady,
+  pathEndedBuy,
   requirementsComplete,
+  selectedTechId,
   selectedStyleId,
   buildDone,
   acceptanceChecks,
+  stagingReady,
+  goLiveChecks,
   projectCompleted,
+  onConfirmPathSelfBuild,
+  onConfirmPathBuy,
   onConfirmRequirements,
   onConfirmStyle,
   onRequestChanges,
-  onCompleteProject,
+  onCompleteAcceptance,
+  onConfirmGoLive,
+  onPauseProject,
   compact = false,
 }: GateBarProps) {
-  if (projectCompleted) {
+  if (projectCompleted && !pathEndedBuy) {
     return (
       <div
         className={[
@@ -39,7 +59,15 @@ export function GateBar({
             : "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3",
         ].join(" ")}
       >
-        你已完成本次 MVP 体验。可点击上方「重新开始」再体验一遍。
+        项目已上线。可点击上方「重新开始」再体验一遍。
+      </div>
+    );
+  }
+
+  if (pathEndedBuy) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
+        已选择外部方案，本次体验结束。
       </div>
     );
   }
@@ -51,6 +79,24 @@ export function GateBar({
   let secondaryAction: (() => void) | null = null;
   let disabled = false;
 
+  if (stage === 0 && discoveryReady && pendingGate === "path") {
+    if (pathChoice === "self_build") {
+      title = "确认按自研路线继续";
+      primaryLabel = "确认，开始整理需求";
+      primaryAction = onConfirmPathSelfBuild;
+      secondaryLabel = "改选其他方案";
+      secondaryAction = () => undefined;
+    } else if (pathChoice === "saas" || pathChoice === "low_code") {
+      title = "确认采用外部方案？";
+      primaryLabel = "确认，查看实施建议";
+      primaryAction = onConfirmPathBuy;
+      secondaryLabel = "改选自研";
+      secondaryAction = () => undefined;
+    } else {
+      title = "请先在右侧选择一种方案";
+    }
+  }
+
   if (stage === 1 && requirementsComplete && pendingGate === "requirements") {
     title = "请确认需求文档后继续";
     primaryLabel = "确认需求，继续";
@@ -60,23 +106,32 @@ export function GateBar({
   }
 
   if (stage === 2 && pendingGate === "style") {
-    title = selectedStyleId
-      ? `已选风格 ${selectedStyleId}，确认后开始制作`
-      : "请先选择一套风格（推荐风格 B）";
-    primaryLabel = "确认风格，开始制作";
+    title =
+      selectedTechId && selectedStyleId
+        ? "确认技术路线与界面风格"
+        : "请先选择技术路线和界面风格";
+    primaryLabel = "确认，开始制作";
     primaryAction = onConfirmStyle;
-    disabled = !selectedStyleId;
+    disabled = !selectedTechId || !selectedStyleId;
   }
 
   if (stage === 3 && buildDone && pendingGate === "acceptance") {
     const allChecked = acceptanceChecks.every(Boolean);
-    title = allChecked
-      ? "验收通过，可以完成本次体验"
-      : "请对照右侧预览，勾选验收清单";
-    primaryLabel = "可以了，完成";
-    primaryAction = onCompleteProject;
+    title = allChecked ? "验收通过，进入部署准备" : "请试用后勾选验收清单";
+    primaryLabel = "验收通过，继续";
+    primaryAction = onCompleteAcceptance;
     secondaryLabel = "还不行，继续改";
     secondaryAction = onRequestChanges;
+    disabled = !allChecked;
+  }
+
+  if (stage === 4 && stagingReady && pendingGate === "go_live") {
+    const allChecked = goLiveChecks.every(Boolean);
+    title = allChecked ? "确认上线正式环境" : "请完成上线检查项";
+    primaryLabel = "上线正式环境";
+    primaryAction = onConfirmGoLive;
+    secondaryLabel = "再测试一周";
+    secondaryAction = onPauseProject;
     disabled = !allChecked;
   }
 

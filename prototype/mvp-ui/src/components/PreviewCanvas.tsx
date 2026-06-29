@@ -6,7 +6,6 @@ interface PreviewCanvasProps {
   requirements: RequirementsData;
   buildProgress: number;
   buildDone: boolean;
-  projectCompleted: boolean;
   acceptanceChecks: [boolean, boolean, boolean];
   styleWarmth: number;
   onToggleAcceptance: (index: number) => void;
@@ -88,7 +87,6 @@ export function PreviewCanvas({
   requirements,
   buildProgress,
   buildDone,
-  projectCompleted,
   acceptanceChecks,
   styleWarmth,
   onToggleAcceptance,
@@ -108,27 +106,6 @@ export function PreviewCanvas({
         "页面是否看得懂",
         "你是否愿意把这个链接发给别人试用",
       ];
-
-  if (projectCompleted) {
-    return (
-      <CanvasTabs
-        tabs={[
-          {
-            id: "preview",
-            label: "最终预览",
-            content: (
-              <div className="space-y-4">
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm text-emerald-800">
-                  本次协作体验已完成
-                </div>
-                <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
-              </div>
-            ),
-          },
-        ]}
-      />
-    );
-  }
 
   const tabs = [
     {

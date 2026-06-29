@@ -1,44 +1,64 @@
-import type { ChatMessage, GateType, Stage } from "../types";
+import type { ChatMessage, GateType, PathChoice, Stage, TechChoice } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import { GateBar } from "./GateBar";
 
 interface LeftSidebarProps {
   stage: Stage;
   projectCompleted: boolean;
+  pathEndedBuy: boolean;
   messages: ChatMessage[];
   isAgentTyping: boolean;
   quickReplies: string[];
   onSend: (text: string) => void;
   chatDisabled: boolean;
   pendingGate: GateType;
+  pathChoice: PathChoice;
+  discoveryReady: boolean;
   requirementsComplete: boolean;
+  selectedTechId: TechChoice;
   selectedStyleId: "A" | "B" | null;
   buildDone: boolean;
   acceptanceChecks: [boolean, boolean, boolean];
+  stagingReady: boolean;
+  goLiveChecks: [boolean, boolean, boolean];
+  onConfirmPathSelfBuild: () => void;
+  onConfirmPathBuy: () => void;
   onConfirmRequirements: () => void;
   onConfirmStyle: () => void;
   onRequestChanges: () => void;
-  onCompleteProject: () => void;
+  onCompleteAcceptance: () => void;
+  onConfirmGoLive: () => void;
+  onPauseProject: () => void;
   onReset: () => void;
 }
 
 export function LeftSidebar({
   stage,
   projectCompleted,
+  pathEndedBuy,
   messages,
   isAgentTyping,
   quickReplies,
   onSend,
   chatDisabled,
   pendingGate,
+  pathChoice,
+  discoveryReady,
   requirementsComplete,
+  selectedTechId,
   selectedStyleId,
   buildDone,
   acceptanceChecks,
+  stagingReady,
+  goLiveChecks,
+  onConfirmPathSelfBuild,
+  onConfirmPathBuy,
   onConfirmRequirements,
   onConfirmStyle,
   onRequestChanges,
-  onCompleteProject,
+  onCompleteAcceptance,
+  onConfirmGoLive,
+  onPauseProject,
   onReset,
 }: LeftSidebarProps) {
   return (
@@ -77,15 +97,25 @@ export function LeftSidebar({
         <GateBar
           stage={stage}
           pendingGate={pendingGate}
+          pathChoice={pathChoice}
+          discoveryReady={discoveryReady}
+          pathEndedBuy={pathEndedBuy}
           requirementsComplete={requirementsComplete}
+          selectedTechId={selectedTechId}
           selectedStyleId={selectedStyleId}
           buildDone={buildDone}
           acceptanceChecks={acceptanceChecks}
+          stagingReady={stagingReady}
+          goLiveChecks={goLiveChecks}
           projectCompleted={projectCompleted}
+          onConfirmPathSelfBuild={onConfirmPathSelfBuild}
+          onConfirmPathBuy={onConfirmPathBuy}
           onConfirmRequirements={onConfirmRequirements}
           onConfirmStyle={onConfirmStyle}
           onRequestChanges={onRequestChanges}
-          onCompleteProject={onCompleteProject}
+          onCompleteAcceptance={onCompleteAcceptance}
+          onConfirmGoLive={onConfirmGoLive}
+          onPauseProject={onPauseProject}
           compact
         />
       </div>
