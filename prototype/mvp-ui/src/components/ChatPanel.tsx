@@ -8,6 +8,7 @@ interface ChatPanelProps {
   quickReplies?: string[];
   onSend: (text: string) => void;
   disabled?: boolean;
+  embedded?: boolean;
 }
 
 export function ChatPanel({
@@ -16,6 +17,7 @@ export function ChatPanel({
   quickReplies = [],
   onSend,
   disabled,
+  embedded = false,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -31,20 +33,29 @@ export function ChatPanel({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="border-b border-slate-100 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm text-white">
-            AI
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-slate-900">与 Agent 对话</div>
-            <div className="text-xs text-slate-500">左侧聊天，右侧查看成果</div>
+    <div
+      className={[
+        "flex h-full min-h-0 flex-col",
+        embedded
+          ? "rounded-xl border border-slate-200 bg-slate-50/50"
+          : "rounded-2xl border border-slate-200 bg-white shadow-sm",
+      ].join(" ")}
+    >
+      {!embedded && (
+        <div className="border-b border-slate-100 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm text-white">
+              AI
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-slate-900">与 Agent 对话</div>
+              <div className="text-xs text-slate-500">左侧聊天，右侧查看成果</div>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="chat-scroll flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      <div className={`chat-scroll flex-1 space-y-3 overflow-y-auto px-3 py-3 ${embedded ? "" : "px-4 py-4"}`}>
         {messages.map((message) => (
           <div
             key={message.id}
@@ -91,7 +102,7 @@ export function ChatPanel({
         </div>
       )}
 
-      <div className="border-t border-slate-100 p-4">
+      <div className={`border-t border-slate-100 ${embedded ? "p-3" : "p-4"}`}>
         <div className="flex gap-2">
           <input
             value={input}
@@ -99,13 +110,13 @@ export function ChatPanel({
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             disabled={disabled}
             placeholder="说点什么…"
-            className="flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-50"
+            className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-50"
           />
           <button
             type="button"
             onClick={handleSubmit}
             disabled={disabled || !input.trim()}
-            className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className="rounded-xl bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             发送
           </button>

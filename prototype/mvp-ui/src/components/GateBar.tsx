@@ -12,6 +12,7 @@ interface GateBarProps {
   onConfirmStyle: () => void;
   onRequestChanges: () => void;
   onCompleteProject: () => void;
+  compact?: boolean;
 }
 
 export function GateBar({
@@ -26,11 +27,19 @@ export function GateBar({
   onConfirmStyle,
   onRequestChanges,
   onCompleteProject,
+  compact = false,
 }: GateBarProps) {
   if (projectCompleted) {
     return (
-      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-        你已完成本次 MVP 体验。可以点击右上角「重新开始」再体验一遍。
+      <div
+        className={[
+          "text-sm text-emerald-800",
+          compact
+            ? "rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5"
+            : "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3",
+        ].join(" ")}
+      >
+        你已完成本次 MVP 体验。可点击上方「重新开始」再体验一遍。
       </div>
     );
   }
@@ -72,20 +81,29 @@ export function GateBar({
   }
 
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <div
+      className={[
+        compact
+          ? "rounded-xl border border-slate-200 bg-slate-50 px-3 py-3"
+          : "rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm",
+      ].join(" ")}
+    >
+      <div className={`flex flex-col gap-3 ${compact ? "" : "lg:flex-row lg:items-center lg:justify-between"}`}>
         <div>
           <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
             待你拍板
           </div>
           <div className="text-sm font-medium text-slate-900">{title}</div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className={`flex gap-2 ${compact ? "flex-col" : "flex-wrap"}`}>
           {secondaryLabel && secondaryAction && (
             <button
               type="button"
               onClick={secondaryAction}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              className={[
+                "rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50",
+                compact ? "w-full px-3 py-2" : "px-4 py-2.5",
+              ].join(" ")}
             >
               {secondaryLabel}
             </button>
@@ -95,7 +113,10 @@ export function GateBar({
               type="button"
               onClick={primaryAction}
               disabled={disabled}
-              className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              className={[
+                "rounded-xl bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300",
+                compact ? "w-full px-3 py-2" : "px-4 py-2.5",
+              ].join(" ")}
             >
               {primaryLabel}
             </button>
