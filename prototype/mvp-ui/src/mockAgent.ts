@@ -7,11 +7,47 @@ export interface QuestionStep {
   applyAnswer: (answer: string, current: RequirementsData) => Partial<RequirementsData>;
 }
 
+export const TECH_OPTIONS = [
+  {
+    id: "web" as const,
+    name: "网页应用",
+    summary: "手机电脑都能用，后续扩展性好",
+    cost: "维护成本：中",
+    recommended: true,
+  },
+  {
+    id: "wechat" as const,
+    name: "微信小程序",
+    summary: "员工在微信里打开，上手快",
+    cost: "维护成本：中",
+  },
+  {
+    id: "desktop" as const,
+    name: "本地小工具",
+    summary: "仅行政电脑使用，上线最快",
+    cost: "维护成本：低",
+  },
+];
+
+export const DISCOVERY_FLOW = [
+  {
+    prompt:
+      "你好，我是你的项目助手。\n\n先不用急着做软件——我想先帮你判断：这个问题是否值得自己做。\n\n你想解决什么问题？",
+    quickReplies: ["员工请假登记麻烦", "活动报名收集", "想做一个内部小工具"],
+    applyAnswer: (answer: string) => answer,
+  },
+  {
+    prompt: "大概多少人用？对费用和时间敏感吗？",
+    quickReplies: ["20人小公司，预算有限", "50人左右，希望尽快", "不急，想先搞清楚"],
+    applyAnswer: (answer: string) => answer,
+  },
+];
+
 export const QUESTION_FLOW: QuestionStep[] = [
   {
     id: "goal",
     prompt:
-      "你好，我是你的项目助手。我们先把这个小工具的需求说清楚。\n\n第一个问题：你想做一个什么东西？最想解决的一个问题是什么？",
+      "我们按自研来做。先把需求说清楚。\n\n你想做一个什么东西？最想解决的一个问题是什么？",
     quickReplies: ["员工请假登记", "活动报名收集", "简易待办清单"],
     applyAnswer: (answer) => ({
       goal: answer.includes("请假")

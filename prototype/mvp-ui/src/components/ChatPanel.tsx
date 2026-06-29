@@ -126,11 +126,21 @@ export function ChatPanel({
   );
 }
 
+interface DiscoveryStep {
+  quickReplies?: string[];
+}
+
 export function getQuickReplies(
   stage: number,
+  discoveryReady: boolean,
   requirementsComplete: boolean,
+  _questionIndex: number,
   currentQuestion?: QuestionStep,
+  currentDiscoveryStep?: DiscoveryStep,
 ): string[] {
+  if (stage === 0 && !discoveryReady && currentDiscoveryStep?.quickReplies) {
+    return currentDiscoveryStep.quickReplies;
+  }
   if (stage === 1 && !requirementsComplete && currentQuestion?.quickReplies) {
     return currentQuestion.quickReplies;
   }

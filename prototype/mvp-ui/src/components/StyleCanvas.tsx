@@ -1,11 +1,14 @@
-import { STYLE_OPTIONS } from "../mockAgent";
+import { STYLE_OPTIONS, TECH_OPTIONS } from "../mockAgent";
 import { CanvasTabs } from "./CanvasTabs";
+import type { TechChoice } from "../types";
 
 interface StyleCanvasProps {
+  selectedTechId: TechChoice;
   selectedStyleId: "A" | "B" | null;
   styleVersion: number;
   styleWarmth: number;
   styleButtonSize: number;
+  onSelectTech: (id: TechChoice) => void;
   onSelectStyle: (id: "A" | "B") => void;
 }
 
@@ -66,15 +69,53 @@ function PreviewMock({
 }
 
 export function StyleCanvas({
+  selectedTechId,
   selectedStyleId,
   styleVersion,
   styleWarmth,
   styleButtonSize,
+  onSelectTech,
   onSelectStyle,
 }: StyleCanvasProps) {
   const activeStyle = selectedStyleId ?? "B";
 
   const tabs = [
+    {
+      id: "tech",
+      label: "技术路线",
+      badge: selectedTechId ? "已选" : undefined,
+      content: (
+        <div className="grid gap-3 sm:grid-cols-3">
+          {TECH_OPTIONS.map((option) => {
+            const selected = selectedTechId === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => onSelectTech(option.id)}
+                className={[
+                  "rounded-2xl border p-4 text-left transition",
+                  selected
+                    ? "border-sky-400 bg-sky-50 ring-2 ring-sky-200"
+                    : "border-slate-200 bg-white hover:border-sky-200",
+                ].join(" ")}
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="font-semibold text-slate-900">{option.name}</div>
+                  {option.recommended && (
+                    <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700">
+                      推荐
+                    </span>
+                  )}
+                </div>
+                <p className="mb-2 text-sm text-slate-600">{option.summary}</p>
+                <p className="text-xs text-slate-500">{option.cost}</p>
+              </button>
+            );
+          })}
+        </div>
+      ),
+    },
     {
       id: "pick",
       label: "选风格",
@@ -132,9 +173,7 @@ export function StyleCanvas({
             warmth={styleWarmth}
             buttonSize={styleButtonSize}
           />
-          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
-            <span>可在左侧聊天继续修改</span>
-          </div>
+          <div className="mt-3 text-xs text-slate-400">可在左侧聊天继续修改</div>
         </div>
       ),
     },
