@@ -11,6 +11,7 @@ MCP references and returns :class:`~openhands.sdk.profiles.AgentProfileDiagnosti
 (never raises on dangling refs — those appear in the body).
 """
 
+import asyncio
 import copy
 import shlex
 from collections.abc import Iterator
@@ -34,6 +35,7 @@ from openhands.agent_server.persistence import (
     get_llm_profile_store,
     get_settings_store,
 )
+from openhands.agent_server.skills_service import discover_profile_skills_if_needed
 from openhands.sdk.logger import get_logger
 from openhands.sdk.profiles import (
     ACPAgentProfile,
@@ -224,17 +226,24 @@ def _build_seed_profile(
             ),
             acp_args=list(agent_settings.acp_args) or None,
             mcp_server_refs=None,
+            # ACP default; explicit for symmetry with the OpenHands seed below.
+            skill_refs=[],
         )
     context = agent_settings.agent_context
     return OpenHandsAgentProfile(
         name=SEED_PROFILE_NAME,
         llm_profile_ref=active_llm_profile or SEED_PROFILE_NAME,
         agent=agent_settings.agent,
+        # Embed the global's already-resolved skills + skill_refs=[] (no further
+        # discovery) to reproduce its exact set; skill_refs=None would re-discover
+        # user+public and inject skills a partial-source global never had.
         skills=list(context.skills),
+        skill_refs=[],
         system_message_suffix=context.system_message_suffix,
         condenser=agent_settings.condenser,
         verification=_profile_verification(agent_settings.verification),
         enable_sub_agents=agent_settings.enable_sub_agents,
+        enable_switch_llm_tool=agent_settings.enable_switch_llm_tool,
         tool_concurrency_limit=agent_settings.tool_concurrency_limit,
         mcp_server_refs=None,
     )
@@ -593,10 +602,31 @@ async def materialize_agent_profile(
     settings = get_settings_store(config).load() or PersistedSettings()
     mcp_config = settings.agent_settings.mcp_config
 
+    # Discover skills off the event loop so the dry-run can report which
+    # ``skill_refs`` resolve vs. dangle. A discovery failure must not 500 the
+    # preview: pass ``available_skills=None`` (catalog unknown — the dry-run then
+    # reports nothing dangling, rather than flagging every selected skill) and
+    # surface the failure as its own diagnostic below.
+    discovery_error: str | None = None
+    try:
+        available_skills = await asyncio.to_thread(
+            discover_profile_skills_if_needed, profile
+        )
+    except Exception as exc:
+        available_skills = None
+        discovery_error = str(exc)
+        logger.warning("Skill discovery failed during materialize: %s", exc)
+
     llm_store = get_llm_profile_store()
-    return resolve_agent_profile_dry_run(
+    diagnostics = resolve_agent_profile_dry_run(
         profile,
         llm_store=llm_store,
         mcp_config=mcp_config,
+        available_skills=available_skills,
         cipher=cipher,
     )
+    if discovery_error is not None:
+        diagnostics.errors.append(f"Skill discovery failed: {discovery_error}")
+        diagnostics.valid = False
+        diagnostics.resolved_settings = None
+    return diagnostics

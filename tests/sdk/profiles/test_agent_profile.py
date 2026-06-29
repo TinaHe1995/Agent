@@ -38,8 +38,10 @@ def test_openhands_profile_round_trips() -> None:
         llm_profile_ref="default",
         revision=3,
         mcp_server_refs=["fetch"],
+        skill_refs=["pdf-tools"],
         system_message_suffix="be terse",
         enable_sub_agents=True,
+        enable_switch_llm_tool=False,
         tool_concurrency_limit=4,
     )
     reloaded = validate_agent_profile(profile.model_dump(mode="json"))
@@ -51,7 +53,64 @@ def test_openhands_profile_round_trips() -> None:
     assert reloaded.llm_profile_ref == "default"
     assert reloaded.revision == 3
     assert reloaded.mcp_server_refs == ["fetch"]
+    assert reloaded.skill_refs == ["pdf-tools"]
+    assert reloaded.enable_switch_llm_tool is False
     assert reloaded.tool_concurrency_limit == 4
+
+
+def test_openhands_profile_new_field_defaults() -> None:
+    """``enable_switch_llm_tool`` defaults True (global parity); ``skill_refs``
+    defaults None (all discovered)."""
+    profile = OpenHandsAgentProfile(name="oh", llm_profile_ref="default")
+    assert profile.enable_switch_llm_tool is True
+    assert profile.skill_refs is None
+    # An older persisted payload without the fields still validates and adopts
+    # the defaults.
+    reloaded = validate_agent_profile(
+        {"agent_kind": "openhands", "name": "oh", "llm_profile_ref": "default"}
+    )
+    assert isinstance(reloaded, OpenHandsAgentProfile)
+    assert reloaded.enable_switch_llm_tool is True
+    assert reloaded.skill_refs is None
+
+
+def test_skill_refs_empty_vs_null_are_distinct() -> None:
+    """``[]`` (none) and ``None`` (all discovered) must survive round-trip
+    distinctly, mirroring ``mcp_server_refs``."""
+    none_ref = validate_agent_profile(
+        OpenHandsAgentProfile(
+            name="oh", llm_profile_ref="default", skill_refs=None
+        ).model_dump(mode="json")
+    )
+    empty_ref = validate_agent_profile(
+        OpenHandsAgentProfile(
+            name="oh", llm_profile_ref="default", skill_refs=[]
+        ).model_dump(mode="json")
+    )
+    assert isinstance(none_ref, OpenHandsAgentProfile)
+    assert isinstance(empty_ref, OpenHandsAgentProfile)
+    assert none_ref.skill_refs is None
+    assert empty_ref.skill_refs == []
+
+
+def test_acp_profile_skill_refs_defaults_empty() -> None:
+    """ACP profiles default ``skill_refs=[]`` (they own their tooling), unlike
+    OpenHands' ``None``. A payload without the field — incl. one persisted before
+    the field existed — adopts the [] default rather than injecting the catalog."""
+    from openhands.sdk.profiles import ACPAgentProfile
+
+    profile = ACPAgentProfile(name="acp", acp_server="claude-code")
+    assert profile.skill_refs == []
+    reloaded = validate_agent_profile(
+        {"agent_kind": "acp", "name": "acp", "acp_server": "claude-code"}
+    )
+    assert isinstance(reloaded, ACPAgentProfile)
+    assert reloaded.skill_refs == []
+    # null stays an explicit opt-in (all discovered), distinct from the default.
+    explicit_null = ACPAgentProfile(
+        name="acp", acp_server="claude-code", skill_refs=None
+    )
+    assert explicit_null.skill_refs is None
 
 
 def test_acp_profile_round_trips() -> None:
@@ -64,6 +123,7 @@ def test_acp_profile_round_trips() -> None:
         acp_command="codex-acp",
         acp_args=["--flag"],
         mcp_server_refs=None,
+        skill_refs=["pdf-tools"],
     )
     reloaded = validate_agent_profile(profile.model_dump(mode="json"))
 
@@ -75,6 +135,8 @@ def test_acp_profile_round_trips() -> None:
     assert reloaded.acp_command == "codex-acp"
     assert reloaded.acp_args == ["--flag"]
     assert reloaded.mcp_server_refs is None
+    # skill_refs lives on the shared base, so ACP profiles round-trip it too.
+    assert reloaded.skill_refs == ["pdf-tools"]
 
 
 def test_acp_profile_minimal_defaults() -> None:

@@ -89,6 +89,20 @@ class AgentProfileBase(BaseModel):
             "null = all; [] = none; a non-null list = filter to the named keys."
         ),
     )
+    # On the base because both variants consume skills as prompt context. null
+    # and [] are deliberately distinct (mirrors ``mcp_server_refs``); ACP
+    # overrides the default to [] (it owns its tooling — see ACPAgentProfile).
+    skill_refs: list[str] | None = Field(
+        default=None,
+        description=(
+            "Which of the server-discovered skills to expose in the agent's "
+            "prompt, selected by name (mirrors ``mcp_server_refs`` over "
+            "``mcp_config``). null = all discovered; [] = none; a non-null "
+            "list = filter to the named skills. For OpenHands profiles, any "
+            "explicitly embedded ``skills`` are always included on top of the "
+            "filtered set."
+        ),
+    )
 
 
 class OpenHandsAgentProfile(AgentProfileBase):
@@ -140,6 +154,14 @@ class OpenHandsAgentProfile(AgentProfileBase):
         default=False,
         description="Enable sub-agent delegation via TaskToolSet.",
     )
+    enable_switch_llm_tool: bool = Field(
+        default=True,
+        description=(
+            "Enable the built-in switch_llm tool for switching between saved "
+            "LLM profiles. Defaults True to match the global agent settings "
+            "default (AgentSettingsConfig.enable_switch_llm_tool)."
+        ),
+    )
     tool_concurrency_limit: int = Field(
         default=1,
         ge=1,
@@ -165,6 +187,19 @@ class ACPAgentProfile(AgentProfileBase):
         description=(
             "Discriminator for the ``AgentProfile`` union. ``'acp'`` selects an "
             "ACP-delegating agent."
+        ),
+    )
+    # ACP agents own their tooling, so the discovered skill catalog is NOT
+    # injected by default (an ACP profile created without selecting skills, or
+    # persisted before this field existed, resolves to no prompt context — the
+    # pre-existing ACP behavior). null (= all discovered) stays an explicit
+    # opt-in, distinct from this [] default.
+    skill_refs: list[str] | None = Field(
+        default_factory=list,
+        description=(
+            "Skills to expose to the ACP agent's prompt, by name. Defaults to "
+            "[] (none): ACP agents own their tooling. null = all discovered; "
+            "[] = none; a non-null list = the named skills."
         ),
     )
     acp_server: ACPServerKind = Field(
