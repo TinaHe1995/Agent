@@ -9,8 +9,8 @@ from openhands.sdk.llm import LLM
 
 def test_llm_config_defaults():
     """Test LLM with default values."""
-    config = LLM(model="gpt-4")
-    assert config.model == "gpt-4"
+    config = LLM(model="gpt-4o-mini", usage_id="test-llm")
+    assert config.model == "gpt-4o-mini"
     assert config.api_key is None
     assert config.base_url is None
     assert config.api_version is None
@@ -18,14 +18,15 @@ def test_llm_config_defaults():
     assert config.retry_multiplier == 8
     assert config.retry_min_wait == 8
     assert config.retry_max_wait == 64
-    assert config.timeout is None
+    assert config.timeout == 300  # Default timeout is 5 minutes
     assert config.max_message_chars == 30_000
-    assert config.temperature == 0.0
-    assert config.top_p == 1.0
+    assert config.temperature is None  # None to use provider defaults
+    assert config.top_p is None  # None to use provider defaults
     assert config.top_k is None
-    assert config.custom_llm_provider is None
-    assert config.max_input_tokens == 8192  # Auto-populated from model info
-    assert config.max_output_tokens == 4096  # Auto-populated from model info
+    assert config.max_input_tokens is None  # None means use discovered value
+    assert config.max_output_tokens is None  # None means use discovered value
+    assert config.effective_max_input_tokens == 128000
+    assert config.effective_max_output_tokens == 16384
     assert config.input_cost_per_token is None
     assert config.output_cost_per_token is None
     assert config.ollama_base_url is None
@@ -36,16 +37,16 @@ def test_llm_config_defaults():
     assert config.caching_prompt is True
     assert config.log_completions is False
     assert config.custom_tokenizer is None
-    assert config.native_tool_calling is None
-    assert config.reasoning_effort == "high"  # Default for non-Gemini models
+    assert config.native_tool_calling is True
+    assert config.reasoning_effort == "high"
     assert config.seed is None
-    assert config.safety_settings is None
 
 
 def test_llm_config_custom_values():
     """Test LLM with custom values."""
     config = LLM(
-        model="gpt-4",
+        usage_id="test-llm",
+        model="gpt-4o-mini",
         api_key=SecretStr("test-key"),
         base_url="https://api.example.com",
         api_version="v1",
@@ -58,8 +59,7 @@ def test_llm_config_custom_values():
         temperature=0.5,
         top_p=0.9,
         top_k=50,
-        custom_llm_provider="custom",
-        max_input_tokens=4000,
+        max_input_tokens=20000,
         max_output_tokens=1000,
         input_cost_per_token=0.001,
         output_cost_per_token=0.002,
@@ -70,22 +70,16 @@ def test_llm_config_custom_values():
         disable_stop_word=True,
         caching_prompt=False,
         log_completions=True,
-        custom_tokenizer=None,  # Changed from "custom_tokenizer" to avoid HF API call
+        custom_tokenizer=None,  # Avoid HF API call
         native_tool_calling=True,
         reasoning_effort="high",
         seed=42,
-        safety_settings=[
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-            }
-        ],
     )
 
-    assert config.model == "gpt-4"
-    assert (
-        config.api_key is not None and config.api_key.get_secret_value() == "test-key"
-    )
+    assert config.model == "gpt-4o-mini"
+    assert config.api_key is not None
+    assert isinstance(config.api_key, SecretStr)
+    assert config.api_key.get_secret_value() == "test-key"
     assert config.base_url == "https://api.example.com"
     assert config.api_version == "v1"
     assert config.num_retries == 3
@@ -97,8 +91,7 @@ def test_llm_config_custom_values():
     assert config.temperature == 0.5
     assert config.top_p == 0.9
     assert config.top_k == 50
-    assert config.custom_llm_provider == "custom"
-    assert config.max_input_tokens == 4000
+    assert config.max_input_tokens == 20000
     assert config.max_output_tokens == 1000
     assert config.input_cost_per_token == 0.001
     assert config.output_cost_per_token == 0.002
@@ -113,17 +106,16 @@ def test_llm_config_custom_values():
     assert config.native_tool_calling is True
     assert config.reasoning_effort == "high"
     assert config.seed == 42
-    assert config.safety_settings == [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
-    ]
 
 
 def test_llm_config_secret_str():
     """Test that api_key is properly handled as SecretStr."""
-    config = LLM(model="gpt-4", api_key=SecretStr("secret-key"))
-    assert (
-        config.api_key is not None and config.api_key.get_secret_value() == "secret-key"
+    config = LLM(
+        model="gpt-4o-mini", api_key=SecretStr("secret-key"), usage_id="test-llm"
     )
+    assert config.api_key is not None
+    assert isinstance(config.api_key, SecretStr)
+    assert config.api_key.get_secret_value() == "secret-key"
     # Ensure the secret is not exposed in string representation
     assert "secret-key" not in str(config)
 
@@ -131,144 +123,203 @@ def test_llm_config_secret_str():
 def test_llm_config_aws_credentials():
     """Test AWS credentials handling."""
     config = LLM(
-        model="gpt-4",
+        usage_id="test-llm",
+        model="gpt-4o-mini",
         aws_access_key_id=SecretStr("test-access-key"),
         aws_secret_access_key=SecretStr("test-secret-key"),
         aws_region_name="us-east-1",
     )
-    assert (
-        config.aws_access_key_id is not None
-        and config.aws_access_key_id.get_secret_value() == "test-access-key"
-    )
-    assert (
-        config.aws_secret_access_key is not None
-        and config.aws_secret_access_key.get_secret_value() == "test-secret-key"
-    )
+    assert config.aws_access_key_id is not None
+    assert isinstance(config.aws_access_key_id, SecretStr)
+    assert config.aws_access_key_id.get_secret_value() == "test-access-key"
+    assert config.aws_secret_access_key is not None
+    assert isinstance(config.aws_secret_access_key, SecretStr)
+    assert config.aws_secret_access_key.get_secret_value() == "test-secret-key"
     assert config.aws_region_name == "us-east-1"
 
 
 def test_llm_config_openrouter_defaults():
     """Test OpenRouter default values."""
-    config = LLM(model="gpt-4")
+    config = LLM(model="gpt-4o-mini", usage_id="test-llm")
     assert config.openrouter_site_url == "https://docs.all-hands.dev/"
     assert config.openrouter_app_name == "OpenHands"
 
 
-def test_llm_config_post_init_openrouter_env_vars():
-    """Test that OpenRouter environment variables are set in post_init."""
+def test_llm_config_post_init_openrouter_does_not_set_env():
+    """OpenRouter site/app must NOT bleed into os.environ.
+
+    Constructing an LLM (potentially per-conversation in a multi-tenant
+    agent server) used to set ``OR_SITE_URL`` / ``OR_APP_NAME``, which
+    leaks across conversations via the shared process environment
+    (issue #3138). The values should now flow per-call via
+    ``extra_headers`` instead.
+    """
     with patch.dict(os.environ, {}, clear=True):
-        LLM(
-            model="gpt-4",
+        llm = LLM(
+            model="gpt-4o-mini",
             openrouter_site_url="https://custom.site.com",
             openrouter_app_name="CustomApp",
+            usage_id="test-llm",
         )
-        assert os.environ.get("OR_SITE_URL") == "https://custom.site.com"
-        assert os.environ.get("OR_APP_NAME") == "CustomApp"
+        assert "OR_SITE_URL" not in os.environ
+        assert "OR_APP_NAME" not in os.environ
+        # Values still travel through the per-call helper.
+        assert llm._openrouter_headers() == {
+            "HTTP-Referer": "https://custom.site.com",
+            "X-Title": "CustomApp",
+        }
 
 
 def test_llm_config_post_init_reasoning_effort_default():
-    """Test that reasoning_effort is set to 'high' by default for non-Gemini models."""
-    config = LLM(model="gpt-4")
+    """Test reasoning_effort defaults to high."""
+    config = LLM(model="gpt-4o-mini", usage_id="test-llm")
     assert config.reasoning_effort == "high"
 
-    # Test that Gemini models don't get default reasoning_effort
-    config = LLM(model="gemini-2.5-pro-experimental")
-    assert config.reasoning_effort is None
+    # Test that Gemini models also default to high
+    config = LLM(model="gemini-2.5-pro-experimental", usage_id="test-llm")
+    assert config.reasoning_effort == "high"
+
+    # Test that explicit reasoning_effort is preserved
+    config = LLM(model="gpt-4o-mini", reasoning_effort="low", usage_id="test-llm")
+    assert config.reasoning_effort == "low"
+    config = LLM(model="gpt-4o-mini", reasoning_effort="xhigh", usage_id="test-llm")
+    assert config.reasoning_effort == "xhigh"
 
 
 def test_llm_config_post_init_azure_api_version():
     """Test that Azure models get default API version."""
-    config = LLM(model="azure/gpt-4")
+    config = LLM(model="azure/gpt-4o-mini", usage_id="test-llm")
     assert config.api_version == "2024-12-01-preview"
 
     # Test that non-Azure models don't get default API version
-    config = LLM(model="gpt-4")
+    config = LLM(model="gpt-4o-mini", usage_id="test-llm")
     assert config.api_version is None
 
     # Test that explicit API version is preserved
-    config = LLM(model="azure/gpt-4", api_version="custom-version")
+    config = LLM(
+        model="azure/gpt-4o-mini", api_version="custom-version", usage_id="test-llm"
+    )
     assert config.api_version == "custom-version"
 
 
-def test_llm_config_post_init_aws_env_vars():
-    """Test that AWS credentials are set as environment variables."""
+def test_llm_config_post_init_aws_does_not_set_env():
+    """AWS credentials must NOT be written to os.environ on init.
+
+    Doing so would leak credentials across conversations in a multi-tenant
+    agent server (issue #3138). They are forwarded per-call via
+    ``_aws_kwargs()`` instead.
+    """
     with patch.dict(os.environ, {}, clear=True):
-        LLM(
-            model="gpt-4",
+        llm = LLM(
+            usage_id="test-llm",
+            model="gpt-4o-mini",
             aws_access_key_id=SecretStr("test-access-key"),
             aws_secret_access_key=SecretStr("test-secret-key"),
             aws_region_name="us-west-2",
         )
-        assert os.environ.get("AWS_ACCESS_KEY_ID") == "test-access-key"
-        assert os.environ.get("AWS_SECRET_ACCESS_KEY") == "test-secret-key"
-        assert os.environ.get("AWS_REGION_NAME") == "us-west-2"
+        assert "AWS_ACCESS_KEY_ID" not in os.environ
+        assert "AWS_SECRET_ACCESS_KEY" not in os.environ
+        assert "AWS_REGION_NAME" not in os.environ
+        # Values still travel through the per-call helper.
+        kw = llm._aws_kwargs()
+        assert kw["aws_access_key_id"] == "test-access-key"
+        assert kw["aws_secret_access_key"] == "test-secret-key"
+        assert kw["aws_region_name"] == "us-west-2"
 
 
 def test_llm_config_log_completions_folder_default():
     """Test that log_completions_folder has a default value."""
-    config = LLM(model="gpt-4")
+    config = LLM(model="gpt-4o-mini", usage_id="test-llm")
     assert config.log_completions_folder is not None
     assert "completions" in config.log_completions_folder
 
 
-def test_llm_config_extra_fields_forbidden():
+def test_llm_config_extra_fields_permitted():
     """Test that extra fields are forbidden."""
-    with pytest.raises(ValidationError) as exc_info:
-        LLM(model="gpt-4", invalid_field="should_not_work")  # type: ignore
-    assert "Extra inputs are not permitted" in str(exc_info.value)
+    LLM(model="gpt-4o-mini", invalid_field="should_be_permitted", usage_id="test-llm")  # type: ignore
 
 
 def test_llm_config_validation():
-    """Test basic validation of LLM fields."""
-    # Test that negative values are handled appropriately
+    """Test validation of LLM fields with ge constraints."""
+    # Test that negative values are rejected for fields with ge constraints
+    with pytest.raises(ValidationError) as exc_info:
+        LLM(
+            model="gpt-4o-mini",
+            num_retries=-1,  # Should fail: ge=0
+            retry_multiplier=-1,  # Should fail: ge=0
+            retry_min_wait=-1,  # Should fail: ge=0
+            retry_max_wait=-1,  # Should fail: ge=0
+            timeout=-1,  # Should fail: ge=0
+            max_message_chars=-1,  # Should fail: ge=1
+            temperature=-1,  # Should fail: ge=0
+            top_p=-1,  # Should fail: ge=0
+            usage_id="test-llm",
+        )
+
+    # Verify that the validation error contains expected field names
+    error_str = str(exc_info.value)
+    expected_fields = [
+        "num_retries",
+        "retry_multiplier",
+        "retry_min_wait",
+        "retry_max_wait",
+        "timeout",
+        "max_message_chars",
+        "temperature",
+        "top_p",
+    ]
+    for field in expected_fields:
+        assert field in error_str
+
+    # Test that valid values (>= constraints) work correctly
     config = LLM(
-        model="gpt-4",
-        num_retries=-1,  # Should be allowed (might be used to disable retries)
-        retry_multiplier=-1,  # Should be allowed
-        retry_min_wait=-1,  # Should be allowed
-        retry_max_wait=-1,  # Should be allowed
-        timeout=-1,  # Should be allowed
-        max_message_chars=-1,  # Should be allowed
-        temperature=-1,  # Should be allowed
-        top_p=-1,  # Should be allowed
+        model="gpt-4o-mini",
+        num_retries=0,  # Valid: ge=0
+        retry_multiplier=0.0,  # Valid: ge=0
+        retry_min_wait=0,  # Valid: ge=0
+        retry_max_wait=0,  # Valid: ge=0
+        timeout=0,  # Valid: ge=0
+        max_message_chars=1,  # Valid: ge=1
+        temperature=0.0,  # Valid: ge=0
+        top_p=0.0,  # Valid: ge=0
+        usage_id="test-llm",
     )
-    assert config.num_retries == -1
-    assert config.retry_multiplier == -1
-    assert config.retry_min_wait == -1
-    assert config.retry_max_wait == -1
-    assert config.timeout == -1
-    assert config.max_message_chars == -1
-    assert config.temperature == -1
-    assert config.top_p == -1
+    assert config.num_retries == 0
+    assert config.retry_multiplier == 0.0
+    assert config.retry_min_wait == 0
+    assert config.retry_max_wait == 0
+    assert config.timeout == 0
+    assert config.max_message_chars == 1
+    assert config.temperature == 0.0
+    assert config.top_p == 0.0
 
 
 def test_llm_config_model_variants():
     """Test various model name formats."""
     models = [
-        "gpt-4",
+        "gpt-4o-mini",
         "claude-3-sonnet",
-        "azure/gpt-4",
+        "azure/gpt-4o-mini",
         "anthropic/claude-3-sonnet",
         "gemini-2.5-pro-experimental",
-        "local/custom-model",
     ]
 
     for model in models:
-        config = LLM(model=model)
+        config = LLM(model=model, usage_id="test-llm")
         assert config.model == model
 
 
 def test_llm_config_boolean_fields():
     """Test boolean field handling."""
     config = LLM(
-        model="gpt-4",
-        drop_params=True,
+        model="gpt-4o-mini",
         modify_params=False,
         disable_vision=True,
         disable_stop_word=False,
         caching_prompt=True,
         log_completions=False,
         native_tool_calling=True,
+        usage_id="test-llm",
     )
 
     assert config.drop_params is True
@@ -283,7 +334,7 @@ def test_llm_config_boolean_fields():
 def test_llm_config_optional_fields():
     """Test that optional fields can be None."""
     config = LLM(
-        model="gpt-4",
+        model="gpt-4o-mini",
         api_key=None,
         base_url=None,
         api_version=None,
@@ -292,7 +343,6 @@ def test_llm_config_optional_fields():
         aws_region_name=None,
         timeout=None,
         top_k=None,
-        custom_llm_provider=None,
         max_input_tokens=None,
         max_output_tokens=None,
         input_cost_per_token=None,
@@ -301,10 +351,9 @@ def test_llm_config_optional_fields():
         disable_vision=None,
         disable_stop_word=None,
         custom_tokenizer=None,
-        native_tool_calling=None,
         reasoning_effort=None,
         seed=None,
-        safety_settings=None,
+        usage_id="test-llm",
     )
 
     assert config.api_key is None
@@ -315,22 +364,15 @@ def test_llm_config_optional_fields():
     assert config.aws_region_name is None
     assert config.timeout is None
     assert config.top_k is None
-    assert config.custom_llm_provider is None
-    assert (
-        config.max_input_tokens == 8192
-    )  # Auto-populated from model info even when set to None
-    assert (
-        config.max_output_tokens == 4096
-    )  # Auto-populated from model info even when set to None
+    assert config.max_input_tokens is None
+    assert config.max_output_tokens is None
+    assert config.effective_max_input_tokens == 128000
+    assert config.effective_max_output_tokens == 16384
     assert config.input_cost_per_token is None
     assert config.output_cost_per_token is None
     assert config.ollama_base_url is None
     assert config.disable_vision is None
     assert config.disable_stop_word is None
     assert config.custom_tokenizer is None
-    assert config.native_tool_calling is None
-    assert (
-        config.reasoning_effort == "high"
-    )  # Even when set to None, post_init sets it to "high" for non-Gemini models
+    assert config.reasoning_effort is None  # Explicitly set to None overrides default
     assert config.seed is None
-    assert config.safety_settings is None

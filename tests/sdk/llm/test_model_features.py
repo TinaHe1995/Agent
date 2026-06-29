@@ -3,40 +3,17 @@ import pytest
 from openhands.sdk.llm.utils.model_features import (
     get_features,
     model_matches,
-    normalize_model_name,
 )
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("  OPENAI/gpt-4o  ", "gpt-4o"),
-        ("anthropic/claude-3-7-sonnet", "claude-3-7-sonnet"),
-        ("litellm_proxy/gemini-2.5-pro", "gemini-2.5-pro"),
-        ("qwen3-coder-480b-a35b-instruct", "qwen3-coder-480b-a35b-instruct"),
-        ("gpt-5", "gpt-5"),
-        ("openai/GLM-4.5-GGUF", "glm-4.5"),
-        ("openrouter/gpt-4o-mini", "gpt-4o-mini"),
-        (
-            "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
-            "claude-3-5-sonnet-20241022-v2",
-        ),
-        ("", ""),
-        (None, ""),  # type: ignore[arg-type]
-    ],
-)
-def test_normalize_model_name(raw, expected):
-    assert normalize_model_name(raw) == expected
 
 
 @pytest.mark.parametrize(
     "name,pattern,expected",
     [
-        ("gpt-4o", "gpt-4o*", True),
-        ("openai/gpt-4o", "gpt-4o*", True),
-        ("litellm_proxy/gpt-4o-mini", "gpt-4o*", True),
-        ("claude-3-7-sonnet-20250219", "claude-3-7-sonnet*", True),
-        ("o1-2024-12-17", "o1*", True),
+        ("gpt-4o", "gpt-4o", True),
+        ("openai/gpt-4o", "gpt-4o", True),
+        ("litellm_proxy/gpt-4o-mini", "gpt-4o", True),
+        ("claude-3-7-sonnet-20250219", "claude-3-7-sonnet", True),
+        ("o1-2024-12-17", "o1", True),
         ("grok-4-0709", "grok-4-0709", True),
         ("grok-4-0801", "grok-4-0709", False),
     ],
@@ -46,39 +23,66 @@ def test_model_matches(name, pattern, expected):
 
 
 @pytest.mark.parametrize(
-    "model,expected_function_calling",
-    [
-        ("gpt-4o", True),
-        ("gpt-4o-mini", True),
-        ("claude-3-5-sonnet", True),
-        ("claude-3-7-sonnet", True),
-        ("gemini-2.5-pro", True),
-        # AWS Bedrock models
-        ("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", True),
-        ("bedrock/anthropic.claude-3-7-sonnet-20250219-v1:0", True),
-        ("bedrock/anthropic.claude-sonnet-4-20250514-v1:0", True),
-        (
-            "llama-3.1-70b",
-            False,
-        ),  # Most open source models don't support native function calling
-        ("unknown-model", False),  # Default to False for unknown models
-    ],
-)
-def test_function_calling_support(model, expected_function_calling):
-    features = get_features(model)
-    assert features.supports_function_calling == expected_function_calling
-
-
-@pytest.mark.parametrize(
     "model,expected_reasoning",
     [
         ("o1-2024-12-17", True),
         ("o1", True),
         ("o3-mini", True),
         ("o3", True),
+        # Anthropic Opus 4.5 (dash variant only)
+        ("claude-opus-4-5", True),
+        ("nova-2-lite", False),
+        # Gemini 3 family
+        ("gemini-3.1-pro-preview", True),
+        ("gemini-3-flash-preview", True),
+        # GPT-5 family
+        ("gpt-5.2", True),
+        ("gpt-5.2-codex", True),
+        ("gpt-5.4", True),
         ("gpt-4o", False),
         ("claude-3-5-sonnet", False),
         ("gemini-1.5-pro", False),
+        # DeepSeek Reasoner
+        ("deepseek/deepseek-reasoner", True),
+        # Moonshot Kimi thinking models expose reasoning content but do not
+        # accept the reasoning_effort parameter.
+        ("moonshot/kimi-k2.5", False),
+        ("moonshot/kimi-k2-thinking", False),
+        ("litellm_proxy/moonshot/kimi-k2-thinking", False),
+        # OpenRouter docs list these as reasoning models, but LiteLLM capability
+        # metadata does not currently mark them as reasoning-capable.
+        ("openrouter/moonshotai/kimi-k2.5", False),
+        ("openrouter/moonshotai/kimi-k2-thinking", False),
+        # OpenRouter reasoning-capable models per LiteLLM metadata
+        ("openrouter/deepseek/deepseek-r1", True),
+        ("openrouter/anthropic/claude-opus-4.5", True),
+        ("openrouter/openai/gpt-5", True),
+        # Eval LiteLLM proxy wrapper should not affect capability detection.
+        ("litellm_proxy/gpt-5", True),
+        ("litellm_proxy/claude-opus-4-5", True),
+        ("litellm_proxy/gemini-3-flash-preview", True),
+        # SDK-side override for models LiteLLM doesn't yet recognize.
+        # claude-fable-5 must be detected as a reasoning model so the chat
+        # options layer strips temperature/top_p before the request reaches
+        # Anthropic (which rejects temperature for this model).
+        ("claude-fable-5", True),
+        ("anthropic/claude-fable-5", True),
+        ("litellm_proxy/anthropic/claude-fable-5", True),
+        # claude-opus-4-8: LiteLLM recognizes the first-party id, but not the
+        # Bedrock cross-region inference ids, which must be caught by the
+        # SDK-side override so temperature/top_p are stripped before the request
+        # reaches Anthropic (which rejects temperature for this model).
+        ("claude-opus-4-8", True),
+        ("anthropic/claude-opus-4-8", True),
+        ("bedrock/us.anthropic.claude-opus-4-8-v1:0", True),
+        ("bedrock/eu.anthropic.claude-opus-4-8-v1:0", True),
+        ("bedrock/apac.anthropic.claude-opus-4-8-v1:0", True),
+        ("bedrock/global.anthropic.claude-opus-4-8-v1:0", True),
+        # LiteLLM proxy with deployment path prefixes (prod/, dev/, staging/, test/)
+        ("litellm_proxy/prod/claude-opus-4-5-20251101", True),
+        ("litellm_proxy/dev/claude-opus-4-5", True),
+        ("litellm_proxy/staging/gpt-5", True),
+        ("litellm_proxy/test/o1", True),
         ("unknown-model", False),
     ],
 )
@@ -88,16 +92,65 @@ def test_reasoning_effort_support(model, expected_reasoning):
 
 
 @pytest.mark.parametrize(
+    "model,expected_extended_thinking",
+    [
+        # Anthropic extended thinking models
+        ("claude-sonnet-4-5", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-haiku-4-5", True),
+        # Provider prefixed variants
+        ("anthropic/claude-sonnet-4-5", True),
+        ("anthropic/claude-sonnet-4-6", True),
+        ("anthropic/claude-haiku-4-5", True),
+        # Models that don't support extended thinking
+        ("claude-3-7-sonnet", False),
+        ("claude-sonnet-4", False),
+        ("claude-opus-4-5", False),
+        ("claude-opus-4-6", False),
+        ("gpt-4o", False),
+        ("o1", False),
+        ("unknown-model", False),
+    ],
+)
+def test_extended_thinking_support(model, expected_extended_thinking):
+    """Test that extended thinking models are correctly identified."""
+    features = get_features(model)
+    assert features.supports_extended_thinking == expected_extended_thinking
+
+
+@pytest.mark.parametrize(
     "model,expected_cache",
     [
         ("claude-3-5-sonnet", True),
         ("claude-3-7-sonnet", True),
         ("claude-3-haiku-20240307", True),
         ("claude-3-opus-20240229", True),
-        # AWS Bedrock models
+        # AWS Bedrock model ids (provider-prefixed)
         ("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", True),
         ("bedrock/anthropic.claude-3-haiku-20240307-v1:0", True),
+        # Anthropic 4.5 and 4.6 variants (dash only; official IDs use hyphens)
+        ("claude-haiku-4-5", True),
+        ("us.anthropic.claude-haiku-4-5-20251001", True),
         ("bedrock/anthropic.claude-3-opus-20240229-v1:0", True),
+        ("claude-sonnet-4-5", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-opus-4-5", True),
+        ("claude-opus-4-6", True),
+        # claude-fable-5 supports prompt caching but is too new for LiteLLM
+        # metadata, so it must be detected via the local allowlist across the
+        # raw, provider-prefixed, and litellm_proxy-prefixed forms.
+        ("claude-fable-5", True),
+        ("anthropic/claude-fable-5", True),
+        ("litellm_proxy/anthropic/claude-fable-5", True),
+        # User-facing model names (no provider prefix)
+        ("anthropic.claude-3-5-sonnet-20241022", True),
+        ("anthropic.claude-3-haiku-20240307", True),
+        ("anthropic.claude-3-opus-20240229", True),
+        # Gemini must NOT use explicit cache_control markers: they freeze the
+        # cache at the static prefix and disable Google's implicit caching.
+        ("gemini-2.5-pro", False),
+        ("gemini-3.1-pro-preview", False),
+        ("litellm_proxy/gemini-3.1-pro-preview", False),
         ("gpt-4o", False),  # OpenAI doesn't support explicit prompt caching
         ("gemini-1.5-pro", False),
         ("unknown-model", False),
@@ -132,11 +185,20 @@ def test_stop_words_support(model, expected_stop_words):
 
 
 def test_get_features_with_provider_prefix():
-    """Test that get_features works with provider prefixes."""
-    # Test with various provider prefixes
-    assert get_features("openai/gpt-4o").supports_function_calling is True
-    assert get_features("anthropic/claude-3-5-sonnet").supports_function_calling is True
-    assert get_features("litellm_proxy/gpt-4o").supports_function_calling is True
+    """Test that get_features works with provider prefixes.
+
+    Reasoning-effort detection delegates provider parsing to LiteLLM (we only
+    strip the `litellm_proxy/` wrapper).
+    """
+    assert get_features("openai/gpt-4o").supports_reasoning_effort is False
+    assert (
+        get_features("anthropic/claude-3-5-sonnet").supports_reasoning_effort is False
+    )
+    assert get_features("litellm_proxy/gpt-4o").supports_reasoning_effort is False
+
+    # Known reasoning-capable model IDs should be recognized.
+    assert get_features("claude-sonnet-4-5").supports_reasoning_effort is True
+    assert get_features("anthropic/claude-sonnet-4-5").supports_reasoning_effort is True
 
 
 def test_get_features_case_insensitive():
@@ -146,16 +208,13 @@ def test_get_features_case_insensitive():
     features_mixed = get_features("Gpt-4O")
 
     assert (
-        features_lower.supports_function_calling
-        == features_upper.supports_function_calling
-    )
-    assert (
         features_lower.supports_reasoning_effort
         == features_upper.supports_reasoning_effort
     )
+    assert features_lower.supports_stop_words == features_upper.supports_stop_words
     assert (
-        features_lower.supports_function_calling
-        == features_mixed.supports_function_calling
+        features_lower.supports_reasoning_effort
+        == features_mixed.supports_reasoning_effort
     )
 
 
@@ -166,13 +225,10 @@ def test_get_features_with_version_suffixes():
     versioned_features = get_features("claude-3-5-sonnet-20241022")
 
     assert (
-        base_features.supports_function_calling
-        == versioned_features.supports_function_calling
-    )
-    assert (
         base_features.supports_reasoning_effort
         == versioned_features.supports_reasoning_effort
     )
+    assert base_features.supports_stop_words == versioned_features.supports_stop_words
     assert (
         base_features.supports_prompt_cache == versioned_features.supports_prompt_cache
     )
@@ -180,7 +236,7 @@ def test_get_features_with_version_suffixes():
 
 def test_model_matches_multiple_patterns():
     """Test model_matches with multiple patterns."""
-    patterns = ["gpt-4*", "claude-3*", "gemini-*"]
+    patterns = ["gpt-4", "claude-3", "gemini-"]
 
     assert model_matches("gpt-4o", patterns) is True
     assert model_matches("claude-3-5-sonnet", patterns) is True
@@ -188,37 +244,22 @@ def test_model_matches_multiple_patterns():
     assert model_matches("llama-3.1-70b", patterns) is False
 
 
-def test_model_matches_exact_match():
-    """Test model_matches with exact patterns (no wildcards)."""
+def test_model_matches_substring_semantics():
+    """Test model_matches uses substring semantics (no globbing)."""
     patterns = ["gpt-4o", "claude-3-5-sonnet"]
 
     assert model_matches("gpt-4o", patterns) is True
     assert model_matches("claude-3-5-sonnet", patterns) is True
-    assert model_matches("gpt-4o-mini", patterns) is False
+    # Substring match: 'gpt-4o' matches 'gpt-4o-mini'
+    assert model_matches("gpt-4o-mini", patterns) is True
     assert model_matches("claude-3-haiku", patterns) is False
-
-
-def test_normalize_model_name_edge_cases():
-    """Test normalize_model_name with edge cases."""
-    # Test with multiple slashes
-    assert normalize_model_name("provider/sub/model-name") == "model-name"
-
-    # Test with colons and special characters
-    assert normalize_model_name("provider/model:version:tag") == "model"
-
-    # Test with whitespace and case
-    assert normalize_model_name("  PROVIDER/Model-Name  ") == "model-name"
-
-    # Test with underscores and hyphens
-    assert normalize_model_name("provider/model_name-v1") == "model_name-v1"
 
 
 def test_get_features_unknown_model():
     """Test get_features with completely unknown model."""
     features = get_features("completely-unknown-model-12345")
 
-    # Unknown models should have conservative defaults
-    assert features.supports_function_calling is False
+    # Unknown models should have default feature values
     assert features.supports_reasoning_effort is False
     assert features.supports_prompt_cache is False
     assert features.supports_stop_words is True  # Most models support stop words
@@ -229,19 +270,18 @@ def test_get_features_empty_model():
     features_empty = get_features("")
     features_none = get_features(None)  # type: ignore[arg-type]
 
-    # Both should return conservative defaults
-    assert features_empty.supports_function_calling is False
-    assert features_none.supports_function_calling is False
+    # Empty models should have default feature values
     assert features_empty.supports_reasoning_effort is False
     assert features_none.supports_reasoning_effort is False
+    assert features_empty.supports_stop_words is True
+    assert features_none.supports_stop_words is True
 
 
 def test_model_matches_with_provider_pattern():
-    """Test model_matches with pattern containing '/' matches raw model string."""
-    # Test pattern with '/' matches against raw model string (lines 43-44)
-    assert model_matches("openai/gpt-4", ["openai/*"])
-    assert model_matches("anthropic/claude-3", ["anthropic/claude*"])
-    assert not model_matches("openai/gpt-4", ["anthropic/*"])
+    """model_matches uses substring on raw model name incl. provider prefixes."""
+    assert model_matches("openai/gpt-4", ["openai/"])
+    assert model_matches("anthropic/claude-3", ["anthropic/claude"])
+    assert not model_matches("openai/gpt-4", ["anthropic/"])
 
 
 def test_stop_words_grok_provider_prefixed():
@@ -265,3 +305,107 @@ def test_supports_stop_words_false_models(model):
     """Test models that don't support stop words."""
     features = get_features(model)
     assert features.supports_stop_words is False
+
+
+@pytest.mark.parametrize(
+    "model,expected_responses",
+    [
+        ("gpt-5.1", True),
+        ("openai/gpt-5.1-codex-mini", True),
+        ("gpt-5", True),
+        ("gpt-5.2", True),
+        ("gpt-5.2-codex", True),
+        ("openai/gpt-5-mini", True),
+        ("codex-mini-latest", True),
+        ("openai/codex-mini-latest", True),
+        ("gpt-4o", False),
+        ("unknown-model", False),
+    ],
+)
+def test_responses_api_support(model, expected_responses):
+    features = get_features(model)
+    assert features.supports_responses_api is expected_responses
+
+
+def test_force_string_serializer_full_model_names():
+    """Ensure full model names match substring patterns for string serializer.
+
+    Regression coverage for patterns like deepseek/glm without wildcards; Kimi
+    should only match when provider-prefixed with groq/.
+    """
+    assert get_features("DeepSeek-V3.2-Exp").force_string_serializer is True
+    assert get_features("GLM-4.5").force_string_serializer is True
+    # Provider-agnostic Kimi should not force string serializer
+    assert get_features("Kimi K2-Instruct-0905").force_string_serializer is False
+    # Groq-prefixed Kimi should force string serializer
+    assert get_features("groq/kimi-k2-instruct-0905").force_string_serializer is True
+
+
+@pytest.mark.parametrize(
+    "model,expected_retention",
+    [
+        ("gpt-5.1", True),
+        ("openai/gpt-5.1-codex-mini", True),
+        ("gpt-5", True),
+        # New GPT-5.2 family should support extended retention
+        ("gpt-5.2", True),
+        ("gpt-5.2-codex", True),
+        ("openai/gpt-5.2-chat-latest", True),
+        ("openai/gpt-5.2-pro", True),
+        ("openai/gpt-5-mini", False),
+        ("gpt-4o", False),
+        ("openai/gpt-4.1", True),
+        ("azure/gpt-4.1", False),
+        ("litellm/gpt-4.1", True),
+        ("litellm_proxy/gpt-4.1", True),
+        ("litellm_proxy/openai/gpt-4.1", True),
+        ("litellm_proxy/openai/gpt-5", True),
+        ("azure/gpt-5.1", False),
+        ("litellm_proxy/openai/gpt-5-mini", False),
+        ("openai/gpt-5.1-mini", False),
+        ("openai/gpt-5-mini-2025-08-07", False),
+    ],
+)
+def test_prompt_cache_retention_support(model, expected_retention):
+    features = get_features(model)
+    assert features.supports_prompt_cache_retention is expected_retention
+
+    # piggyback on this test to verify that force_string_serializer is correctly set
+    assert get_features("GLM-4.5").force_string_serializer is True
+    # Provider-agnostic Kimi should not force string serializer
+    assert get_features("Kimi K2-Instruct-0905").force_string_serializer is False
+    # Groq-prefixed Kimi should force string serializer
+    assert get_features("groq/kimi-k2-instruct-0905").force_string_serializer is True
+
+
+@pytest.mark.parametrize(
+    "model,expected_send_reasoning",
+    [
+        ("kimi-k2-thinking", True),
+        ("kimi-k2-thinking-0905", True),
+        ("Kimi-K2-Thinking", True),  # Case insensitive
+        ("moonshot/kimi-k2-thinking", True),  # With provider prefix
+        ("kimi-k2.5", True),
+        ("Kimi-K2.5", True),  # Case insensitive
+        # DeepSeek reasoner model
+        ("deepseek/deepseek-reasoner", True),
+        ("DeepSeek/deepseek-reasoner", True),
+        # DeepSeek V4 Pro (dual-mode thinking)
+        ("deepseek/deepseek-v4-pro", True),
+        ("litellm_proxy/deepseek/deepseek-v4-pro", True),
+        # DeepSeek V4 Flash (dual-mode thinking)
+        ("deepseek/deepseek-v4-flash", True),
+        ("litellm_proxy/deepseek/deepseek-v4-flash", True),
+        # Models that should NOT match
+        ("deepseek/deepseek-chat", False),  # Different DeepSeek model
+        ("kimi-k2-instruct", False),  # Different variant
+        ("gpt-4o", False),
+        ("claude-3-5-sonnet", False),
+        ("o1", False),
+        ("unknown-model", False),
+    ],
+)
+def test_send_reasoning_content_support(model, expected_send_reasoning):
+    """Test that models like kimi-k2-thinking require send_reasoning_content."""
+    features = get_features(model)
+    assert features.send_reasoning_content is expected_send_reasoning

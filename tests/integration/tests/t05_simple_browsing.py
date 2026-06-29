@@ -3,12 +3,11 @@
 import os
 import re
 import subprocess
-import tempfile
+import sys
 import time
 
 from openhands.sdk import get_logger
-from openhands.sdk.tool import Tool
-from openhands.tools import BashTool, FileEditorTool
+from openhands.sdk.conversation import get_agent_final_response
 from tests.integration.base import BaseIntegrationTest, TestResult
 
 
@@ -93,41 +92,30 @@ logger = get_logger(__name__)
 class SimpleBrowsingTest(BaseIntegrationTest):
     """Test that an agent can browse a local web page and extract information."""
 
-    INSTRUCTION = INSTRUCTION
+    INSTRUCTION: str = INSTRUCTION
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.temp_dir = None
-        self.server_process = None
+        self.server_process: subprocess.Popen[bytes] | None = None
 
     @property
-    def tools(self) -> list[Tool]:
-        """List of tools available to the agent."""
-        if self.cwd is None:
-            raise ValueError("CWD must be set before accessing tools")
-        return [
-            BashTool.create(working_dir=self.cwd),
-            FileEditorTool.create(workspace_root=self.cwd),
-        ]
+    def enable_browser(self) -> bool:
+        """Enable browser tools for this browsing test."""
+        return True
 
     def setup(self) -> None:
         """Set up a local web server with the HTML file."""
-        if self.cwd is None:
-            raise ValueError("CWD must be set before setup")
 
         try:
-            # Create a temporary directory for the HTML file
-            self.temp_dir = tempfile.mkdtemp()
-
-            # Write the HTML file
-            html_path = os.path.join(self.temp_dir, "index.html")
+            # Write the HTML file to the workspace
+            html_path = os.path.join(self.workspace, "index.html")
             with open(html_path, "w") as f:
                 f.write(HTML_FILE)
 
             # Start the HTTP server in the background
-            self.server_process = subprocess.Popen(
-                ["python3", "-m", "http.server", "8000"],
-                cwd=self.temp_dir,
+            self.server_process: subprocess.Popen[bytes] | None = subprocess.Popen(
+                [sys.executable, "-m", "http.server", "8000", "--bind", "127.0.0.1"],
+                cwd=self.workspace,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -142,10 +130,10 @@ class SimpleBrowsingTest(BaseIntegrationTest):
 
     def verify_result(self) -> TestResult:
         """Verify that the agent successfully browsed the page and found the answer."""
-        # Use the base method to get the agent's final response
-        agent_final_response = self.get_agent_final_response()
+        # Use the utility function to get the agent's final response
+        agent_response = get_agent_final_response(self.conversation.state.events)
 
-        logger.info(f"Agent final response to analyze: {agent_final_response[:500]}...")
+        logger.info(f"Agent final response to analyze: {agent_response[:500]}...")
 
         # Use regex to check if the agent found the correct answer
         # The expected answer is "The answer is OpenHands is all you need!"
@@ -160,7 +148,7 @@ class SimpleBrowsingTest(BaseIntegrationTest):
         matched_pattern = None
 
         for pattern in answer_patterns:
-            if re.search(pattern, agent_final_response):
+            if re.search(pattern, agent_response):
                 found_answer = True
                 matched_pattern = pattern
                 break
@@ -179,12 +167,12 @@ class SimpleBrowsingTest(BaseIntegrationTest):
                 success=False,
                 reason=(
                     "Agent did not find the answer. "
-                    f"Response: {agent_final_response[:200]}..."
+                    f"Response: {agent_response[:200]}..."
                 ),
             )
 
     def teardown(self):
-        """Clean up the web server and temporary files."""
+        """Turn down the web server and close the conversation."""
         if self.server_process:
             try:
                 self.server_process.terminate()
@@ -194,12 +182,5 @@ class SimpleBrowsingTest(BaseIntegrationTest):
             except Exception as e:
                 logger.warning(f"Error terminating server process: {e}")
 
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            try:
-                import shutil
-
-                shutil.rmtree(self.temp_dir)
-            except Exception as e:
-                logger.warning(f"Error cleaning up temp directory: {e}")
-
-        logger.info("Cleaned up web server and temporary files")
+        logger.info("Cleaned up web server")
+        super().teardown()

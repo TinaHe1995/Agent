@@ -1,14 +1,21 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from litellm.exceptions import (
     RateLimitError,
 )
+from litellm.types.llms.openai import ResponseAPIUsage, ResponsesAPIResponse
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import ResponseOutputText
 from pydantic import SecretStr
 
-from openhands.sdk.llm import LLM, Message, TextContent
+from openhands.sdk import ConversationStats, RegistryEvent
+from openhands.sdk.llm import LLM, LLMResponse, Message, MessageToolCall, TextContent
 from openhands.sdk.llm.exceptions import LLMNoResponseError
+from openhands.sdk.llm.options.responses_options import select_responses_options
 from openhands.sdk.llm.utils.metrics import Metrics, TokenUsage
+from openhands.sdk.llm.utils.telemetry import Telemetry
+from openhands.sdk.tool.builtins.finish import FinishTool
 
 # Import common test utilities
 from tests.conftest import create_mock_litellm_response
@@ -19,6 +26,7 @@ def default_llm():
     return LLM(
         model="gpt-4o",
         api_key=SecretStr("test_key"),
+        usage_id="default-test-llm",
         num_retries=2,
         retry_min_wait=1,
         retry_max_wait=2,
@@ -36,9 +44,109 @@ def test_llm_init_with_default_config(default_llm):
     assert default_llm.metrics.model_name == "gpt-4o"
 
 
-def test_base_url_for_openhands_provider():
-    llm = LLM(model="openhands/claude-sonnet-4-20250514", api_key=SecretStr("test-key"))
-    assert llm.base_url == "https://llm-proxy.app.all-hands.dev/"
+@patch("openhands.sdk.llm.utils.model_info.httpx.get")
+def test_base_url_for_openhands_provider(mock_get):
+    """Test that openhands/ remains public while transport uses the proxy."""
+    # Mock the model info fetch to avoid actual HTTP calls to production
+    mock_get.return_value = Mock(json=lambda: {"data": []})
+
+    llm = LLM(
+        model="openhands/claude-sonnet-4-20250514",
+        api_key=SecretStr("test-key"),
+        usage_id="test-openhands-llm",
+    )
+    assert llm.model == "openhands/claude-sonnet-4-20250514"
+    assert llm.base_url is None
+    mock_get.assert_called_once_with(
+        "https://llm-proxy.app.all-hands.dev/v1/model/info",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+
+@patch("openhands.sdk.llm.utils.model_info.httpx.get")
+def test_base_url_for_openhands_provider_with_explicit_none(mock_get):
+    """Test that explicit None remains public config, not persisted transport config."""
+    # Mock the model info fetch to avoid actual HTTP calls to production
+    mock_get.return_value = Mock(json=lambda: {"data": []})
+
+    llm = LLM(
+        model="openhands/claude-sonnet-4-20250514",
+        api_key=SecretStr("test-key"),
+        usage_id="test-openhands-llm",
+        base_url=None,
+    )
+    assert llm.model == "openhands/claude-sonnet-4-20250514"
+    assert llm.base_url is None
+
+
+@patch("openhands.sdk.llm.utils.model_info.httpx.get")
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_openhands_provider_translates_only_for_litellm(mock_completion, mock_get):
+    mock_get.return_value = Mock(json=lambda: {"data": []})
+    mock_completion.return_value = create_mock_litellm_response("ok")
+
+    llm = LLM(
+        model="openhands/claude-haiku-4-5-20251001",
+        api_key=SecretStr("test-key"),
+        usage_id="test-openhands-transport",
+        num_retries=0,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+    llm.completion(messages=messages)
+
+    assert llm.model == "openhands/claude-haiku-4-5-20251001"
+    assert llm.base_url is None
+    _, kwargs = mock_completion.call_args
+    assert kwargs["model"] == "litellm_proxy/claude-haiku-4-5-20251001"
+    assert kwargs["api_base"] == "https://llm-proxy.app.all-hands.dev"
+    persisted = llm.to_persisted()
+    assert persisted["model"] == "openhands/claude-haiku-4-5-20251001"
+    assert "base_url" not in persisted
+
+
+@patch("openhands.sdk.llm.utils.model_info.httpx.get")
+def test_kimi_k2_5_uses_provider_defaults(mock_get):
+    """Test that kimi-k2.5 uses provider defaults (None) for temperature and top_p."""
+    mock_get.return_value = Mock(json=lambda: {"data": []})
+
+    llm = LLM(
+        model="moonshot/kimi-k2.5",
+        api_key=SecretStr("test-key"),
+        usage_id="test-kimi-llm",
+    )
+    # Both temperature and top_p should be None (use provider defaults)
+    assert llm.temperature is None
+    assert llm.top_p is None
+
+    # Explicit values should still be respected
+    llm_explicit = LLM(
+        model="moonshot/kimi-k2.5",
+        api_key=SecretStr("test-key"),
+        usage_id="test-kimi-llm-explicit",
+        top_p=0.8,
+        temperature=0.5,
+    )
+    assert llm_explicit.top_p == 0.8
+    assert llm_explicit.temperature == 0.5
+
+
+@patch("openhands.sdk.llm.utils.model_info.httpx.get")
+def test_base_url_for_openhands_provider_with_custom_url(mock_get):
+    """Test that openhands/ provider respects custom base_url when provided."""
+    # Mock the model info fetch to avoid actual HTTP calls
+    mock_get.return_value = Mock(json=lambda: {"data": []})
+
+    custom_url = "https://custom-proxy.example.com/"
+    llm = LLM(
+        model="openhands/claude-sonnet-4-20250514",
+        api_key=SecretStr("test-key"),
+        usage_id="test-openhands-llm",
+        base_url=custom_url,
+    )
+    assert llm.base_url == custom_url
+    # Should call with custom URL
+    mock_get.assert_called_once()
 
 
 def test_token_usage_add():
@@ -107,6 +215,7 @@ def test_metrics_merge_accumulated_token_usage():
 
     # Verify merged accumulated token usage
     merged_data = metrics1.get()
+
     merged_accumulated = merged_data["accumulated_token_usage"]
     assert merged_accumulated["prompt_tokens"] == 18  # 10 + 8
     assert merged_accumulated["completion_tokens"] == 11  # 5 + 6
@@ -156,6 +265,7 @@ def test_llm_completion_with_mock(mock_completion):
 
     # Create LLM after the patch is applied
     llm = LLM(
+        usage_id="test-llm",
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         num_retries=2,
@@ -167,7 +277,8 @@ def test_llm_completion_with_mock(mock_completion):
     messages = [Message(role="user", content=[TextContent(text="Hello")])]
     response = llm.completion(messages=messages)
 
-    assert response == mock_response
+    assert isinstance(response, LLMResponse)
+    assert response.raw_response == mock_response
     mock_completion.assert_called_once()
 
 
@@ -187,6 +298,7 @@ def test_llm_retry_on_rate_limit(mock_completion):
 
     # Create LLM after the patch is applied
     llm = LLM(
+        usage_id="test-llm",
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         num_retries=2,
@@ -198,7 +310,8 @@ def test_llm_retry_on_rate_limit(mock_completion):
     messages = [Message(role="user", content=[TextContent(text="Hello")])]
     response = llm.completion(messages=messages)
 
-    assert response == mock_response
+    assert isinstance(response, LLMResponse)
+    assert response.raw_response == mock_response
     assert mock_completion.call_count == 2  # First call failed, second succeeded
 
 
@@ -232,6 +345,510 @@ def test_llm_token_counting(default_llm):
     assert token_count >= 0
 
 
+@patch("openhands.sdk.llm.llm.token_counter")
+def test_llm_token_counting_includes_tools(mock_token_counter, default_llm):
+    """Test LLM token counting forwards tool schemas to LiteLLM."""
+    mock_token_counter.return_value = 123
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+    tools = list(FinishTool.create())
+
+    token_count = default_llm.get_token_count(
+        messages,
+        tools=tools,
+        add_security_risk_prediction=True,
+    )
+
+    assert token_count == 123
+    _, kwargs = mock_token_counter.call_args
+    assert len(kwargs["tools"]) == 1
+    assert kwargs["tools"][0]["function"]["name"] == "finish"
+    assert "message" in kwargs["tools"][0]["function"]["parameters"]["properties"]
+
+
+def test_llm_load_chat_template_tokenizer_prefers_transformers(monkeypatch):
+    """The chat-template tokenizer uses Transformers when available."""
+
+    class FakeTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return []
+
+    class FakeAutoTokenizer:
+        loaded_identifier = None
+
+        @classmethod
+        def from_pretrained(cls, identifier):
+            cls.loaded_identifier = identifier
+            return FakeTokenizer()
+
+    class FakeTransformers:
+        AutoTokenizer = FakeAutoTokenizer
+
+    def fake_import_module(name):
+        if name == "transformers":
+            return FakeTransformers
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(
+        "openhands.sdk.llm.llm.importlib.import_module", fake_import_module
+    )
+
+    tokenizer = LLM._load_chat_template_tokenizer("model-with-template")
+
+    assert isinstance(tokenizer, FakeTokenizer)
+    assert FakeAutoTokenizer.loaded_identifier == "model-with-template"
+
+
+@patch("openhands.sdk.llm.llm.create_pretrained_tokenizer")
+def test_llm_custom_tokenizer_falls_back_without_transformers(
+    mock_create_pretrained_tokenizer, monkeypatch
+):
+    fallback_tokenizer = {
+        "type": "huggingface_tokenizer",
+        "tokenizer": object(),
+    }
+    mock_create_pretrained_tokenizer.return_value = fallback_tokenizer
+
+    def fake_import_module(name):
+        if name == "transformers":
+            raise ModuleNotFoundError(name)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(
+        "openhands.sdk.llm.llm.importlib.import_module", fake_import_module
+    )
+
+    llm = LLM(
+        model="openai/qwen-test",
+        api_key=SecretStr("test_key"),
+        custom_tokenizer="Qwen/Qwen3-test",
+    )
+
+    assert llm._chat_template_tokenizer is None
+    assert llm._tokenizer == fallback_tokenizer
+
+
+@patch("openhands.sdk.llm.llm.create_pretrained_tokenizer")
+def test_llm_custom_tokenizer_falls_back_without_apply_chat_template(
+    mock_create_pretrained_tokenizer, monkeypatch
+):
+    fallback_tokenizer = {
+        "type": "huggingface_tokenizer",
+        "tokenizer": object(),
+    }
+    mock_create_pretrained_tokenizer.return_value = fallback_tokenizer
+
+    class FakeAutoTokenizer:
+        @classmethod
+        def from_pretrained(cls, identifier):
+            return object()
+
+    class FakeTransformers:
+        AutoTokenizer = FakeAutoTokenizer
+
+    def fake_import_module(name):
+        if name == "transformers":
+            return FakeTransformers
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(
+        "openhands.sdk.llm.llm.importlib.import_module", fake_import_module
+    )
+
+    llm = LLM(
+        model="openai/qwen-test",
+        api_key=SecretStr("test_key"),
+        custom_tokenizer="Qwen/Qwen3-test",
+    )
+
+    assert llm._chat_template_tokenizer is None
+    assert llm._tokenizer == fallback_tokenizer
+
+
+@patch("openhands.sdk.llm.llm.create_pretrained_tokenizer")
+def test_llm_custom_tokenizer_allows_apply_chat_template_without_declared_template(
+    mock_create_pretrained_tokenizer, monkeypatch
+):
+    mock_create_pretrained_tokenizer.return_value = {
+        "type": "huggingface_tokenizer",
+        "tokenizer": object(),
+    }
+
+    class FakeTokenizer:
+        chat_template = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            return []
+
+    class FakeAutoTokenizer:
+        @classmethod
+        def from_pretrained(cls, identifier):
+            return FakeTokenizer()
+
+    class FakeTransformers:
+        AutoTokenizer = FakeAutoTokenizer
+
+    def fake_import_module(name):
+        if name == "transformers":
+            return FakeTransformers
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(
+        "openhands.sdk.llm.llm.importlib.import_module", fake_import_module
+    )
+
+    llm = LLM(
+        model="openai/qwen-test",
+        api_key=SecretStr("test_key"),
+        custom_tokenizer="gpt2",
+    )
+
+    assert isinstance(llm._chat_template_tokenizer, FakeTokenizer)
+    mock_create_pretrained_tokenizer.assert_not_called()
+
+
+@patch("openhands.sdk.llm.llm.token_counter")
+def test_llm_token_counting_prefers_chat_template_tokenizer(
+    mock_token_counter, default_llm
+):
+    """Token counting uses apply_chat_template when the tokenizer supports it."""
+
+    class FakeChatTemplateTokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return list(range(321))
+
+    tokenizer = FakeChatTemplateTokenizer()
+    default_llm._chat_template_tokenizer = tokenizer
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+    tools = list(FinishTool.create())
+
+    token_count = default_llm.get_token_count(
+        messages,
+        tools=tools,
+        add_security_risk_prediction=True,
+    )
+
+    assert token_count == 321
+    mock_token_counter.assert_not_called()
+    applied_messages, kwargs = tokenizer.calls[0]
+    assert applied_messages[0]["role"] == "user"
+    assert applied_messages[0]["content"] == "Hello"
+    assert kwargs["tokenize"] is True
+    assert kwargs["add_generation_prompt"] is True
+    assert kwargs["tools"][0]["function"]["name"] == "finish"
+    assert "message" in kwargs["tools"][0]["function"]["parameters"]["properties"]
+
+
+@patch("openhands.sdk.llm.llm.token_counter")
+def test_llm_chat_template_token_counting_parses_tool_call_arguments(
+    mock_token_counter, default_llm
+):
+    """HF chat templates may expect assistant tool-call arguments as objects."""
+
+    class FakeChatTemplateTokenizer:
+        def __init__(self):
+            self.messages = None
+
+        def apply_chat_template(self, messages, **_kwargs):
+            self.messages = messages
+            return list(range(12))
+
+    tokenizer = FakeChatTemplateTokenizer()
+    default_llm._chat_template_tokenizer = tokenizer
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                MessageToolCall(
+                    id="call_1",
+                    name="finish",
+                    arguments='{"message": "done"}',
+                    origin="completion",
+                )
+            ],
+        )
+    ]
+
+    token_count = default_llm.get_token_count(messages)
+
+    assert token_count == 12
+    mock_token_counter.assert_not_called()
+    assert tokenizer.messages is not None
+    function = tokenizer.messages[0]["tool_calls"][0]["function"]
+    assert function["arguments"] == {"message": "done"}
+
+
+def test_llm_count_tokenized_output_handles_encoding_objects(default_llm):
+    """Token counting handles Hugging Face BatchEncoding/Encoding shapes."""
+
+    class FakeEncoding:
+        def __init__(self):
+            self.ids = list(range(321))
+
+    class FakeBatchEncoding:
+        def __init__(self):
+            self.encodings = [FakeEncoding()]
+
+        def get(self, key):
+            if key == "input_ids":
+                return list(range(321))
+            return None
+
+    class FakeChatTemplateTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return FakeBatchEncoding()
+
+    default_llm._chat_template_tokenizer = FakeChatTemplateTokenizer()
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+
+    assert default_llm.get_token_count(messages) == 321
+
+
+@patch("openhands.sdk.llm.llm.token_counter")
+def test_llm_token_counting_falls_back_when_chat_template_fails(
+    mock_token_counter, default_llm
+):
+    """A broken tokenizer chat template should fall back to LiteLLM counting."""
+
+    class BrokenChatTemplateTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            raise RuntimeError("template unavailable")
+
+    default_llm._chat_template_tokenizer = BrokenChatTemplateTokenizer()
+    mock_token_counter.return_value = 123
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+
+    token_count = default_llm.get_token_count(messages)
+
+    assert token_count == 123
+    mock_token_counter.assert_called_once()
+
+
+@patch("openhands.sdk.llm.llm.token_counter")
+def test_llm_token_counting_mocks_tools_for_non_native_models(mock_token_counter):
+    """Test token counting prompt-mocks tools when native tool calling is disabled."""
+    mock_token_counter.return_value = 456
+    llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        usage_id="non-native-token-count-llm",
+        native_tool_calling=False,
+        caching_prompt=False,
+    )
+    messages = [
+        Message(role="system", content=[TextContent(text="System prompt")]),
+        Message(role="user", content=[TextContent(text="Hello")]),
+    ]
+
+    token_count = llm.get_token_count(
+        messages,
+        tools=list(FinishTool.create()),
+        add_security_risk_prediction=True,
+    )
+
+    assert token_count == 456
+    _, kwargs = mock_token_counter.call_args
+    assert kwargs["tools"] is None
+    formatted_messages = kwargs["messages"]
+    system_text = formatted_messages[0]["content"][0]["text"]
+    assert "You have access to the following functions" in system_text
+    assert "---- BEGIN FUNCTION #1: finish ----" in system_text
+    assert "<parameter=security_risk>LOW</parameter>" in system_text
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_llm_forwards_extra_headers_to_litellm(mock_completion):
+    mock_response = create_mock_litellm_response("ok")
+    mock_completion.return_value = mock_response
+
+    headers = {"anthropic-beta": "context-1m-2025-08-07"}  # Enable 1M context
+    llm = LLM(
+        usage_id="test-llm",
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        extra_headers=headers,
+        num_retries=0,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hi")])]
+    _ = llm.completion(messages=messages)
+
+    assert mock_completion.call_count == 1
+    _, kwargs = mock_completion.call_args
+    # User-supplied extra_headers must reach litellm. The LLM may also inject
+    # OpenRouter HTTP-Referer / X-Title defaults (issue #3138), so only assert
+    # the user's headers are a subset of the forwarded dict.
+    forwarded = kwargs.get("extra_headers") or {}
+    assert headers.items() <= forwarded.items()
+
+
+@patch("openhands.sdk.llm.llm.litellm_responses")
+def test_llm_responses_forwards_extra_headers_to_litellm(mock_responses):
+    # Build a minimal, but valid, ResponsesAPIResponse instance per litellm types
+    # Build typed message output using OpenAI types to satisfy litellm schema
+    msg = ResponseOutputMessage.model_construct(
+        id="m1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="ok", annotations=[])],
+    )
+    usage = ResponseAPIUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    resp = ResponsesAPIResponse(
+        id="resp123",
+        created_at=0,
+        output=[msg],
+        usage=usage,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        top_p=None,
+        tools=[],
+        instructions="",
+        status="completed",
+    )
+
+    mock_responses.return_value = resp
+
+    headers = {"anthropic-beta": "context-1m-2025-08-07"}
+    llm = LLM(
+        usage_id="test-llm",
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        extra_headers=headers,
+        num_retries=0,
+    )
+
+    messages = [
+        Message(role="system", content=[TextContent(text="sys")]),
+        Message(role="user", content=[TextContent(text="Hi")]),
+    ]
+    _ = llm.responses(messages=messages)
+
+    assert mock_responses.call_count == 1
+    _, kwargs = mock_responses.call_args
+    # See test_llm_forwards_extra_headers_to_litellm for the same rationale.
+    forwarded = kwargs.get("extra_headers") or {}
+    assert headers.items() <= forwarded.items()
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_completion_merges_llm_extra_headers_with_extended_thinking_default(
+    mock_completion,
+):
+    mock_response = create_mock_litellm_response("ok")
+    mock_completion.return_value = mock_response
+
+    llm = LLM(
+        usage_id="test-llm",
+        model="claude-sonnet-4-5-20250514",
+        api_key=SecretStr("test_key"),
+        extra_headers={"X-Trace": "1"},
+        extended_thinking_budget=1000,
+        num_retries=0,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hi")])]
+    _ = llm.completion(messages=messages)
+
+    assert mock_completion.call_count == 1
+    _, kwargs = mock_completion.call_args
+    headers = kwargs.get("extra_headers") or {}
+    # Intended behavior:
+    # - No per-call headers provided.
+    # - LLM.extra_headers should be used.
+    # - Extended thinking default (anthropic-beta) should be merged in.
+    # - Result keeps both the default and configured headers.
+    assert headers.get("anthropic-beta") == "interleaved-thinking-2025-05-14"
+    assert headers.get("X-Trace") == "1"
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_completion_call_time_extra_headers_override_config_and_defaults(
+    mock_completion,
+):
+    mock_response = create_mock_litellm_response("ok")
+    mock_completion.return_value = mock_response
+
+    llm = LLM(
+        usage_id="test-llm",
+        model="claude-sonnet-4-5-20250514",
+        api_key=SecretStr("test_key"),
+        # Config sets a conflicting header
+        extra_headers={"anthropic-beta": "context-1m-2025-08-07", "X-Trace": "1"},
+        extended_thinking_budget=1000,
+        num_retries=0,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hi")])]
+    # Intended behavior:
+    # - Per-call headers should replace any LLM.extra_headers.
+    # - Extended thinking default should still be merged in.
+    # - On conflicts, per-call headers win (anthropic-beta => custom-beta).
+    call_headers = {"anthropic-beta": "custom-beta", "Header-Only": "H"}
+    _ = llm.completion(messages=messages, extra_headers=call_headers)
+
+    assert mock_completion.call_count == 1
+    _, kwargs = mock_completion.call_args
+    headers = kwargs.get("extra_headers") or {}
+    assert headers.get("anthropic-beta") == "custom-beta"
+    assert headers.get("Header-Only") == "H"
+    # LLM.config headers should not be merged when user specifies their own
+    # (except defaults we explicitly add)
+    assert "X-Trace" not in headers
+
+
+@patch("openhands.sdk.llm.llm.litellm_responses")
+def test_responses_call_time_extra_headers_override_config(mock_responses):
+    # Build a minimal valid Responses response
+    msg = ResponseOutputMessage.model_construct(
+        id="m1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="ok", annotations=[])],
+    )
+    usage = ResponseAPIUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    resp = ResponsesAPIResponse(
+        id="resp123",
+        created_at=0,
+        output=[msg],
+        usage=usage,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        top_p=None,
+        tools=[],
+        instructions="",
+        status="completed",
+    )
+    mock_responses.return_value = resp
+
+    llm = LLM(
+        usage_id="test-llm",
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        extra_headers={"X-Trace": "1"},
+        num_retries=0,
+    )
+
+    messages = [Message(role="user", content=[TextContent(text="Hi")])]
+    # Intended behavior:
+    # - Per-call headers should replace any LLM.extra_headers for Responses path.
+    # - No Anthropic default is currently added on the Responses path.
+    call_headers = {"Header-Only": "H"}
+    _ = llm.responses(messages=messages, extra_headers=call_headers)
+
+    assert mock_responses.call_count == 1
+    _, kwargs = mock_responses.call_args
+    headers = kwargs.get("extra_headers") or {}
+    assert headers.get("Header-Only") == "H"
+    assert "X-Trace" not in headers
+
+
 def test_llm_vision_support(default_llm):
     """Test LLM vision support detection."""
     llm = default_llm
@@ -246,8 +863,122 @@ def test_llm_function_calling_support(default_llm):
     llm = default_llm
 
     # Function calling support detection should work without errors
-    function_calling_active = llm.is_function_calling_active()
-    assert isinstance(function_calling_active, bool)
+    native_tool_calling = llm.native_tool_calling
+    assert isinstance(native_tool_calling, bool)
+
+
+def test_llm_function_calling_enabled_by_default():
+    """Test that function calling is enabled by default for all models."""
+    # Test with a known model
+    llm_known = LLM(
+        model="gpt-4o", api_key=SecretStr("test_key"), usage_id="test-known"
+    )
+    assert llm_known.native_tool_calling is True
+
+    # Test with an unknown model - should still be enabled by default
+    llm_unknown = LLM(
+        model="some-unknown-model-xyz",
+        api_key=SecretStr("test_key"),
+        usage_id="test-unknown",
+    )
+    assert llm_unknown.native_tool_calling is True
+
+
+def test_llm_function_calling_can_be_disabled():
+    """Test that users can opt-out of function calling via
+    native_tool_calling=False."""
+    # Test with a known model that normally has function calling
+    llm_disabled = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        native_tool_calling=False,
+        usage_id="test-disabled",
+    )
+    assert llm_disabled.native_tool_calling is False
+
+    # Test with an unknown model with function calling disabled
+    llm_unknown_disabled = LLM(
+        model="some-unknown-model-xyz",
+        api_key=SecretStr("test_key"),
+        native_tool_calling=False,
+        usage_id="test-unknown-disabled",
+    )
+    assert llm_unknown_disabled.native_tool_calling is False
+
+
+def test_llm_force_string_serializer_auto_detect():
+    """Test that force_string_serializer auto-detects based on model when None."""
+    # Test with a model that requires string serialization (DeepSeek)
+    llm_deepseek = LLM(
+        model="deepseek-v3",
+        api_key=SecretStr("test_key"),
+        usage_id="test-deepseek",
+    )
+    # Should be None at LLM level (auto-detect)
+    assert llm_deepseek.force_string_serializer is None
+    # When formatting messages, it should be set to True based on model features
+    messages = [Message(role="user", content=[TextContent(text="Hello")])]
+    formatted = llm_deepseek.format_messages_for_llm(messages)
+    # The formatted messages should have force_string_serializer applied
+    # For DeepSeek models, content should be a string (not list)
+    assert len(formatted) == 1
+    assert isinstance(formatted[0]["content"], str)
+
+    # Test with a model that doesn't require string serialization
+    llm_gpt = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        usage_id="test-gpt",
+        caching_prompt=False,  # Disable caching
+        native_tool_calling=False,  # Disable tool calling
+        disable_vision=True,  # Disable vision to test simple string case
+    )
+    assert llm_gpt.force_string_serializer is None
+    # When formatting messages for GPT without special features, uses string by default
+    formatted_gpt = llm_gpt.format_messages_for_llm(messages)
+    assert len(formatted_gpt) == 1
+    assert isinstance(formatted_gpt[0]["content"], str)
+
+
+def test_llm_force_string_serializer_override():
+    """Test force_string_serializer can be explicitly set to override auto-detect."""
+    # Set force_string_serializer=True for a model that normally doesn't need it
+    llm_force_true = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        force_string_serializer=True,
+        usage_id="test-force-true",
+    )
+    assert llm_force_true.force_string_serializer is True
+    # force_string_serializer=True should force string serialization
+    messages = [
+        Message(
+            role="user",
+            content=[TextContent(text="Test")],
+        )
+    ]
+    formatted = llm_force_true.format_messages_for_llm(messages)
+    assert isinstance(formatted[0]["content"], str)
+
+    # Explicitly set force_string_serializer=False for a model that normally needs it
+    # Use a model that supports caching to test list serialization
+    llm_force_false = LLM(
+        model="anthropic/claude-sonnet-4-20250514",  # Supports caching
+        api_key=SecretStr("test_key"),
+        force_string_serializer=False,
+        caching_prompt=True,  # Enable caching to trigger list serialization
+        usage_id="test-force-false",
+    )
+    assert llm_force_false.force_string_serializer is False
+    # With caching enabled and force_string_serializer=False, should use list
+    messages_cache = [
+        Message(
+            role="user",
+            content=[TextContent(text="Test")],
+        )
+    ]
+    formatted_cache = llm_force_false.format_messages_for_llm(messages_cache)
+    assert isinstance(formatted_cache[0]["content"], list)
 
 
 def test_llm_caching_support(default_llm):
@@ -280,7 +1011,7 @@ def test_llm_local_detection_based_on_model_name(default_llm):
 
     # Test basic model configuration
     assert llm.model == "gpt-4o"
-    assert llm.temperature == 0.0
+    assert llm.temperature is None  # Uses provider default
 
     # Test with localhost base_url
     local_llm = default_llm.model_copy(update={"base_url": "http://localhost:8000"})
@@ -294,15 +1025,21 @@ def test_llm_local_detection_based_on_model_name(default_llm):
 def test_llm_local_detection_based_on_base_url():
     """Test local model detection based on base_url."""
     # Test with localhost base_url
-    local_llm = LLM(model="gpt-4o", base_url="http://localhost:8000")
+    local_llm = LLM(
+        model="gpt-4o", base_url="http://localhost:8000", usage_id="test-llm"
+    )
     assert local_llm.base_url == "http://localhost:8000"
 
     # Test with 127.0.0.1 base_url
-    local_llm_ip = LLM(model="gpt-4o", base_url="http://127.0.0.1:8000")
+    local_llm_ip = LLM(
+        model="gpt-4o", base_url="http://127.0.0.1:8000", usage_id="test-llm"
+    )
     assert local_llm_ip.base_url == "http://127.0.0.1:8000"
 
     # Test with remote model
-    remote_llm = LLM(model="gpt-4o", base_url="https://api.openai.com/v1")
+    remote_llm = LLM(
+        model="gpt-4o", base_url="https://api.openai.com/v1", usage_id="test-llm"
+    )
     assert remote_llm.base_url == "https://api.openai.com/v1"
 
 
@@ -369,11 +1106,12 @@ def test_metrics_log():
 def test_llm_config_validation():
     """Test LLM configuration validation."""
     # Test with minimal valid config
-    llm = LLM(model="gpt-4o")
+    llm = LLM(model="gpt-4o", usage_id="test-llm")
     assert llm.model == "gpt-4o"
 
     # Test with full config
     full_llm = LLM(
+        usage_id="test-llm",
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         base_url="https://api.openai.com/v1",
@@ -405,6 +1143,7 @@ def test_llm_no_response_error(mock_completion):
 
     # Create LLM after the patch is applied
     llm = LLM(
+        usage_id="test-llm",
         model="gpt-4o",
         api_key=SecretStr("test_key"),
         num_retries=2,
@@ -471,11 +1210,6 @@ def test_token_usage_context_window():
 
 def test_telemetry_cost_calculation_header_exception():
     """Test telemetry cost calculation handles header parsing exceptions."""
-    from unittest.mock import Mock, patch
-
-    from openhands.sdk.llm.utils.metrics import Metrics
-    from openhands.sdk.llm.utils.telemetry import Telemetry
-
     # Create a mock response with headers that will cause an exception
     mock_response = Mock()
     mock_response.headers = {"x-litellm-cost": "invalid-float"}
@@ -500,6 +1234,488 @@ def test_telemetry_cost_calculation_header_exception():
             assert "Failed to get cost from LiteLLM headers:" in str(
                 mock_logger.debug.call_args
             )
+
+
+def test_enable_encrypted_reasoning_respects_flag_and_defaults_true():
+    """
+    Encrypted reasoning should be included only when:
+    - The request is stateless (store=False), and
+    - LLM.enable_encrypted_reasoning is True (default).
+
+    No model-based auto behavior; strictly respect the flag.
+    """
+    # Default behavior: flag is True
+    llm_default = LLM(
+        model="openai/gpt-5-mini",
+        api_key=SecretStr("test_key"),
+        usage_id="test-llm-default",
+    )
+    assert llm_default.enable_encrypted_reasoning is True
+
+    normalized_default = select_responses_options(
+        llm_default, {}, include=None, store=None
+    )
+    assert "reasoning.encrypted_content" in normalized_default.get("include", [])
+
+    # Explicit False disables encrypted reasoning even for GPT families
+    llm_disabled = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test_key"),
+        enable_encrypted_reasoning=False,
+        usage_id="test-llm-disabled",
+    )
+    assert llm_disabled.enable_encrypted_reasoning is False
+    normalized_disabled = select_responses_options(
+        llm_disabled, {}, include=None, store=None
+    )
+    assert "reasoning.encrypted_content" not in normalized_disabled.get("include", [])
+
+    # When store=True (stateful), do not include encrypted reasoning
+    normalized_stateful = select_responses_options(
+        llm_default, {}, include=None, store=True
+    )
+    assert "reasoning.encrypted_content" not in normalized_stateful.get("include", [])
+
+
+@patch("openhands.sdk.llm.llm.LLM._transport_call")
+def test_unmapped_model_with_logging_enabled(mock_transport):
+    """Test that unmapped models with logging enabled don't cause validation errors.
+
+    This is an integration test for issue #905 where unmapped models
+    (those not in LiteLLM's model_prices_and_context_window.json)
+    have max_input_tokens=None, which causes validation errors when
+    logging is enabled because the context_window gets set to None.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create an LLM with an unmapped model and logging enabled
+        llm = LLM(
+            model="openai/UnmappedTestModel",
+            api_key=SecretStr("test-key"),
+            base_url="https://test.example.com/v1",
+            log_completions=True,
+            log_completions_folder=tmpdir,
+        )
+
+        # Verify max_input_tokens is None (unmapped model)
+        assert llm.max_input_tokens is None
+
+        # Mock the transport call
+        mock_response = create_mock_litellm_response(
+            "Test response", model="UnmappedTestModel"
+        )
+        mock_transport.return_value = mock_response
+
+        # This should not raise a validation error
+        response = llm.completion(
+            messages=[Message(role="user", content=[TextContent(text="test")])]
+        )
+
+        assert response is not None
+        assert isinstance(response, LLMResponse)
+
+        # Verify token usage was recorded correctly with context_window=0
+        metrics = llm.metrics.get()
+        assert len(metrics["token_usages"]) == 1
+        token_usage = metrics["token_usages"][0]
+        assert isinstance(token_usage["context_window"], int)
+        # Should default to 0 when max_input_tokens is None
+        assert token_usage["context_window"] == 0
+
+
+# Context Window Validation Tests
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_llm_raises_error_on_small_context_window(mock_get_model_info):
+    """Test that LLM raises error when context window is too small."""
+    from openhands.sdk.llm.exceptions import LLMContextWindowTooSmallError
+    from openhands.sdk.llm.llm import MIN_CONTEXT_WINDOW_TOKENS
+
+    mock_get_model_info.return_value = {"max_input_tokens": 2048}
+
+    with pytest.raises(LLMContextWindowTooSmallError) as exc_info:
+        LLM(
+            model="ollama/test-model",
+            api_key=SecretStr("test-key"),
+            usage_id="test-llm",
+        )
+
+    assert exc_info.value.context_window == 2048
+    assert exc_info.value.min_required == MIN_CONTEXT_WINDOW_TOKENS
+    assert "docs.openhands.dev" in str(exc_info.value)
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_llm_respects_allow_short_context_windows_env_var(mock_get_model_info):
+    """Test that ALLOW_SHORT_CONTEXT_WINDOWS env var bypasses validation."""
+    import os
+
+    from openhands.sdk.llm.llm import ENV_ALLOW_SHORT_CONTEXT_WINDOWS
+
+    mock_get_model_info.return_value = {"max_input_tokens": 2048}
+
+    # Set the environment variable
+    with patch.dict(os.environ, {ENV_ALLOW_SHORT_CONTEXT_WINDOWS: "true"}):
+        # Should not raise
+        llm = LLM(
+            model="ollama/test-model",
+            api_key=SecretStr("test-key"),
+            usage_id="test-llm",
+        )
+        assert llm.max_input_tokens is None
+        assert llm.effective_max_input_tokens == 2048
+
+
+# LLM model_copy Tests
+
+
+def test_llm_model_copy_preserves_configuration():
+    """Test that model_copy preserves the LLM configuration."""
+    # Create original LLM with custom configuration
+    original = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="original-llm",
+        temperature=0.5,
+        max_output_tokens=1000,
+        caching_prompt=False,
+    )
+
+    # Copy with updated usage_id
+    copied = original.model_copy(update={"usage_id": "copied-llm"})
+
+    # Verify configuration is preserved
+    assert copied.model == original.model
+    assert copied.temperature == original.temperature
+    assert copied.max_output_tokens == original.max_output_tokens
+    assert copied.caching_prompt == original.caching_prompt
+
+    # Verify usage_id was updated
+    assert copied.usage_id == "copied-llm"
+    assert original.usage_id == "original-llm"
+
+
+def test_llm_reset_metrics():
+    """Test that reset_metrics creates fresh metrics and telemetry instances."""
+    llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    # Access metrics to trigger lazy initialization
+    original_metrics = llm.metrics
+    original_telemetry = llm.telemetry
+    original_metrics.add_cost(1.0)
+
+    # Reset metrics
+    llm.reset_metrics()
+
+    # Verify new metrics are created
+    assert llm._metrics is not None
+    assert llm._telemetry is not None
+    assert llm.metrics is not original_metrics
+    assert llm.telemetry is not original_telemetry
+    assert llm.metrics.accumulated_cost == 0.0
+
+
+def test_issue_2459_restore_metrics_syncs_telemetry():
+    """Restore metrics must update telemetry's reference to avoid desync.
+
+    After restore_metrics(), llm.telemetry.metrics must point to the same
+    object as llm.metrics. Otherwise post-resume LLM calls record
+    tokens/cost into a stale metrics object and accounting data is lost.
+
+    See: https://github.com/OpenHands/software-agent-sdk/issues/2459
+    """
+    llm = LLM(
+        model="gpt-4o-mini",
+        api_key=SecretStr("test-key"),
+    )
+
+    # Force telemetry creation (simulates normal init before resume)
+    _ = llm.telemetry
+
+    restored = Metrics(model_name=llm.model)
+    llm.restore_metrics(restored)
+
+    assert llm.metrics is restored
+    assert llm.telemetry.metrics is restored
+    assert llm.telemetry.metrics is llm.metrics
+
+
+@pytest.fixture
+def llm():
+    """Create a minimal SDK LLM for testing."""
+    return LLM(
+        model="openai/gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="test-service",
+    )
+
+
+def test_cost_recorded_in_restored_metrics(llm):
+    """Costs added via telemetry after restore must land in the restored Metrics."""
+    restored = Metrics(model_name="openai/gpt-4o")
+    restored.add_cost(5.00)
+    llm.restore_metrics(restored)
+
+    llm.telemetry.metrics.add_cost(0.50)
+
+    assert llm.metrics.accumulated_cost == 5.50
+    assert len(llm.metrics.costs) == 2
+
+
+def test_stale_metrics_not_updated(llm):
+    """The original (pre-restore) Metrics must not receive new costs."""
+    original_metrics = llm.metrics
+
+    restored = Metrics(model_name="openai/gpt-4o")
+    restored.add_cost(2.00)
+    llm.restore_metrics(restored)
+
+    llm.telemetry.metrics.add_cost(0.75)
+
+    assert original_metrics.accumulated_cost == 0.0
+    assert llm.metrics.accumulated_cost == 2.75
+
+
+def test_restore_metrics_telemetry_none():
+    """restore_metrics() must not crash when telemetry has not been initialized."""
+    llm = LLM(
+        model="openai/gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="test-service",
+    )
+    llm._telemetry = None
+
+    restored = Metrics(model_name="openai/gpt-4o")
+    restored.add_cost(1.00)
+    llm.restore_metrics(restored)
+
+    assert llm.metrics is restored
+    assert llm.metrics.accumulated_cost == 1.00
+
+
+def test_conversation_stats_restore_then_track():
+    """End-to-end: ConversationStats restores metrics, then new costs are tracked."""
+    saved_metrics = Metrics(model_name="openai/gpt-4o")
+    saved_metrics.add_cost(10.00)
+
+    stats = ConversationStats(usage_to_metrics={"agent": saved_metrics})
+
+    with patch("openhands.sdk.llm.llm.litellm_completion"):
+        llm = LLM(
+            model="openai/gpt-4o",
+            api_key=SecretStr("test-key"),
+            usage_id="agent",
+        )
+        event = RegistryEvent(llm=llm)
+        stats.register_llm(event)
+
+        assert llm.metrics.accumulated_cost == 10.00
+
+        # Simulate a new LLM response adding cost via telemetry
+        llm.telemetry.metrics.add_cost(0.25)
+
+        assert llm.metrics.accumulated_cost == 10.25
+        assert stats.get_combined_metrics().accumulated_cost == 10.25
+
+
+def test_telemetry_callback_preserved_across_revalidation():
+    """Telemetry callbacks must survive validators re-running on the LLM.
+
+    Wrapping an LLM in another Pydantic model (e.g. RegistryEvent) re-runs the
+    LLM's `mode="after"` validators. Before this fix, _set_env_side_effects
+    rebuilt _telemetry unconditionally, silently dropping any callback wired
+    via telemetry.set_*_callback() — which broke real-time stats streaming
+    from the agent server (no `key="stats"` events were ever emitted after
+    the first agent step).
+    """
+    llm = LLM(
+        model="openai/gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="agent",
+    )
+    fired: list[bool] = []
+    llm.telemetry.set_stats_update_callback(lambda: fired.append(True))
+    telemetry_before = llm._telemetry
+
+    RegistryEvent(llm=llm)
+
+    assert llm._telemetry is telemetry_before
+    assert llm.telemetry._stats_update_callback is not None
+    llm.telemetry._stats_update_callback()
+    assert fired == [True]
+
+
+# max_output_tokens Capping Tests
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_capped_when_using_max_tokens_fallback(mock_get_model_info):
+    """Test that max_output_tokens is capped when falling back to max_tokens.
+
+    Some providers (e.g., OpenRouter) set max_tokens to the context window size
+    rather than the output limit. Without capping, this could request output
+    that exceeds the context window.
+
+    See: https://github.com/OpenHands/software-agent-sdk/pull/2264
+    """
+    from openhands.sdk.llm.llm import DEFAULT_MAX_OUTPUT_TOKENS_CAP
+
+    # Simulate a model where max_tokens = context window (200k) but
+    # max_output_tokens is not set
+    mock_get_model_info.return_value = {
+        "max_tokens": 200000,  # This is the context window, not output limit
+        "max_output_tokens": None,
+        "max_input_tokens": 200000,
+    }
+
+    llm = LLM(
+        model="openrouter/anthropic/claude-3-haiku",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    # Config remains unset; the effective runtime value is capped.
+    assert llm.max_output_tokens is None
+    effective_max_output_tokens = llm.effective_max_output_tokens
+    assert effective_max_output_tokens is not None
+    assert effective_max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS_CAP
+    assert effective_max_output_tokens < 200000
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_uses_actual_value_when_available(mock_get_model_info):
+    """Test that actual max_output_tokens is used when available."""
+    # Simulate a model with proper max_output_tokens
+    mock_get_model_info.return_value = {
+        "max_tokens": 8192,
+        "max_output_tokens": 8192,
+        "max_input_tokens": 200000,
+    }
+
+    llm = LLM(
+        model="anthropic/claude-3-5-sonnet-latest",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    # Should use the actual effective max_output_tokens, not capped
+    assert llm.max_output_tokens is None
+    assert llm.effective_max_output_tokens == 8192
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_small_max_tokens_not_capped(mock_get_model_info):
+    """Test that small max_tokens fallback is not unnecessarily capped."""
+    from openhands.sdk.llm.llm import DEFAULT_MAX_OUTPUT_TOKENS_CAP
+
+    # Simulate a model where max_tokens is small (actual output limit)
+    mock_get_model_info.return_value = {
+        "max_tokens": 4096,  # This is the actual output limit
+        "max_output_tokens": None,
+        "max_input_tokens": None,
+    }
+
+    llm = LLM(
+        model="openrouter/test/small-model",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    # Should use the actual effective value since it's below the cap
+    assert llm.max_output_tokens is None
+    assert llm.effective_max_output_tokens == 4096
+    assert llm.effective_max_output_tokens < DEFAULT_MAX_OUTPUT_TOKENS_CAP
+
+
+def test_explicit_max_output_tokens_not_overridden():
+    """Test that explicitly set max_output_tokens is respected."""
+    llm = LLM(
+        model="gpt-4o",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+        max_output_tokens=32768,  # Explicitly set higher than cap
+    )
+
+    # Should respect the explicit value
+    assert llm.max_output_tokens == 32768
+    assert llm.effective_max_output_tokens == 32768
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_capped_when_equal_to_context_window(
+    mock_get_model_info,
+):
+    """max_output_tokens == context window leaves zero input headroom.
+
+    Strict providers (e.g. AWS Bedrock) reject every call when
+    max_output_tokens fills the entire context window.
+    """
+    mock_get_model_info.return_value = {
+        "max_output_tokens": 262144,
+        "max_input_tokens": 262144,
+    }
+
+    llm = LLM(
+        model="litellm_proxy/test-model-equal-windows",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    assert llm.max_output_tokens is None
+    assert llm.effective_max_output_tokens == 262144 // 2
+    assert llm.max_input_tokens is None
+    assert llm.effective_max_input_tokens == 262144
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_capped_when_equal_to_max_tokens(
+    mock_get_model_info,
+):
+    """max_output_tokens == max_tokens should also be halved.
+
+    Some registries only provide max_tokens (context window) without
+    max_input_tokens. The guard should still fire.
+    """
+    mock_get_model_info.return_value = {
+        "max_output_tokens": 131072,
+        "max_tokens": 131072,
+        "max_input_tokens": None,
+    }
+
+    llm = LLM(
+        model="litellm_proxy/test-model-max-tokens-only",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    assert llm.max_output_tokens is None
+    assert llm.effective_max_output_tokens == 131072 // 2
+
+
+@patch("openhands.sdk.llm.llm.get_litellm_model_info")
+def test_max_output_tokens_not_capped_when_below_context_window(
+    mock_get_model_info,
+):
+    """max_output_tokens < context window should be used as-is."""
+    mock_get_model_info.return_value = {
+        "max_output_tokens": 8192,
+        "max_input_tokens": 200000,
+    }
+
+    llm = LLM(
+        model="anthropic/claude-3-5-sonnet-latest",
+        api_key=SecretStr("test-key"),
+        usage_id="test-llm",
+    )
+
+    assert llm.max_output_tokens is None
+    assert llm.effective_max_output_tokens == 8192
 
 
 # LLM Registry Tests

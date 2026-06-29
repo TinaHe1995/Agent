@@ -200,4 +200,18 @@ cache
 .jinja_cache/
 
 .conversations*
-workspace/
+/workspace/
+openapi.json
+.client/
+
+# Local workspace files
+.beads/*.db
+.worktrees/
+agent-sdk.workspace.code-workspace
+
+# Integration test outputs
+tests/integration/outputs/
+tests/integration/api_compliance/outputs/
+
+# Agent-generated temp
+.agent_tmp/

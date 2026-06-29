@@ -1,10 +1,13 @@
 """Test based on hello_world.py example with mocked LLM responses."""
 
+import logging
 import os
+import sys
 import tempfile
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
+import pytest
 from litellm.types.utils import Choices, Message as LiteLLMMessage, ModelResponse, Usage
 from pydantic import SecretStr
 
@@ -12,22 +15,25 @@ from openhands.sdk import (
     LLM,
     Agent,
     Conversation,
-    Event,
     Message,
     TextContent,
-    Tool,
     get_logger,
 )
+from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+from openhands.sdk.event.base import Event
 from openhands.sdk.event.llm_convertible import (
     ActionEvent,
     MessageEvent,
     ObservationEvent,
 )
-from openhands.tools import (
-    BashExecutor,
-    FileEditorExecutor,
-    execute_bash_tool,
-    str_replace_editor_tool,
+from openhands.sdk.tool import Tool, register_tool
+from openhands.tools.file_editor import FileEditorTool
+from openhands.tools.terminal import TerminalTool
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Hello-world cross tests include TerminalTool until PowerShell follow-up.",
 )
 
 
@@ -36,10 +42,10 @@ class TestHelloWorld:
 
     def setup_method(self):
         """Set up test environment."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.logger = get_logger(__name__)
-        self.collected_events: List[Event] = []
-        self.llm_messages: List[Dict[str, Any]] = []
+        self.temp_dir: str = tempfile.mkdtemp()
+        self.logger: logging.Logger = get_logger(__name__)
+        self.collected_events: list[Event] = []
+        self.llm_messages: list[dict[str, Any]] = []
 
         # Clean up any existing hello.py files
         import os
@@ -113,7 +119,7 @@ class TestHelloWorld:
                                 "id": "call_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "str_replace_editor",
+                                    "name": "file_editor",
                                     "arguments": f'{{"command": "create", '
                                     f'"path": "{hello_path}", '
                                     f'"file_text": "print(\\"Hello, World!\\")"}}',
@@ -155,33 +161,34 @@ class TestHelloWorld:
 
         # Always use mock responses for consistent behavior
         # Real fixture data may have different tool call sequences than current agent
-        if not real_responses:
-            real_responses = self.create_mock_llm_responses()
-        else:
-            # Use mock responses to ensure consistent test behavior
-            real_responses = self.create_mock_llm_responses()
+        real_responses = self.create_mock_llm_responses()
 
         mock_completion.side_effect = real_responses
 
         # Configure LLM (no real API key needed)
         llm = LLM(
+            usage_id="test-llm",
             model="claude-sonnet-4",
             api_key=SecretStr("mock-api-key"),
         )
 
-        # Tools setup with temporary directory
-        bash = BashExecutor(working_dir=self.temp_dir)
-        file_editor = FileEditorExecutor()
-        tools: List[Tool] = [
-            execute_bash_tool.set_executor(executor=bash),
-            str_replace_editor_tool.set_executor(executor=file_editor),
+        # Tools setup with temporary directory - use registry + Tool as in runtime
+        register_tool("terminal", TerminalTool)
+        register_tool("file_editor", FileEditorTool)
+        tools = [
+            Tool(name="terminal"),
+            Tool(name="file_editor"),
         ]
 
         # Agent setup
         agent = Agent(llm=llm, tools=tools)
 
         # Conversation setup
-        conversation = Conversation(agent=agent, callbacks=[self.conversation_callback])
+        conversation = Conversation(
+            agent=agent,
+            workspace=self.temp_dir,
+            callbacks=[self.conversation_callback],
+        )
 
         # Send the same message as in hello_world.py
         conversation.send_message(
@@ -280,21 +287,26 @@ class TestHelloWorld:
 
         # Configure LLM with logging enabled
         llm = LLM(
+            usage_id="test-llm",
             model="claude-sonnet-4",
             api_key=SecretStr("mock-api-key"),
         )
 
-        # Tools setup with temporary directory
-        bash = BashExecutor(working_dir=self.temp_dir)
-        file_editor = FileEditorExecutor()
-        tools: List[Tool] = [
-            execute_bash_tool.set_executor(executor=bash),
-            str_replace_editor_tool.set_executor(executor=file_editor),
+        # Tools setup with temporary directory - use registry + Tool as in runtime
+        register_tool("terminal", TerminalTool)
+        register_tool("file_editor", FileEditorTool)
+        tools = [
+            Tool(name="terminal"),
+            Tool(name="file_editor"),
         ]
 
         # Create agent and conversation
         agent = Agent(llm=llm, tools=tools)
-        conversation = Conversation(agent=agent, callbacks=[self.conversation_callback])
+        conversation = Conversation(
+            agent=agent,
+            workspace=self.temp_dir,
+            callbacks=[self.conversation_callback],
+        )
 
         # Capture logged completion data by monitoring the LLM calls
         logged_completions = []
@@ -389,9 +401,6 @@ class TestHelloWorld:
             ModelResponse,
         )
 
-        from openhands.sdk.llm import LLM
-        from openhands.sdk.llm.message import Message, TextContent
-
         # Create a mock response without function calls (pure text response)
         mock_response = ModelResponse(
             id="test-non-func-call",
@@ -428,7 +437,7 @@ class TestHelloWorld:
             return mock_response
 
         # Create agent with mocked LLM
-        llm = LLM(model="claude-sonnet-4")
+        llm = LLM(model="claude-sonnet-4", usage_id="test-llm")
         agent = Agent(llm=llm, tools=[])
 
         # Mock the completion method
@@ -438,6 +447,7 @@ class TestHelloWorld:
         ):
             # Create conversation and send a message
             conversation = Conversation(agent=agent)
+            assert isinstance(conversation, LocalConversation)
             conversation.send_message(
                 message=Message(
                     role="user",
@@ -446,7 +456,7 @@ class TestHelloWorld:
             )
 
             # Run one step to get the non-function call response
-            agent.step(conversation.state, on_event=conversation._on_event)
+            agent.step(conversation, on_event=conversation._on_event)
 
         # Validate that we captured the completion data
         assert len(captured_completions) == 1, (
@@ -521,7 +531,7 @@ class TestHelloWorld:
             return mock_response
 
         # Create agent with mocked LLM
-        agent = Agent(llm=LLM(model="claude-sonnet-4"), tools=[])
+        agent = Agent(llm=LLM(model="claude-sonnet-4", usage_id="test-llm"), tools=[])
 
         # Mock the completion method
         with patch(
@@ -530,6 +540,7 @@ class TestHelloWorld:
         ):
             # Create conversation and send a message
             conversation = Conversation(agent=agent)
+            assert isinstance(conversation, LocalConversation)
             conversation.send_message(
                 message=Message(
                     role="user",
@@ -538,7 +549,7 @@ class TestHelloWorld:
             )
 
             # Run one step to get the non-function call response
-            agent.step(conversation.state, on_event=conversation._on_event)
+            agent.step(conversation, on_event=conversation._on_event)
 
         # Validate that we captured the completion data
         assert len(captured_completions) == 1, (

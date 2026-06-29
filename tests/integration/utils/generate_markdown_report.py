@@ -6,57 +6,126 @@ Generate markdown report for PR comments from consolidated JSON results.
 import argparse
 import json
 import sys
-from typing import List
 
 from tests.integration.schemas import (
     ConsolidatedResults,
     ModelTestResults,
+    TokenUsageData,
 )
 from tests.integration.utils.format_costs import format_cost
 
 
-def generate_model_summary_table(model_results: List[ModelTestResults]) -> str:
+def format_token_usage(token_usage: TokenUsageData | None) -> str:
+    """Format token usage for display."""
+    if token_usage is None:
+        return "N/A"
+
+    parts = []
+    if token_usage.prompt_tokens > 0:
+        parts.append(f"prompt: {token_usage.prompt_tokens:,}")
+    if token_usage.completion_tokens > 0:
+        parts.append(f"completion: {token_usage.completion_tokens:,}")
+    if token_usage.cache_read_tokens > 0:
+        parts.append(f"cache_read: {token_usage.cache_read_tokens:,}")
+    if token_usage.cache_write_tokens > 0:
+        parts.append(f"cache_write: {token_usage.cache_write_tokens:,}")
+    if token_usage.reasoning_tokens > 0:
+        parts.append(f"reasoning: {token_usage.reasoning_tokens:,}")
+
+    if not parts:
+        return "0"
+
+    return ", ".join(parts)
+
+
+def format_token_usage_short(token_usage: TokenUsageData | None) -> str:
+    """Format token usage in a short format for tables."""
+    if token_usage is None:
+        return "N/A"
+
+    total = token_usage.prompt_tokens + token_usage.completion_tokens
+    if total == 0:
+        return "0"
+
+    return f"{total:,}"
+
+
+def generate_model_summary_table(model_results: list[ModelTestResults]) -> str:
     """Generate a summary table for all models."""
 
     table_lines = [
-        "| Model | Success Rate | Tests Passed | Total Tests | Cost |",
-        "|-------|--------------|--------------|-------------|------|",
+        ("| Model | Overall | Tests Passed | Skipped | Total | Cost | Tokens |"),
+        ("|-------|---------|--------------|---------|-------|------|--------|"),
     ]
 
     for result in model_results:
-        success_rate = f"{result.success_rate:.1%}"
-        tests_passed = f"{result.successful_tests}/{result.total_tests}"
+        overall_success = f"{result.success_rate:.1%}"
+        non_skipped = result.total_tests - result.skipped_tests
+        tests_passed = f"{result.successful_tests}/{non_skipped}"
+        skipped = f"{result.skipped_tests}"
         cost = format_cost(result.total_cost)
+        tokens = format_token_usage_short(result.total_token_usage)
 
         model_name = result.model_name
         total_tests = result.total_tests
         row = (
-            f"| {model_name} | {success_rate} | {tests_passed} | "
-            f"{total_tests} | {cost} |"
+            f"| {model_name} | {overall_success} | {tests_passed} | {skipped} | "
+            f"{total_tests} | {cost} | {tokens} |"
         )
         table_lines.append(row)
 
     return "\n".join(table_lines)
 
 
-def generate_detailed_results(model_results: List[ModelTestResults]) -> str:
+def generate_detailed_results(model_results: list[ModelTestResults]) -> str:
     """Generate detailed results for each model."""
 
     sections = []
 
     for result in model_results:
+        non_skipped = result.total_tests - result.skipped_tests
         section_lines = [
             f"### {result.model_name}",
             "",
             f"- **Success Rate**: {result.success_rate:.1%} "
-            f"({result.successful_tests}/{result.total_tests})",
-            f"- **Total Cost**: {format_cost(result.total_cost)}",
-            f"- **Run Suffix**: `{result.run_suffix}`",
-            "",
+            f"({result.successful_tests}/{non_skipped})",
         ]
 
+        section_lines.extend(
+            [
+                f"- **Total Cost**: {format_cost(result.total_cost)}",
+                f"- **Token Usage**: {format_token_usage(result.total_token_usage)}",
+                f"- **Run Suffix**: `{result.run_suffix}`",
+            ]
+        )
+
+        if result.skipped_tests > 0:
+            section_lines.append(f"- **Skipped Tests**: {result.skipped_tests}")
+
+        section_lines.append("")
+
+        # Add skipped tests if any
+        skipped_tests = [t for t in result.test_instances if t.test_result.skipped]
+        if skipped_tests:
+            section_lines.extend(
+                [
+                    "**Skipped Tests:**",
+                    "",
+                ]
+            )
+
+            for test in skipped_tests:
+                reason = test.test_result.reason or "No reason provided"
+                section_lines.append(f"- `{test.instance_id}`: {reason}")
+
+            section_lines.append("")
+
         # Add failed tests if any
-        failed_tests = [t for t in result.test_instances if not t.test_result.success]
+        failed_tests = [
+            t
+            for t in result.test_instances
+            if not t.test_result.success and not t.test_result.skipped
+        ]
         if failed_tests:
             section_lines.extend(
                 [
@@ -106,6 +175,35 @@ def generate_markdown_report(consolidated: ConsolidatedResults) -> str:
         "",
     ]
 
+    # Add artifacts section if any model has artifact URLs
+    artifacts_available = any(
+        result.artifact_url for result in consolidated.model_results
+    )
+    if artifacts_available:
+        report_lines.extend(
+            [
+                "<details>",
+                "<summary>📁 Detailed Logs & Artifacts</summary>",
+                "",
+                (
+                    "Click the links below to access detailed agent/LLM logs showing "
+                    "the complete reasoning process for each model. "
+                    "On the GitHub Actions page, scroll down to the 'Artifacts' "
+                    "section to download the logs."
+                ),
+                "",
+            ]
+        )
+
+        for result in consolidated.model_results:
+            if result.artifact_url:
+                report_lines.append(
+                    f"- **{result.model_name}**: "
+                    f"[📥 View & Download Logs]({result.artifact_url})"
+                )
+
+        report_lines.append("")  # Add empty line after artifacts section
+
     # Summary table
     report_lines.extend(
         [
@@ -124,6 +222,9 @@ def generate_markdown_report(consolidated: ConsolidatedResults) -> str:
             generate_detailed_results(consolidated.model_results),
         ]
     )
+
+    if artifacts_available:
+        report_lines.extend(["", "</details>"])
 
     return "\n".join(report_lines)
 
@@ -150,7 +251,7 @@ def main():
             f"Loading consolidated results from {args.input_file}...", file=sys.stderr
         )
 
-        with open(args.input_file, "r") as f:
+        with open(args.input_file) as f:
             data = json.load(f)
 
         consolidated = ConsolidatedResults.model_validate(data)

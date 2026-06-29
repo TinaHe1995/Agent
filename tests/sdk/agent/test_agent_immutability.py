@@ -12,7 +12,9 @@ class TestAgentImmutability:
 
     def setup_method(self):
         """Set up test environment."""
-        self.llm = LLM(model="gpt-4", api_key=SecretStr("test-key"))
+        self.llm: LLM = LLM(
+            model="gpt-4o-mini", api_key=SecretStr("test-key"), usage_id="test-llm"
+        )
 
     def test_agent_is_frozen(self):
         """Test that Agent instances are frozen (immutable)."""
@@ -27,16 +29,16 @@ class TestAgentImmutability:
 
         # Verify the agent remains functional after failed modification attempts
         assert agent.llm == self.llm
-        assert isinstance(agent.system_message, str)
-        assert len(agent.system_message) > 0
+        assert isinstance(agent.static_system_message, str)
+        assert len(agent.static_system_message) > 0
 
     def test_system_message_is_computed_property(self):
         """Test that system_message is computed on-demand, not stored."""
         agent = Agent(llm=self.llm, tools=[])
 
         # Get system message multiple times - should be consistent
-        msg1 = agent.system_message
-        msg2 = agent.system_message
+        msg1 = agent.static_system_message
+        msg2 = agent.static_system_message
 
         # Should be the same content and valid
         assert msg1 == msg2
@@ -51,18 +53,6 @@ class TestAgentImmutability:
         assert any(
             keyword in msg1.lower() for keyword in ["assistant", "help", "task", "user"]
         )
-
-    def test_agent_with_different_configs_are_different(self):
-        """Test that agents with different configs produce different system messages."""
-        agent1 = Agent(llm=self.llm, tools=[], system_prompt_kwargs={"cli_mode": True})
-        agent2 = Agent(llm=self.llm, tools=[], system_prompt_kwargs={"cli_mode": False})
-
-        # System messages should be different due to cli_mode
-        msg1 = agent1.system_message
-        msg2 = agent2.system_message
-
-        # They should be different (cli_mode affects the template)
-        assert msg1 != msg2
 
     def test_condenser_property_access(self):
         """Test that condenser property works correctly."""
@@ -81,13 +71,13 @@ class TestAgentImmutability:
         # Test inherited properties from AgentBase
         assert agent.llm == self.llm
 
-        assert isinstance(agent.tools, dict)
+        assert isinstance(agent.tools, list)
         assert agent.agent_context is None
         assert agent.name == "Agent"
         assert isinstance(agent.prompt_dir, str)
 
         # Test Agent-specific properties
-        assert isinstance(agent.system_message, str)
+        assert isinstance(agent.static_system_message, str)
         assert agent.condenser is None
         assert agent.system_prompt_filename == "system_prompt.j2"
 
@@ -97,7 +87,7 @@ class TestAgentImmutability:
 
         # Access system_message multiple times
         for _ in range(3):
-            msg = agent.system_message
+            msg = agent.static_system_message
             assert isinstance(msg, str)
             assert len(msg) > 0
 
@@ -123,20 +113,25 @@ class TestAgentImmutability:
             llm=self.llm, tools=[], system_prompt_filename="system_prompt.j2"
         )
 
-        # They should have the same configuration
-        assert agent1 == agent2
+        # Compare via model_dump() because direct equality (agent1 == agent2)
+        # fails: each agent has its own ParallelToolExecutor instance via
+        # PrivateAttr(default_factory=...), and Pydantic frozen models include
+        # private attrs in __eq__.
+        assert agent1.model_dump() == agent2.model_dump()
         assert agent1.system_prompt_filename == agent2.system_prompt_filename
 
         # But they should be different instances
         assert agent1 is not agent2
 
         # And their system messages should be identical (same config)
-        assert agent1.system_message == agent2.system_message
+        assert agent1.static_system_message == agent2.static_system_message
 
     def test_agent_model_copy_creates_new_instance(self):
         """Test that model_copy creates a new Agent instance with modified fields."""
         original_agent = Agent(
-            llm=self.llm, tools=[], system_prompt_kwargs={"cli_mode": True}
+            llm=self.llm,
+            tools=[],
+            system_prompt_kwargs={"cli_mode": True},
         )
 
         # Create a copy with modified fields
@@ -148,4 +143,6 @@ class TestAgentImmutability:
         assert modified_agent is not original_agent
 
         # Verify that system messages are different due to different configs
-        assert original_agent.system_message != modified_agent.system_message
+        assert (
+            original_agent.static_system_message != modified_agent.static_system_message
+        )

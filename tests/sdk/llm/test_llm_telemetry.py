@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from litellm.types.utils import ModelResponse, Usage
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from openhands.sdk.llm.utils.metrics import Metrics
 from openhands.sdk.llm.utils.telemetry import Telemetry, _safe_json
@@ -101,15 +101,16 @@ class TestTelemetryLifecycle:
         assert basic_telemetry._req_ctx == {}
 
     def test_on_request_with_context(self, basic_telemetry):
-        """Test on_request method with log context."""
-        log_ctx = {"context_window": 4096, "user_id": "test-user"}
-        basic_telemetry.on_request(log_ctx)
+        """Test on_request method with telemetry context."""
+        telemetry_ctx = {"context_window": 4096, "user_id": "test-user"}
+        basic_telemetry.on_request(telemetry_ctx)
 
-        assert basic_telemetry._req_ctx == log_ctx
+        assert basic_telemetry._req_ctx == telemetry_ctx
 
-    def test_on_error_stub(self, basic_telemetry):
-        """Test on_error method (currently a stub)."""
+    def test_on_error_noop_when_logging_disabled(self, basic_telemetry):
+        """Test on_error method when logging is disabled."""
         # Should not raise any exceptions
+        basic_telemetry.on_request({"context_window": 4096})
         basic_telemetry.on_error(Exception("test error"))
 
     @patch("time.time")
@@ -133,11 +134,7 @@ class TestTelemetryLifecycle:
         # Create a ModelResponse with usage data
         response = ModelResponse(
             id="test-response-id",
-            usage=Usage(
-                prompt_tokens=100,
-                completion_tokens=50,
-                total_tokens=150,
-            ),
+            usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
         )
 
         basic_telemetry.on_response(response)
@@ -209,6 +206,21 @@ class TestTelemetryTokenUsage:
         token_usage = basic_telemetry.metrics.token_usages[0]
         assert token_usage.prompt_tokens == 0
         assert token_usage.completion_tokens == 0
+
+    def test_record_usage_with_none_context_window(self, basic_telemetry):
+        """Test token usage recording with None context_window.
+
+        This tests issue #905 where unmapped models have
+        max_input_tokens=None. The fix ensures that None values
+        are handled by converting them to 0 before reaching telemetry.
+        """
+        usage = Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+
+        # Simulate the case where context_window is None (unmapped model)
+        # This should raise a validation error at the telemetry level
+        # The fix is applied at the LLM level before calling _record_usage
+        with pytest.raises(ValidationError, match="Input should be a valid integer"):
+            basic_telemetry._record_usage(usage, "test-id", None)  # type: ignore[arg-type]
 
 
 class TestTelemetryCostCalculation:
@@ -320,6 +332,61 @@ class TestTelemetryCostCalculation:
             # Should strip provider prefix
             call_kwargs = mock_cost.call_args[1]
             assert call_kwargs["model"] == "gpt-4o-mini"
+            assert call_kwargs["custom_llm_provider"] == "provider"
+
+    def test_compute_cost_passes_provider_to_litellm_cost_calculator(
+        self, mock_metrics
+    ):
+        telemetry = Telemetry(
+            model_name="vertex_ai/claude-sonnet-4-5@20250929",
+            metrics=mock_metrics,
+        )
+
+        resp = ModelResponse(
+            id="test-id",
+            choices=[],
+            created=1234567890,
+            model="claude-sonnet-4-5@20250929",
+            object="chat.completion",
+        )
+
+        with patch(
+            "openhands.sdk.llm.utils.telemetry.litellm_completion_cost"
+        ) as mock_cost:
+            mock_cost.return_value = 0.10
+            telemetry._compute_cost(resp)
+
+            mock_cost.assert_called_once()
+            kwargs = mock_cost.call_args.kwargs
+            assert kwargs["model"] == "claude-sonnet-4-5@20250929"
+            assert kwargs["custom_llm_provider"] == "vertex_ai"
+
+    def test_compute_cost_passes_provider_to_litellm_cost_calculator_azure(
+        self, mock_metrics
+    ):
+        telemetry = Telemetry(
+            model_name="azure/responses/gpt-5.2-chat",
+            metrics=mock_metrics,
+        )
+
+        resp = ModelResponse(
+            id="test-id",
+            choices=[],
+            created=1234567890,
+            model="gpt-5.2-chat",
+            object="chat.completion",
+        )
+
+        with patch(
+            "openhands.sdk.llm.utils.telemetry.litellm_completion_cost"
+        ) as mock_cost:
+            mock_cost.return_value = 0.05
+            telemetry._compute_cost(resp)
+
+            mock_cost.assert_called_once()
+            kwargs = mock_cost.call_args.kwargs
+            assert kwargs["model"] == "responses/gpt-5.2-chat"
+            assert kwargs["custom_llm_provider"] == "azure"
 
 
 class TestTelemetryLogging:
@@ -345,7 +412,7 @@ class TestTelemetryLogging:
         )
 
         # Should return early without error
-        telemetry._log_completion(mock_response, 0.25)
+        telemetry.log_llm_call(mock_response, 0.25)
 
     def test_log_completion_success(self, mock_metrics, mock_response):
         """Test successful completion logging."""
@@ -361,14 +428,14 @@ class TestTelemetryLogging:
             telemetry.on_request({"user_id": "test-user", "context_window": 4096})
             telemetry._last_latency = 1.5
 
-            telemetry._log_completion(mock_response, 0.25)
+            telemetry.log_llm_call(mock_response, 0.25)
 
             # Should create a log file
             files = os.listdir(temp_dir)
             assert len(files) == 1
 
             # Check file content
-            with open(os.path.join(temp_dir, files[0]), "r") as f:
+            with open(os.path.join(temp_dir, files[0])) as f:
                 data = json.loads(f.read())
 
             assert data["user_id"] == "test-user"
@@ -377,6 +444,54 @@ class TestTelemetryLogging:
             assert data["latency_sec"] == 1.5
             assert "response" in data
             assert "timestamp" in data
+
+    def test_log_error_success(self, mock_metrics):
+        """Test that failed requests are logged when logging is enabled."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            telemetry = Telemetry(
+                model_name="gpt-4o",
+                log_enabled=True,
+                log_dir=temp_dir,
+                metrics=mock_metrics,
+            )
+
+            telemetry.on_request(
+                {
+                    "llm_path": "responses",
+                    "context_window": 4096,
+                    "instructions": "test instructions",
+                    "input": [
+                        {"type": "reasoning", "id": "rs_test", "summary": []},
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "hi"}],
+                        },
+                    ],
+                    "kwargs": {"foo": "bar"},
+                }
+            )
+
+            telemetry.on_error(ValueError("boom"))
+
+            files = os.listdir(temp_dir)
+            assert len(files) == 1
+            assert files[0].endswith("-error.json")
+
+            with open(os.path.join(temp_dir, files[0])) as f:
+                data = json.loads(f.read())
+
+            assert data["llm_path"] == "responses"
+            assert data["context_window"] == 4096
+            assert data["instructions"] == "test instructions"
+            assert data["input"][0]["type"] == "reasoning"
+            assert "error" in data
+            assert data["error"]["type"] == "ValueError"
+            assert data["error"]["message"] == "boom"
+            assert "traceback" in data["error"]
+            assert data["cost"] == 0.0
+            assert "timestamp" in data
+            assert "latency_sec" in data
 
     def test_log_completion_with_raw_response(self, mock_metrics, mock_response):
         """Test logging with raw response included."""
@@ -397,15 +512,59 @@ class TestTelemetryLogging:
             )
 
             telemetry.on_request({})
-            telemetry._log_completion(mock_response, 0.25, raw_resp=raw_response)
+            telemetry.log_llm_call(mock_response, 0.25, raw_resp=raw_response)
 
             files = os.listdir(temp_dir)
-            with open(os.path.join(temp_dir, files[0]), "r") as f:
+            with open(os.path.join(temp_dir, files[0])) as f:
                 data = json.loads(f.read())
 
             assert "raw_response" in data
 
-    def test_log_completion_model_name_sanitization(self, mock_metrics, mock_response):
+    def test_log_completion_with_pydantic_objects_in_context(
+        self, mock_metrics, mock_response
+    ):
+        """
+        Ensure logging works when log_ctx contains Pydantic models with
+        excluded fields. This simulates the remote-run case where tools
+        (Pydantic models with excluded runtime-only fields like executors)
+        are included in the log context. Using Pydantic's model_dump should
+        avoid circular references.
+        """
+
+        class SelfReferencingModel(BaseModel):
+            name: str
+            # Simulate an executor-like field that should not be serialized
+            executor: object | None = Field(default=None, exclude=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            telemetry = Telemetry(
+                model_name="gpt-4o",
+                log_enabled=True,
+                log_dir=temp_dir,
+                metrics=mock_metrics,
+            )
+
+            # Create a self-referencing instance via an excluded field
+            m = SelfReferencingModel(name="tool-like")
+            m.executor = m  # would create a cycle if serialized via __dict__
+
+            telemetry.on_request({"tools": [m]})
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                telemetry.log_llm_call(mock_response, 0.25)
+
+            # Should not raise circular reference warnings
+            msgs = [str(x.message) for x in w]
+            assert not any("Circular reference detected" in s for s in msgs)
+
+            # Log file should be created and readable JSON
+            files = os.listdir(temp_dir)
+            assert len(files) == 1
+            with open(os.path.join(temp_dir, files[0])) as f:
+                data = json.loads(f.read())
+            assert "response" in data
+
         """Test that model names with slashes are sanitized in filenames."""
         with tempfile.TemporaryDirectory() as temp_dir:
             telemetry = Telemetry(
@@ -416,7 +575,7 @@ class TestTelemetryLogging:
             )
 
             telemetry.on_request({})
-            telemetry._log_completion(mock_response, 0.25)
+            telemetry.log_llm_call(mock_response, 0.25)
 
             files = os.listdir(temp_dir)
             assert len(files) == 1
@@ -442,7 +601,7 @@ class TestTelemetryLogging:
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                telemetry._log_completion(mock_response, 0.25)
+                telemetry.log_llm_call(mock_response, 0.25)
 
                 # Should issue a warning but not crash
                 assert len(w) == 1
@@ -474,17 +633,13 @@ class TestTelemetryIntegration:
             )
 
             # Start request
-            log_ctx = {"user_id": "test-user", "context_window": 4096}
-            telemetry.on_request(log_ctx)
+            telemetry_ctx = {"user_id": "test-user", "context_window": 4096}
+            telemetry.on_request(telemetry_ctx)
 
             # Create response with usage (ModelResponse format)
             response = ModelResponse(
                 id="test-response-id",
-                usage=Usage(
-                    prompt_tokens=100,
-                    completion_tokens=50,
-                    total_tokens=150,
-                ),
+                usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
             )
 
             with patch(
@@ -544,8 +699,8 @@ class TestSafeJsonFunction:
 
         class TestObj:
             def __init__(self):
-                self.attr1 = "value1"
-                self.attr2 = 42
+                self.attr1: str = "value1"
+                self.attr2: int = 42
 
         obj = TestObj()
         result = _safe_json(obj)
@@ -577,6 +732,86 @@ class TestSafeJsonFunction:
 
 class TestTelemetryEdgeCases:
     """Test edge cases and error conditions."""
+
+    def test_log_completions_no_serialization_warnings(self, mock_metrics):
+        """Test logging completions without Pydantic serialization warnings.
+
+        This reproduces the issue where logging completions with nested Message
+        and Choices objects caused PydanticSerializationUnexpectedValue warnings.
+        """
+        from litellm.types.utils import (
+            Choices,
+            Message as LiteLLMMessage,
+            ModelResponse,
+            Usage,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            telemetry = Telemetry(
+                model_name="gpt-4o",
+                log_enabled=True,
+                log_dir=temp_dir,
+                metrics=mock_metrics,
+            )
+
+            # Create a realistic ModelResponse with nested Message and Choices
+            message = LiteLLMMessage(
+                content="Test response content",
+                role="assistant",
+                tool_calls=None,
+                function_call=None,
+            )
+            choice = Choices(
+                finish_reason="stop",
+                index=0,
+                message=message,
+                logprobs=None,
+            )
+            usage = Usage(
+                prompt_tokens=100,
+                completion_tokens=50,
+                total_tokens=150,
+            )
+            response = ModelResponse(
+                id="test-response-id",
+                choices=[choice],
+                created=1234567890,
+                model="gpt-4o",
+                object="chat.completion",
+                usage=usage,
+            )
+
+            telemetry.on_request({"user_id": "test-user", "context_window": 4096})
+            telemetry._last_latency = 1.5
+
+            # This should not produce any Pydantic serialization warnings
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                telemetry.log_llm_call(response, 0.25)
+
+                # Check that no Pydantic serialization warnings were raised
+                pydantic_warnings = [
+                    warning
+                    for warning in w
+                    if "PydanticSerializationUnexpectedValue" in str(warning.message)
+                    or "Circular reference detected" in str(warning.message)
+                ]
+                if pydantic_warnings:
+                    for pw in pydantic_warnings:
+                        print(f"Warning: {pw.message}")
+                assert len(pydantic_warnings) == 0, (
+                    f"Got unexpected serialization warnings: {pydantic_warnings}"
+                )
+
+            # Verify the log file was created successfully
+            files = os.listdir(temp_dir)
+            assert len(files) == 1
+
+            # Verify the content can be read back
+            with open(os.path.join(temp_dir, files[0])) as f:
+                data = json.loads(f.read())
+                assert "response" in data
+                assert data["cost"] == 0.25
 
     def test_on_response_without_on_request(self, basic_telemetry, mock_response):
         """Test on_response called without prior on_request."""
@@ -648,3 +883,66 @@ class TestTelemetryEdgeCases:
             assert metrics.accumulated_cost == 0.0
             # Should NOT add zero cost to costs list (0.0 is falsy)
             assert len(basic_telemetry.metrics.costs) == 0
+
+
+class TestTelemetryCallbacks:
+    """Test callback functionality for log streaming and stats updates."""
+
+    def test_set_log_callback(self, basic_telemetry):
+        """Test setting log callback."""
+        callback_called = []
+
+        def log_callback(filename: str, log_data: str):
+            callback_called.append((filename, log_data))
+
+        basic_telemetry.set_log_completions_callback(log_callback)
+        assert basic_telemetry._log_completions_callback == log_callback
+
+        # Clear callback
+        basic_telemetry.set_log_completions_callback(None)
+        assert basic_telemetry._log_completions_callback is None
+
+    def test_set_stats_update_callback(self, basic_telemetry):
+        """Test setting stats update callback."""
+        callback_called = []
+
+        def stats_callback():
+            callback_called.append(True)
+
+        basic_telemetry.set_stats_update_callback(stats_callback)
+        assert basic_telemetry._stats_update_callback == stats_callback
+
+        # Clear callback
+        basic_telemetry.set_stats_update_callback(None)
+        assert basic_telemetry._stats_update_callback is None
+
+    def test_stats_update_callback_triggered_on_response(
+        self, basic_telemetry, mock_response
+    ):
+        """Test that stats update callback is triggered on response."""
+        callback_called = []
+
+        def stats_callback():
+            callback_called.append(True)
+
+        basic_telemetry.set_stats_update_callback(stats_callback)
+        basic_telemetry.on_request(None)
+        basic_telemetry.on_response(mock_response)
+
+        # Callback should be triggered once after response
+        assert len(callback_called) == 1
+
+    def test_stats_update_callback_exception_handling(
+        self, basic_telemetry, mock_response
+    ):
+        """Test that exceptions in stats callback don't break on_response."""
+
+        def failing_callback():
+            raise Exception("Callback failed")
+
+        basic_telemetry.set_stats_update_callback(failing_callback)
+        basic_telemetry.on_request(None)
+
+        # Should not raise exception even if callback fails
+        metrics = basic_telemetry.on_response(mock_response)
+        assert isinstance(metrics, Metrics)

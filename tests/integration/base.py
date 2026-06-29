@@ -3,23 +3,78 @@ Base classes for agent-sdk integration tests.
 """
 
 import os
+import sys
 from abc import ABC, abstractmethod
-from typing import Any
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from typing import Any, Literal
 
 from pydantic import BaseModel, SecretStr
 
 from openhands.sdk import (
     LLM,
     Agent,
-    Conversation,
-    Event,
     Message,
     TextContent,
 )
+from openhands.sdk.context.condenser import CondenserBase
+from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+from openhands.sdk.conversation.visualizer import DefaultConversationVisualizer
+from openhands.sdk.event.base import Event
 from openhands.sdk.event.llm_convertible import (
     MessageEvent,
 )
 from openhands.sdk.tool import Tool
+from tests.integration.early_stopper import EarlyStopperBase, EarlyStopResult
+
+
+# Tool preset type for selecting which file editing toolset to use
+ToolPresetType = Literal["default", "gemini", "gpt5", "planning"]
+
+
+def get_tools_for_preset(
+    preset: ToolPresetType, enable_browser: bool = False
+) -> list[Tool]:
+    """Get the list of tools for the given preset.
+
+    Args:
+        preset: The tool preset to use (default, gemini, gpt5, or planning).
+        enable_browser: Whether to include browser tools.
+
+    Returns:
+        List of Tool instances for the given preset.
+    """
+    match preset:
+        case "gemini":
+            from openhands.tools.preset.gemini import get_gemini_tools
+
+            return get_gemini_tools(enable_browser=enable_browser)
+        case "gpt5":
+            from openhands.tools.preset.gpt5 import get_gpt5_tools
+
+            return get_gpt5_tools(enable_browser=enable_browser)
+        case "planning":
+            from openhands.tools.preset.planning import get_planning_tools
+
+            # Planning preset is read-only and doesn't support browser tools
+            return get_planning_tools()
+        case "default":
+            from openhands.tools.preset.default import get_default_tools
+
+            return get_default_tools(enable_browser=enable_browser)
+        case _:
+            raise ValueError(f"Unknown `preset` parameter: {preset}")
+
+
+class SkipTest(Exception):
+    """
+    Exception raised to indicate that a test should be skipped.
+
+    This is useful for tests that require specific capabilities (e.g., vision)
+    that may not be available in all LLMs.
+    """
+
+    pass
 
 
 class TestResult(BaseModel):
@@ -27,6 +82,7 @@ class TestResult(BaseModel):
 
     success: bool
     reason: str | None = None
+    skipped: bool = False
 
 
 class BaseIntegrationTest(ABC):
@@ -39,6 +95,9 @@ class BaseIntegrationTest(ABC):
 
     Unlike the OpenHands approach which uses a Runtime, this uses tools
     directly with temporary directories for isolation.
+
+    Tool presets are passed via the tool_preset constructor parameter to select
+    which file editing toolset to use (default, gemini, gpt5, or planning).
     """
 
     INSTRUCTION: str
@@ -47,11 +106,15 @@ class BaseIntegrationTest(ABC):
         self,
         instruction: str,
         llm_config: dict[str, Any],
-        cwd: str | None = None,
+        instance_id: str,
+        workspace: str,
+        tool_preset: ToolPresetType = "default",
     ):
-        self.instruction = instruction
-        self.llm_config = llm_config
-        self.cwd = cwd
+        self.instruction: str = instruction
+        self.llm_config: dict[str, Any] = llm_config
+        self.workspace: str = workspace
+        self.instance_id: str = instance_id
+        self.tool_preset: ToolPresetType = tool_preset
         api_key = os.getenv("LLM_API_KEY")
         if not api_key:
             raise ValueError(
@@ -70,12 +133,29 @@ class BaseIntegrationTest(ABC):
             "api_key": SecretStr(api_key),
         }
 
-        self.llm = LLM(**llm_kwargs)
-        self.agent = Agent(llm=self.llm, tools=self.tools)
+        self.llm: LLM = LLM(**llm_kwargs, usage_id="test-llm")
+        self.agent: Agent = Agent(
+            llm=self.llm, tools=self.tools, condenser=self.condenser
+        )
         self.collected_events: list[Event] = []
         self.llm_messages: list[dict[str, Any]] = []
-        self.conversation: Conversation = Conversation(
-            agent=self.agent, callbacks=[self.conversation_callback]
+
+        # Create log file path for this test instance
+        self.log_file_path: str = os.path.join(
+            self.workspace, f"{self.instance_id}_agent_logs.txt"
+        )
+
+        # Early stopping support - must be initialized BEFORE LocalConversation
+        # since the callback may access these attributes
+        self.early_stopper: EarlyStopperBase | None = None
+        self.early_stop_result: EarlyStopResult | None = None
+
+        self.conversation: LocalConversation = LocalConversation(
+            agent=self.agent,
+            workspace=self.workspace,
+            callbacks=[self.conversation_callback],
+            visualizer=DefaultConversationVisualizer(),  # Use default visualizer
+            max_iteration_per_run=self.max_iteration_per_run,
         )
 
     def conversation_callback(self, event: Event):
@@ -84,7 +164,14 @@ class BaseIntegrationTest(ABC):
         if isinstance(event, MessageEvent):
             self.llm_messages.append(event.llm_message.model_dump())
 
-    def run_instruction(self) -> TestResult:
+        # Check early stopping condition
+        if self.early_stopper and not self.early_stop_result:
+            result = self.early_stopper.check(self.collected_events)
+            if result.should_stop:
+                self.early_stop_result = result
+                self.conversation.pause()  # Trigger graceful stop
+
+    def run_integration_test(self) -> TestResult:
         """
         Run user instruction through the agent and verify results.
 
@@ -95,17 +182,53 @@ class BaseIntegrationTest(ABC):
             # Setup
             self.setup()
 
-            self.conversation.send_message(
-                message=Message(
-                    role="user", content=[TextContent(text=self.instruction)]
+            # Initialize log file with header
+            with open(self.log_file_path, "w") as f:
+                f.write(f"Agent Logs for Test: {self.instance_id}\n")
+                f.write("=" * 50 + "\n\n")
+
+            # Capture stdout and stderr during conversation
+            stdout_buffer = StringIO()
+            stderr_buffer = StringIO()
+
+            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                self.run_instructions(self.conversation)
+
+            # Save captured output to log file
+            captured_output = stdout_buffer.getvalue()
+            captured_errors = stderr_buffer.getvalue()
+
+            with open(self.log_file_path, "a") as f:
+                if captured_output:
+                    f.write("STDOUT:\n")
+                    f.write(captured_output)
+                    f.write("\n")
+                if captured_errors:
+                    f.write("STDERR:\n")
+                    f.write(captured_errors)
+                    f.write("\n")
+
+            # Also print to console for debugging
+            if captured_output:
+                print(captured_output, end="")
+            if captured_errors:
+                print(captured_errors, file=sys.stderr, end="")
+
+            # Check if early stopped - skip full verification
+            if self.early_stop_result:
+                return TestResult(
+                    success=False,
+                    reason=f"Early stopped: {self.early_stop_result.reason}",
                 )
-            )
-            self.conversation.run()
 
             # Verify results
             result = self.verify_result()
 
             return result
+
+        except SkipTest:
+            # Re-raise SkipTest so it can be caught by the test runner
+            raise
 
         except Exception as e:
             return TestResult(success=False, reason=f"Test execution failed: {str(e)}")
@@ -113,13 +236,57 @@ class BaseIntegrationTest(ABC):
         finally:
             self.teardown()
 
-    @property
-    @abstractmethod
-    def tools(self) -> list[Tool]:
-        """List of tools available to the agent."""
-        pass
+    def run_instructions(self, conversation: LocalConversation) -> None:
+        """Feed user instructions to the agent and manage the conversation."""
+        conversation.send_message(message=self.instruction_message)
+        conversation.run()
 
-    @abstractmethod
+    @property
+    def instruction_message(self) -> Message:
+        """The initial instruction message for the agent."""
+        return Message(role="user", content=[TextContent(text=self.instruction)])
+
+    @property
+    def enable_browser(self) -> bool:
+        """Whether to enable browser tools. Override in subclasses that need browsing.
+
+        Returns:
+            False by default. Override to True for tests that require browser access.
+        """
+        return False
+
+    @property
+    def tools(self) -> list[Tool]:
+        """List of tools available to the agent.
+
+        By default, uses the configured tool preset with browser support controlled
+        by the ``enable_browser`` property.  This ensures integration tests validate
+        the same agent configuration shipped to production (GUI/CLI).
+
+        Override this property in subclasses that need custom tool configurations.
+        """
+        return get_tools_for_preset(
+            self.tool_preset, enable_browser=self.enable_browser
+        )
+
+    @property
+    def condenser(self) -> CondenserBase | None:
+        """Optional condenser for the agent. Override to provide a custom condenser.
+
+        Returns:
+            CondenserBase instance or None (default)
+        """
+        return None
+
+    @property
+    def max_iteration_per_run(self) -> int:
+        """Maximum iterations per conversation run. Override to set a custom limit.
+
+        Returns:
+            Maximum iterations (default: 100)
+        """
+        return 100
+
     def setup(self) -> None:
         """
         Initialize test-specific setup.
@@ -128,6 +295,41 @@ class BaseIntegrationTest(ABC):
         resources needed for the test.
         """
         pass
+
+    def skip_if_model_matches(self, pattern: str | list[str], reason: str) -> None:
+        """Skip test if the model name matches the given pattern(s).
+
+        Extracts the canonical model name and checks if it matches any of the provided
+        patterns. If a match is found, raises SkipTest with the given reason.
+
+        Args:
+            pattern: A single model name or list of model names to check against
+            reason: The reason for skipping the test
+
+        Raises:
+            SkipTest: If the model name matches any of the patterns
+        """
+        model_name = self.llm.model
+        canonical = self.llm.model_info.get("model") if self.llm.model_info else None
+        name = (canonical or model_name or "").split("/")[-1]
+
+        patterns = [pattern] if isinstance(pattern, str) else pattern
+        if name in patterns:
+            raise SkipTest(reason)
+
+    def create_llm_copy(self, usage_id: str) -> LLM:
+        """Create a copy of the test LLM with a different usage_id.
+
+        This is useful when a test needs multiple LLM instances for different purposes
+        (e.g., a separate LLM for a condenser).
+
+        Args:
+            usage_id: The usage_id for the LLM copy (used for metrics tracking)
+
+        Returns:
+            A copy of self.llm with the specified usage_id
+        """
+        return self.llm.model_copy(update={"usage_id": usage_id})
 
     @abstractmethod
     def verify_result(self) -> TestResult:
@@ -143,29 +345,53 @@ class BaseIntegrationTest(ABC):
         """
         pass
 
-    def get_agent_final_response(self) -> str:
-        """Extract the final response from the agent's finish tool call."""
+    def add_judge_usage(
+        self, prompt_tokens: int, completion_tokens: int, cost: float
+    ) -> None:
+        """
+        Add LLM judge usage to conversation stats.
 
-        # Find the last finish action from the agent
-        for event in reversed(self.conversation.state.events):
-            if (
-                type(event).__name__ == "ActionEvent"
-                and hasattr(event, "source")
-                and getattr(event, "source") == "agent"
-                and hasattr(event, "tool_name")
-                and getattr(event, "tool_name") == "finish"
-            ):
-                # Extract message from finish tool call
-                if hasattr(event, "action") and hasattr(
-                    getattr(event, "action"), "message"
-                ):
-                    message = getattr(getattr(event, "action"), "message")
-                    return message
+        This ensures judge costs are included in the total test cost.
+
+        Args:
+            prompt_tokens: Number of prompt tokens used by judge
+            completion_tokens: Number of completion tokens used by judge
+            cost: Cost of the judge call
+        """
+        from openhands.sdk.llm.utils.metrics import TokenUsage
+
+        # Add to conversation stats for the test LLM
+        stats = self.conversation.conversation_stats
+        if stats:
+            try:
+                metrics = stats.get_metrics_for_usage("test-llm")
+                # Update accumulated metrics
+                if metrics.accumulated_token_usage:
+                    metrics.accumulated_token_usage.prompt_tokens = (
+                        metrics.accumulated_token_usage.prompt_tokens or 0
+                    ) + prompt_tokens
+                    metrics.accumulated_token_usage.completion_tokens = (
+                        metrics.accumulated_token_usage.completion_tokens or 0
+                    ) + completion_tokens
                 else:
-                    break
-        return ""
+                    # Create new TokenUsage if it doesn't exist
+                    metrics.accumulated_token_usage = TokenUsage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                metrics.accumulated_cost += cost
+            except Exception:
+                # If test-llm doesn't exist in stats yet, skip
+                pass
 
-    @abstractmethod
     def teardown(self):
-        """Clean up test resources."""
-        pass
+        """
+        Clean up test resources.
+        The workspace directory is torn down externally.
+        Add any additional cleanup (git, server, ...) here if needed.
+        """
+        # Close the conversation to ensure all tool executors (including the
+        # browser / Chrome process) are shut down.  Without this, worker
+        # processes in ProcessPoolExecutor hang indefinitely because the
+        # browser's background threads keep them alive.
+        self.conversation.close()

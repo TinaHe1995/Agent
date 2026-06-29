@@ -1,43 +1,95 @@
 """Tests for event immutability."""
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Self
+
 import pytest
-from litellm import ChatCompletionMessageToolCall, ChatCompletionToolParam
 
 from openhands.sdk.event import (
     ActionEvent,
     AgentErrorEvent,
     Condensation,
     CondensationRequest,
-    EventBase,
+    Event,
     MessageEvent,
     ObservationEvent,
     PauseEvent,
     SystemPromptEvent,
     UserRejectObservation,
 )
-from openhands.sdk.llm import Message, TextContent
-from openhands.sdk.tool import Action, Observation
+from openhands.sdk.llm import (
+    ImageContent,
+    Message,
+    MessageToolCall,
+    TextContent,
+)
+from openhands.sdk.tool import ToolDefinition, ToolExecutor
+from openhands.sdk.tool.schema import Action, Observation
 
 
-class MockAction(Action):
+if TYPE_CHECKING:
+    from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+
+
+class EventsImmutabilityMockAction(Action):
     """Mock action for testing."""
 
     command: str = "test_command"
 
 
-class MockObservation(Observation):
+class EventsImmutabilityMockObservation(Observation):
     """Mock observation for testing."""
 
     result: str = "test_result"
 
+    @property
+    def to_llm_content(self) -> Sequence[TextContent | ImageContent]:
+        return [TextContent(text=self.result)]
+
+
+class EventsImmutabilityMockExecutor(ToolExecutor):
+    """Mock executor for testing."""
+
+    def __call__(
+        self,
+        action: EventsImmutabilityMockAction,
+        conversation: "LocalConversation | None" = None,
+    ) -> EventsImmutabilityMockObservation:
+        return EventsImmutabilityMockObservation.from_text("test")
+
+
+class EventsImmutabilityMockTool(
+    ToolDefinition[EventsImmutabilityMockAction, EventsImmutabilityMockObservation]
+):
+    """Mock tool for testing."""
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence[Self]:
+        return [
+            cls(
+                description="Test tool",
+                action_type=EventsImmutabilityMockAction,
+                observation_type=EventsImmutabilityMockObservation,
+                executor=EventsImmutabilityMockExecutor(),
+            )
+        ]
+
+
+class _TestEventForImmutability(Event):
+    """Test event class for immutability tests.
+
+    This class is defined at module level (rather than inside a test function) to
+    ensure it's importable by Pydantic during serialization/deserialization.
+    Defining it inside a test function causes test pollution when running tests
+    in parallel with pytest-xdist.
+    """
+
+    test_field: str = "test_value"
+
 
 def test_event_base_is_frozen():
-    """Test that EventBase instances are frozen and cannot be modified."""
-
-    class TestEvent(EventBase):
-        test_field: str = "test_value"
-
-    event = TestEvent(source="agent", test_field="initial_value")
+    """Test that Event instances are frozen and cannot be modified."""
+    event = _TestEventForImmutability(source="agent", test_field="initial_value")
 
     # Test that we cannot modify any field
     with pytest.raises(Exception):  # Pydantic raises ValidationError for frozen models
@@ -55,17 +107,11 @@ def test_event_base_is_frozen():
 
 def test_system_prompt_event_is_frozen():
     """Test that SystemPromptEvent instances are frozen."""
-    tool: ChatCompletionToolParam = {
-        "type": "function",
-        "function": {
-            "name": "test_tool",
-            "description": "Test tool",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }
+    tool = EventsImmutabilityMockTool.create()[0]
 
     event = SystemPromptEvent(
-        system_prompt=TextContent(text="Test system prompt"), tools=[tool]
+        system_prompt=TextContent(text="Test system prompt"),
+        tools=[tool],
     )
 
     # Test that we cannot modify any field
@@ -81,9 +127,9 @@ def test_system_prompt_event_is_frozen():
 
 def test_action_event_is_frozen():
     """Test that ActionEvent instances are frozen."""
-    action = MockAction()
-    tool_call = ChatCompletionMessageToolCall(
-        id="test_call_id", function={"name": "test_tool", "arguments": "{}"}
+    action = EventsImmutabilityMockAction()
+    tool_call = MessageToolCall(
+        id="test_call_id", name="test_tool", arguments="{}", origin="completion"
     )
 
     event = ActionEvent(
@@ -100,7 +146,7 @@ def test_action_event_is_frozen():
         event.thought = [TextContent(text="Modified thought")]
 
     with pytest.raises(Exception):
-        event.action = MockAction(command="modified_command")
+        event.action = EventsImmutabilityMockAction(command="modified_command")
 
     with pytest.raises(Exception):
         event.tool_name = "modified_tool"
@@ -111,7 +157,7 @@ def test_action_event_is_frozen():
 
 def test_observation_event_is_frozen():
     """Test that ObservationEvent instances are frozen."""
-    observation = MockObservation()
+    observation = EventsImmutabilityMockObservation()
 
     event = ObservationEvent(
         observation=observation,
@@ -122,7 +168,7 @@ def test_observation_event_is_frozen():
 
     # Test that we cannot modify any field
     with pytest.raises(Exception):
-        event.observation = MockObservation(result="modified_result")
+        event.observation = EventsImmutabilityMockObservation(result="modified_result")
 
     with pytest.raises(Exception):
         event.action_id = "modified_action_id"
@@ -150,7 +196,7 @@ def test_message_event_is_frozen():
         )
 
     with pytest.raises(Exception):
-        event.activated_microagents = ["test_microagent"]
+        event.activated_skills = ["test_skill"]
 
     with pytest.raises(Exception):
         event.extended_content = [TextContent(text="Extended content")]
@@ -178,10 +224,37 @@ def test_user_reject_observation_is_frozen():
     with pytest.raises(Exception):
         event.rejection_reason = "Modified rejection"
 
+    with pytest.raises(Exception):
+        event.rejection_source = "hook"
+
+
+def test_user_reject_observation_rejection_source():
+    """Test that UserRejectObservation rejection_source field works correctly."""
+    # Default should be "user"
+    user_event = UserRejectObservation(
+        action_id="test_action_id",
+        tool_name="test_tool",
+        tool_call_id="test_call_id",
+        rejection_reason="User rejected",
+    )
+    assert user_event.rejection_source == "user"
+
+    # Hook rejection should have "hook" source
+    hook_event = UserRejectObservation(
+        action_id="test_action_id",
+        tool_name="test_tool",
+        tool_call_id="test_call_id",
+        rejection_reason="Blocked by hook",
+        rejection_source="hook",
+    )
+    assert hook_event.rejection_source == "hook"
+
 
 def test_agent_error_event_is_frozen():
     """Test that AgentErrorEvent instances are frozen."""
-    event = AgentErrorEvent(error="Test error message")
+    event = AgentErrorEvent(
+        error="Test error message", tool_call_id="test_call_id", tool_name="test_tool"
+    )
 
     # Test that we cannot modify any field
     with pytest.raises(Exception):
@@ -206,12 +279,14 @@ def test_pause_event_is_frozen():
 def test_condensation_is_frozen():
     """Test that Condensation instances are frozen."""
     event = Condensation(
-        forgotten_event_ids=["event1", "event2"], summary="Test summary"
+        forgotten_event_ids={"event1", "event2"},
+        summary="Test summary",
+        llm_response_id="condensation_response_1",
     )
 
     # Test that we cannot modify any field
     with pytest.raises(Exception):
-        event.forgotten_event_ids = ["modified_event"]
+        event.forgotten_event_ids = {"modified_event"}
 
     with pytest.raises(Exception):
         event.summary = "Modified summary"
@@ -249,30 +324,24 @@ def test_event_model_copy_creates_new_instance():
 
 def test_event_immutability_prevents_mutation_bugs():
     """Test that frozen events prevent the type of mutation bugs fixed in PR #226."""
-    tool: ChatCompletionToolParam = {
-        "type": "function_with_very_long_type_name_exceeding_thirty_characters",
-        "function": {
-            "name": "test_tool",
-            "description": "Test tool with long description",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }
+    tool = EventsImmutabilityMockTool.create()[0]
 
     event = SystemPromptEvent(
-        system_prompt=TextContent(text="Test system prompt"), tools=[tool]
+        system_prompt=TextContent(text="Test system prompt"),
+        tools=[tool],
     )
 
     # Store original tool data
-    original_tool_type = event.tools[0]["type"]
-    original_tool_name = event.tools[0]["function"]["name"]  # type: ignore[index]
+    original_tool_name = event.tools[0].name
+    original_tool_description = event.tools[0].description
 
     # Call visualize multiple times (this used to cause mutations)
     for _ in range(3):
         _ = event.visualize
 
     # Verify no mutation occurred - the event data should be unchanged
-    assert event.tools[0]["type"] == original_tool_type
-    assert event.tools[0]["function"]["name"] == original_tool_name  # type: ignore[index]
+    assert event.tools[0].name == original_tool_name
+    assert event.tools[0].description == original_tool_description
 
     # Verify that attempting to modify the event fields directly fails
     with pytest.raises(Exception):

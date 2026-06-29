@@ -1,37 +1,39 @@
 """Tests for openhands.tools package initialization and import handling."""
 
-import pytest
 
+def test_submodule_imports_work():
+    """Tools should be imported via explicit submodules."""
+    from openhands.tools.browser_use import BrowserToolSet
+    from openhands.tools.file_editor import FileEditorTool
+    from openhands.tools.task_tracker import TaskTrackerTool
+    from openhands.tools.terminal import TerminalTool
 
-def test_valid_import_from_tools():
-    """Test that valid imports from openhands.tools work correctly."""
-    from openhands.tools import BashTool, FileEditorTool
-
-    # These should be importable without error
-    assert BashTool is not None
+    assert TerminalTool is not None
     assert FileEditorTool is not None
+    assert TaskTrackerTool is not None
+    assert BrowserToolSet is not None
 
 
-def test_invalid_import_raises_attribute_error():
-    """Test that importing a non-existent attribute raises AttributeError."""
+def test_tools_module_has_expected_top_level_exports():
+    """Common tools/presets should be importable from the top-level package.
+
+    Note: BrowserToolSet is intentionally NOT exported at the top level to avoid
+    forcing downstream consumers to bundle browser-use and its heavy dependencies.
+    See: https://github.com/OpenHands/OpenHands-CLI/pull/527
+    """
+
     import openhands.tools
 
-    with pytest.raises(
-        AttributeError,
-        match=r"module 'openhands\.tools' has no attribute 'NonExistentTool'",
-    ):
-        _ = openhands.tools.NonExistentTool
+    assert openhands.tools.TerminalTool is not None
+    assert openhands.tools.FileEditorTool is not None
+    assert openhands.tools.TaskTrackerTool is not None
+
+    assert openhands.tools.get_default_agent is not None
+    assert openhands.tools.get_default_tools is not None
+    assert openhands.tools.register_default_tools is not None
 
 
-def test_lazy_import_caching():
-    """Test that lazy imports are cached after first access."""
-    import openhands.tools
+def test_from_import_works():
+    """`from openhands.tools import X` should work for exported symbols."""
 
-    # First access should trigger import and caching
-    bash_tool_1 = openhands.tools.BashTool
-
-    # Second access should use cached value
-    bash_tool_2 = openhands.tools.BashTool
-
-    # Should be the same object (cached)
-    assert bash_tool_1 is bash_tool_2
+    from openhands.tools import TerminalTool  # noqa: F401
