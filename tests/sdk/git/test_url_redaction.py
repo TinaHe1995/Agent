@@ -12,6 +12,7 @@ from openhands.sdk.git.utils import (
     run_git_command,
 )  # re-exported for compat
 from openhands.sdk.plugin.types import PluginSource, ResolvedPluginSource
+from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.redact import (
     redact_url_credentials as redact_url_credentials_central,
 )
@@ -192,6 +193,70 @@ class TestResolvedPluginSourceCredentialRedaction:
         json_str = resolved.model_dump_json()
         assert "SUPER_SECRET" not in json_str
         assert "****" in json_str
+
+
+class TestPluginSourceCredentialRedaction:
+    """PluginSource.source hooks into the SDK secret convention (redact / expose
+    / encrypt-at-rest) while keeping the URL shape in redact mode."""
+
+    CRED = "https://oauth2:SUPER_SECRET@gitlab.com/org/repo.git"
+    REDACTED = "https://****@gitlab.com/org/repo.git"
+    PLACEHOLDER = "https://x-token-auth:${MY_TOKEN}@host/repo.git"
+
+    def test_default_dump_redacts_only_the_credential(self):
+        # No context -> redact, but keep the URL shape (not a full ********** mask).
+        assert PluginSource(source=self.CRED).model_dump()["source"] == self.REDACTED
+        assert "SUPER_SECRET" not in PluginSource(source=self.CRED).model_dump_json()
+
+    def test_in_memory_value_is_raw_for_fetch(self):
+        # The attribute keeps the real URL so the plugin can still be cloned.
+        assert PluginSource(source=self.CRED).source == self.CRED
+
+    def test_plaintext_exposes_real_url(self):
+        ps = PluginSource(source=self.CRED)
+        assert ps.model_dump(context={"expose_secrets": True})["source"] == self.CRED
+
+    def test_placeholder_survives_expose(self):
+        # ${VAR} is not a secret; it must survive trusted dumps for expansion.
+        ps = PluginSource(source=self.PLACEHOLDER)
+        assert (
+            ps.model_dump(context={"expose_secrets": True})["source"]
+            == self.PLACEHOLDER
+        )
+
+    def test_cipher_encrypts_at_rest_and_round_trips(self):
+        # A cipher context encrypts the source (gAAAAA token, no cleartext) and
+        # decrypts it back on load.
+        cipher = Cipher("test-secret-key")
+        token = PluginSource(source=self.CRED).model_dump(context={"cipher": cipher})[
+            "source"
+        ]
+        assert token.startswith("gAAAAA")
+        assert "SUPER_SECRET" not in token
+        reloaded = PluginSource.model_validate(
+            {"source": token}, context={"cipher": cipher}
+        )
+        assert reloaded.source == self.CRED
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "github:owner/repo",
+            "/path/to/local/plugin",
+            "git@github.com:owner/repo.git",
+            "https://github.com/owner/repo.git",
+        ],
+    )
+    def test_non_credential_sources_unchanged(self, source):
+        assert PluginSource(source=source).model_dump()["source"] == source
+        cipher = Cipher("k")
+        token = PluginSource(source=source).model_dump(context={"cipher": cipher})[
+            "source"
+        ]
+        back = PluginSource.model_validate(
+            {"source": token}, context={"cipher": cipher}
+        )
+        assert back.source == source
 
 
 class TestRedactUrlCredentialsCentralModule:

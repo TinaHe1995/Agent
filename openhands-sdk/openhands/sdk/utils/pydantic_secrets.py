@@ -5,6 +5,7 @@ from typing import Any, Literal, overload
 from pydantic import SecretStr, ValidationInfo
 
 from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
+from openhands.sdk.utils.redact import redact_url_credentials
 
 
 REDACTED_SECRET_VALUE = "**********"
@@ -195,3 +196,31 @@ def validate_secret_dict(
         k: decrypt_str_with_cipher_or_keep(cipher, v, description=description)
         for k, v in value.items()
     }
+
+
+def serialize_credential_url(source: str, info) -> str:
+    """Serialize a credential-bearing URL by context: the real value under
+    ``expose_secrets``, an encrypted token under a ``cipher``, else only the
+    userinfo redacted (``https://****@host``)."""
+    mode = resolve_expose_mode(info.context)
+    if mode == "plaintext":
+        return source
+    if mode == "encrypted":
+        cipher: Cipher | None = info.context.get("cipher") if info.context else None
+        if cipher is None:
+            raise MissingCipherError(
+                "Cannot encrypt credentialed source: no cipher configured. "
+                "Set OH_SECRET_KEY environment variable."
+            )
+        token = cipher.encrypt(SecretStr(source))
+        assert token is not None  # encrypt() returns None only for a None input
+        return token
+    return redact_url_credentials(source)
+
+
+def validate_credential_url(value: Any, info):
+    """Decrypt an at-rest cipher token back to the URL; no-op without a cipher."""
+    cipher: Cipher | None = info.context.get("cipher") if info.context else None
+    if cipher is None:
+        return value
+    return decrypt_str_with_cipher_or_keep(cipher, value, description="plugin source")

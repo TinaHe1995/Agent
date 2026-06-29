@@ -788,8 +788,15 @@ class RemoteConversation(BaseConversation):
                 "tool_module_qualnames": tool_qualnames,
                 # Include agent definitions for subagent registration on server
                 "agent_definitions": serialized_defs,
-                # Include plugins to load on server
-                "plugins": [p.model_dump() for p in plugins] if plugins else None,
+                # expose_secrets: send the real source so the server can clone.
+                "plugins": (
+                    [
+                        p.model_dump(mode="json", context={"expose_secrets": True})
+                        for p in plugins
+                    ]
+                    if plugins
+                    else None
+                ),
                 # Include hook_config for server-side hooks
                 "hook_config": hook_config.model_dump() if hook_config else None,
                 # Include client-defined tool specs (no server-side executor)

@@ -6,9 +6,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import frontmatter
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    FieldSerializationInfo,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+)
 
 from openhands.sdk.utils.path import to_posix_path
+from openhands.sdk.utils.pydantic_secrets import (
+    serialize_credential_url,
+    validate_credential_url,
+)
 from openhands.sdk.utils.redact import redact_url_credentials
 
 
@@ -63,6 +74,17 @@ class PluginSource(BaseModel):
                 "repo_path cannot contain '..' (parent directory traversal)"
             )
         return v
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _decrypt_source(cls, v: Any, info: ValidationInfo) -> Any:
+        """Decrypt at-rest ciphertext (see validate_credential_url)."""
+        return validate_credential_url(v, info)
+
+    @field_serializer("source", when_used="always")
+    def _serialize_source(self, source: str, info: FieldSerializationInfo) -> str:
+        """Redact/expose/encrypt by context (see serialize_credential_url)."""
+        return serialize_credential_url(source, info)
 
     @property
     def source_url(self) -> str | None:
