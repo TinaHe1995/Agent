@@ -51,6 +51,7 @@ from openhands.sdk.event.condenser import (
     CondensationRequest,
 )
 from openhands.sdk.llm import (
+    LLM,
     LLMResponse,
     Message,
     MessageToolCall,
@@ -65,6 +66,7 @@ from openhands.sdk.llm.exceptions import (
     LLMContextWindowExceedError,
     LLMMalformedConversationHistoryError,
 )
+from openhands.sdk.llm.router.base import RouterLLM
 from openhands.sdk.logger import get_logger
 from openhands.sdk.observability.laminar import (
     maybe_init_laminar,
@@ -111,6 +113,36 @@ def _tool_has_summary_param(tool: ToolDefinition) -> bool:
 # Maximum number of events to scan during init_state defensive checks.
 # SystemPromptEvent must appear within this prefix (at index 0 or 1).
 INIT_STATE_PREFIX_SCAN_WINDOW = 3
+
+
+def _latest_user_message_contains_image(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        if message.role == "user":
+            return message.contains_image
+    return False
+
+
+def _non_multimodal_image_message(model: str) -> Message:
+    return Message(
+        role="assistant",
+        content=[
+            TextContent(
+                text=(
+                    "I received your image, but the currently selected model "
+                    f"({model}) does not support image understanding. Please "
+                    "switch to a multimodal model to analyze the image."
+                )
+            )
+        ],
+    )
+
+
+def _should_handle_non_multimodal_image_input(
+    llm: LLM, messages: list[Message]
+) -> bool:
+    if isinstance(llm, RouterLLM):
+        return False
+    return _latest_user_message_contains_image(messages) and not llm.vision_is_active()
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +617,20 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
 
         _messages = _messages_or_condensation
 
+        if _should_handle_non_multimodal_image_input(self.llm, _messages):
+            logger.info(
+                "Image input received while selected model does not support vision: %s",
+                self.llm.model,
+            )
+            on_event(
+                MessageEvent(
+                    source="agent",
+                    llm_message=_non_multimodal_image_message(self.llm.model),
+                )
+            )
+            state.execution_status = ConversationExecutionStatus.FINISHED
+            return
+
         logger.debug(
             "Sending messages to LLM: "
             f"{json.dumps([m.model_dump() for m in _messages[1:]], indent=2)}"
@@ -746,6 +792,20 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             return
 
         _messages = _messages_or_condensation
+
+        if _should_handle_non_multimodal_image_input(self.llm, _messages):
+            logger.info(
+                "Image input received while selected model does not support vision: %s",
+                self.llm.model,
+            )
+            on_event(
+                MessageEvent(
+                    source="agent",
+                    llm_message=_non_multimodal_image_message(self.llm.model),
+                )
+            )
+            state.execution_status = ConversationExecutionStatus.FINISHED
+            return
 
         logger.debug(
             "Sending messages to LLM: "
