@@ -400,15 +400,29 @@ class TerminalSession(TerminalSessionBase):
         logger.debug(f"COMBINED OUTPUT: {combined_output}")
         return combined_output
 
-    def execute(self, action: TerminalAction) -> TerminalObservation:
-        """Execute a command using the terminal backend."""
+    def execute(
+        self, action: TerminalAction, *, append_enter: bool = True
+    ) -> TerminalObservation:
+        """Execute a command using the terminal backend.
+
+        Args:
+            action: The action to execute.
+            append_enter: Only meaningful when ``action.is_input`` is True and the
+                command is not a special key. When True (default), an Enter
+                keystroke is appended after the text unless it already ends with
+                ``\\n`` — preserving the historical ``TerminalTool`` behaviour for
+                interactive prompts. When False, the text is delivered to the
+                process stdin verbatim with no Enter appended, giving byte-accurate
+                stdin delivery (e.g. for ``write_stdin`` Codex-parity).
+        """
         if not self._initialized:
             raise RuntimeError("Unified session is not initialized")
 
-        # Strip the command of any leading/trailing whitespace
         logger.debug(f"RECEIVED ACTION: {action}")
-        command = action.command.strip()
         is_input: bool = action.is_input
+        # Strip shell commands, but preserve stdin bytes as-is so whitespace-
+        # significant input (leading spaces, multiple newlines) reaches the process.
+        command = action.command if is_input else action.command.strip()
 
         rejection = foreground_timeout_rejection_for(
             command=command,
@@ -442,21 +456,28 @@ class TerminalSession(TerminalSessionBase):
                     is_error=True,
                 )
 
-        # Check if the command is a single command or multiple commands
-        splited_commands = split_bash_commands(command)
-        if len(splited_commands) > 1:
-            commands_list = "\n".join(
-                f"({i + 1}) {cmd}" for i, cmd in enumerate(splited_commands)
-            )
-            return TerminalObservation.from_text(
-                text=(
-                    "Cannot execute multiple commands at once.\n"
-                    "Please run each command separately OR chain them into a single "
-                    f"command via && or ;\nProvided commands:\n{commands_list}"
-                ),
-                command=command,
-                is_error=True,
-            )
+        # Check if the command is a single command or multiple commands.
+        # Skip this check for raw stdin input (is_input=True): stdin bytes are
+        # not shell commands and may legitimately contain embedded newlines
+        # (e.g. write_stdin(chars="hello\nworld")). Running split_bash_commands
+        # on stdin would reject such input as "multiple commands" and break the
+        # byte-accurate delivery contract.
+        if not is_input:
+            splited_commands = split_bash_commands(command)
+            if len(splited_commands) > 1:
+                commands_list = "\n".join(
+                    f"({i + 1}) {cmd}" for i, cmd in enumerate(splited_commands)
+                )
+                return TerminalObservation.from_text(
+                    text=(
+                        "Cannot execute multiple commands at once.\n"
+                        "Please run each command separately OR chain them "
+                        f"into a single command via && or ;\n"
+                        f"Provided commands:\n{commands_list}"
+                    ),
+                    command=command,
+                    is_error=True,
+                )
 
         # Get initial state before sending command
         initial_terminal_output = self.terminal.read_screen()
@@ -525,9 +546,13 @@ class TerminalSession(TerminalSessionBase):
             is_special_key = self._is_special_key(command)
             if is_input:
                 logger.debug(f"SENDING INPUT TO RUNNING PROCESS: {command!r}")
+                # Special keys (C-c, C-d, ...) never take Enter. For plain input,
+                # append_enter controls whether an Enter keystroke is appended after
+                # the text — True preserves TerminalTool's interactive-prompt behaviour,
+                # False delivers raw stdin bytes verbatim (write_stdin Codex-parity).
                 self.terminal.send_keys(
                     command,
-                    enter=not is_special_key,
+                    enter=append_enter and not is_special_key,
                 )
             else:
                 # convert command to raw string (for bash terminals)
