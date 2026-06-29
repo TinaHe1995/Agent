@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { RequirementsData } from "../types";
+import { CanvasTabs } from "./CanvasTabs";
 
 interface PreviewCanvasProps {
   requirements: RequirementsData;
@@ -101,6 +103,14 @@ export function PreviewCanvas({
   styleWarmth,
   onToggleAcceptance,
 }: PreviewCanvasProps) {
+  const [activeTab, setActiveTab] = useState("progress");
+
+  useEffect(() => {
+    if (buildDone && activeTab === "progress") {
+      setActiveTab("preview");
+    }
+  }, [buildDone, activeTab]);
+
   const acceptanceItems = requirements.acceptance.length
     ? requirements.acceptance
     : [
@@ -111,92 +121,132 @@ export function PreviewCanvas({
 
   if (projectCompleted) {
     return (
-      <div className="space-y-4">
-        <div className="rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-6 text-center">
-          <div className="text-3xl">🎉</div>
-          <h2 className="mt-2 text-xl font-semibold text-slate-900">MVP 体验完成</h2>
-          <p className="mt-2 text-sm text-slate-600">
-            你已经走完「做什么 → 长什么样 → 做出来试试」三阶段。
-            <br />
-            完整版将在此后增加：测试环境部署 → 你决定是否上线。
-          </p>
-        </div>
-        <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
-      </div>
+      <CanvasTabs
+        header={(
+          <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4 text-center">
+            <div className="text-3xl">🎉</div>
+            <h2 className="mt-2 text-xl font-semibold text-slate-900">MVP 体验完成</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              你已经走完三阶段。完整版将增加测试环境部署与上线确认。
+            </p>
+          </div>
+        )}
+        tabs={[
+          {
+            id: "preview",
+            label: "最终预览",
+            content: <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />,
+          },
+        ]}
+      />
     );
   }
 
-  return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-violet-100 bg-gradient-to-r from-violet-50 to-white p-5">
+  const header = (
+    <div className="space-y-3">
+      <div className="rounded-xl border border-violet-100 bg-gradient-to-r from-violet-50 to-white p-4">
         <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
           阶段 3 / 做出来试试
         </div>
         <h2 className="text-lg font-semibold text-slate-900">
           {buildDone ? "请试用并验收" : "正在为你制作第一版"}
         </h2>
-        <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
-          <div
-            className="h-full rounded-full bg-violet-500 transition-all duration-700"
-            style={{ width: `${buildProgress}%` }}
-          />
-        </div>
-        <div className="mt-2 text-sm text-slate-600">总进度 {buildProgress}%</div>
       </div>
-
-      <div className="grid gap-3 md:grid-cols-3">
-        {BUILD_STEPS.map((step) => {
-          const done = buildProgress >= step.threshold;
-          const active = !done && buildProgress >= step.threshold - 20;
-          return (
-            <div
-              key={step.label}
-              className={[
-                "rounded-xl border p-4 text-sm",
-                done
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                  : active
-                    ? "border-violet-200 bg-violet-50 text-violet-800"
-                    : "border-slate-200 bg-white text-slate-500",
-              ].join(" ")}
-            >
-              <div className="mb-1 font-medium">{done ? "✅" : active ? "🔄" : "⏳"} {step.label}</div>
-            </div>
-          );
-        })}
+      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="h-full rounded-full bg-violet-500 transition-all duration-700"
+          style={{ width: `${buildProgress}%` }}
+        />
       </div>
-
-      {buildDone ? (
-        <>
-          <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-3 text-sm font-semibold text-slate-900">验收清单（对照需求文档）</div>
-            <div className="space-y-3">
-              {acceptanceItems.slice(0, 3).map((item, index) => (
-                <label
-                  key={item}
-                  className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"
-                >
-                  <input
-                    type="checkbox"
-                    checked={acceptanceChecks[index]}
-                    onChange={() => onToggleAcceptance(index)}
-                    className="mt-1"
-                  />
-                  <div>
-                    <div className="text-sm font-medium text-slate-800">{item}</div>
-                    <div className="text-xs text-slate-500">请实际操作后勾选</div>
-                  </div>
-                </label>
-              ))}
-            </div>
-          </div>
-        </>
-      ) : (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-          制作完成后，这里会出现可交互预览和验收清单
-        </div>
-      )}
+      <div className="text-sm text-slate-600">总进度 {buildProgress}%</div>
     </div>
+  );
+
+  const tabs = [
+    {
+      id: "progress",
+      label: "制作进度",
+      badge: `${buildProgress}%`,
+      content: (
+        <div className="grid gap-3 sm:grid-cols-3">
+          {BUILD_STEPS.map((step) => {
+            const done = buildProgress >= step.threshold;
+            const active = !done && buildProgress >= step.threshold - 20;
+            return (
+              <div
+                key={step.label}
+                className={[
+                  "rounded-xl border p-4 text-sm",
+                  done
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : active
+                      ? "border-violet-200 bg-violet-50 text-violet-800"
+                      : "border-slate-200 bg-white text-slate-500",
+                ].join(" ")}
+              >
+                <div className="font-medium">
+                  {done ? "✅" : active ? "🔄" : "⏳"} {step.label}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ),
+    },
+    {
+      id: "preview",
+      label: "试用预览",
+      disabled: !buildDone,
+      badge: buildDone ? "可试用" : "制作中",
+      content: buildDone ? (
+        <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
+      ) : (
+        <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-500">
+          制作完成后，可在此 Tab 试用
+        </div>
+      ),
+    },
+    {
+      id: "acceptance",
+      label: "验收清单",
+      disabled: !buildDone,
+      badge: buildDone
+        ? `${acceptanceChecks.filter(Boolean).length}/3`
+        : undefined,
+      content: buildDone ? (
+        <div className="space-y-3">
+          {acceptanceItems.slice(0, 3).map((item, index) => (
+            <label
+              key={item}
+              className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"
+            >
+              <input
+                type="checkbox"
+                checked={acceptanceChecks[index]}
+                onChange={() => onToggleAcceptance(index)}
+                className="mt-1"
+              />
+              <div>
+                <div className="text-sm font-medium text-slate-800">{item}</div>
+                <div className="text-xs text-slate-500">请实际操作后勾选</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      ) : (
+        <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-500">
+          试用后在此 Tab 勾选验收项
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <CanvasTabs
+      header={header}
+      tabs={tabs}
+      activeTabId={activeTab}
+      onTabChange={setActiveTab}
+    />
   );
 }

@@ -10,37 +10,45 @@ interface CanvasPanelProps {
 }
 
 export function CanvasPanel({ state, onSelectStyle, onToggleAcceptance }: CanvasPanelProps) {
+  const panelClass = "h-full min-h-0";
+
   if (state.stage === 1) {
     return (
-      <RequirementsCanvas
-        requirements={state.requirements}
-        complete={state.requirementsComplete}
-        confirmed={state.requirementsConfirmed}
-      />
+      <div className={panelClass}>
+        <RequirementsCanvas
+          requirements={state.requirements}
+          complete={state.requirementsComplete}
+          confirmed={state.requirementsConfirmed}
+        />
+      </div>
     );
   }
 
   if (state.stage === 2) {
     return (
-      <StyleCanvas
-        selectedStyleId={state.selectedStyleId}
-        styleVersion={state.styleVersion}
-        styleWarmth={state.styleWarmth}
-        styleButtonSize={state.styleButtonSize}
-        onSelectStyle={onSelectStyle}
-      />
+      <div className={panelClass}>
+        <StyleCanvas
+          selectedStyleId={state.selectedStyleId}
+          styleVersion={state.styleVersion}
+          styleWarmth={state.styleWarmth}
+          styleButtonSize={state.styleButtonSize}
+          onSelectStyle={onSelectStyle}
+        />
+      </div>
     );
   }
 
   return (
-    <PreviewCanvas
-      requirements={state.requirements}
-      buildProgress={state.buildProgress}
-      buildDone={state.buildDone}
-      projectCompleted={state.projectCompleted}
-      acceptanceChecks={state.acceptanceChecks}
-      styleWarmth={state.styleWarmth}
-      onToggleAcceptance={onToggleAcceptance}
-    />
+    <div className={panelClass}>
+      <PreviewCanvas
+        requirements={state.requirements}
+        buildProgress={state.buildProgress}
+        buildDone={state.buildDone}
+        projectCompleted={state.projectCompleted}
+        acceptanceChecks={state.acceptanceChecks}
+        styleWarmth={state.styleWarmth}
+        onToggleAcceptance={onToggleAcceptance}
+      />
+    </div>
   );
 }

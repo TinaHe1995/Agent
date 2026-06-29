@@ -44,23 +44,23 @@ export default function App() {
         onReset={() => void resetDemo()}
       />
 
-      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5 lg:p-6">
-        <div className="h-full min-h-[calc(100vh-2rem)] rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:p-6">
-          <div className="mb-4 flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
-            <div>
-              <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
-                成果画布
-              </div>
-              <h2 className="text-lg font-semibold text-slate-900">右侧查看每个阶段的交付物</h2>
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-4 sm:p-5 lg:p-6">
+        <div className="flex h-full min-h-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm sm:p-5 lg:p-6">
+          <div className="mb-4 shrink-0 border-b border-slate-200 pb-3">
+            <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
+              成果画布
             </div>
+            <h2 className="text-lg font-semibold text-slate-900">通过 Tab 切换查看各部分内容</h2>
           </div>
-          <CanvasPanel
-            state={state}
-            onSelectStyle={selectStyle}
-            onToggleAcceptance={(index) =>
-              dispatch({ type: "TOGGLE_ACCEPTANCE", index })
-            }
-          />
+          <div className="min-h-0 flex-1">
+            <CanvasPanel
+              state={state}
+              onSelectStyle={selectStyle}
+              onToggleAcceptance={(index) =>
+                dispatch({ type: "TOGGLE_ACCEPTANCE", index })
+              }
+            />
+          </div>
         </div>
       </main>
     </div>
