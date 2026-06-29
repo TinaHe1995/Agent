@@ -103,38 +103,3 @@ export function DiscoveryCanvas({
 
   return <CanvasTabs tabs={tabs} />;
 }
-
-export function BuyPathCanvas({ pathChoice }: { pathChoice: PathChoice }) {
-  const label =
-    pathChoice === "saas" ? "买现成 SaaS" : pathChoice === "low_code" ? "低代码搭建" : "外部方案";
-
-  const tabs = [
-    {
-      id: "guide",
-      label: "实施建议",
-      content: (
-        <div className="space-y-4 text-sm text-slate-700">
-          <p>
-            你选择了 <strong>{label}</strong>。对于这个请假登记场景，通常不需要从零开发。
-          </p>
-          <ul className="list-disc space-y-2 pl-5">
-            <li>可优先考虑：飞书审批、钉钉审批、腾讯文档收集表</li>
-            <li>若只需导出 Excel，很多表单工具已足够</li>
-            <li>如后续需求变复杂，仍可回来选择自研</li>
-          </ul>
-        </div>
-      ),
-    },
-    {
-      id: "next",
-      label: "下一步",
-      content: (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-          本次原型体验在此结束。完整版可继续提供开通步骤、产品链接与对比清单导出。
-        </div>
-      ),
-    },
-  ];
-
-  return <CanvasTabs tabs={tabs} />;
-}

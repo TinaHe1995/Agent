@@ -67,7 +67,7 @@ export function GateBar({
   if (pathEndedBuy) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
-        已选择外部方案，本次体验结束。
+        外部方案已确认。请在右侧按引导完成开通，或把「员工打开页」发给同事。
       </div>
     );
   }

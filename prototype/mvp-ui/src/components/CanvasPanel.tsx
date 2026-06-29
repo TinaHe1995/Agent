@@ -1,5 +1,6 @@
 import type { AppState } from "../types";
-import { BuyPathCanvas, DiscoveryCanvas } from "./DiscoveryCanvas";
+import { DiscoveryCanvas } from "./DiscoveryCanvas";
+import { SaasOnboardingCanvas } from "./SaasOnboardingCanvas";
 import { PreviewCanvas } from "./PreviewCanvas";
 import { ReleaseCanvas } from "./ReleaseCanvas";
 import { RequirementsCanvas } from "./RequirementsCanvas";
@@ -27,7 +28,10 @@ export function CanvasPanel({
   if (state.pathEndedBuy) {
     return (
       <div className={panelClass}>
-        <BuyPathCanvas pathChoice={state.pathChoice} />
+        <SaasOnboardingCanvas
+          pathChoice={state.pathChoice}
+          discoveryBrief={state.discoveryBrief}
+        />
       </div>
     );
   }

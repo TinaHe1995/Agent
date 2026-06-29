@@ -213,8 +213,11 @@ export function useAppFlow() {
 
   const confirmPathBuy = useCallback(async () => {
     dispatch({ type: "CONFIRM_PATH_BUY" });
+    const isSaas = stateRef.current.pathChoice === "saas";
     await pushAgentMessage(
-      "已记录你选的外部方案。右侧有实施建议和下一步说明；若之后想改成自研，可点「重新开始」。",
+      isSaas
+        ? "已记录你走 SaaS 路线。右侧「欢迎引导」告诉你今天就能用起来；管理员看「开通步骤」，员工看「员工打开页」。"
+        : "已记录你走低代码路线。右侧有开通步骤和员工引导页预览；若之后想改成自研，可点「重新开始」。",
       600,
     );
   }, [pushAgentMessage]);
