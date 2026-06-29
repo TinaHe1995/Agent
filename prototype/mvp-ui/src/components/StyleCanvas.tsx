@@ -74,18 +74,6 @@ export function StyleCanvas({
 }: StyleCanvasProps) {
   const activeStyle = selectedStyleId ?? "B";
 
-  const header = (
-    <div className="rounded-xl border border-orange-100 bg-gradient-to-r from-orange-50 to-white p-4">
-      <div className="text-xs font-medium uppercase tracking-wide text-orange-600">
-        界面风格
-      </div>
-      <h2 className="text-lg font-semibold text-slate-900">选择界面风格</h2>
-      <p className="mt-1 text-sm text-slate-600">
-        技术方案已由 Agent 自动选择（网页应用）。在「选风格」Tab 中挑选，在「预览」Tab 中查看效果。
-      </p>
-    </div>
-  );
-
   const tabs = [
     {
       id: "pick",
@@ -144,15 +132,13 @@ export function StyleCanvas({
             warmth={styleWarmth}
             buttonSize={styleButtonSize}
           />
-          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-            <span className="rounded-full bg-slate-100 px-2 py-1">桌面预览</span>
-            <span className="rounded-full bg-slate-100 px-2 py-1">手机预览</span>
-            <span className="rounded-full bg-slate-100 px-2 py-1">可在左侧聊天继续修改</span>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
+            <span>可在左侧聊天继续修改</span>
           </div>
         </div>
       ),
     },
   ];
 
-  return <CanvasTabs header={header} tabs={tabs} />;
+  return <CanvasTabs tabs={tabs} />;
 }

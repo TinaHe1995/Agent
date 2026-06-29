@@ -39,9 +39,9 @@ export function CanvasTabs({ tabs, activeTabId, onTabChange, header }: CanvasTab
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {header}
+      {header ? <div className="mb-4 shrink-0">{header}</div> : null}
 
-      <div className="mt-4 flex shrink-0 gap-1 overflow-x-auto border-b border-slate-200 pb-px">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-200 pb-px">
         {tabs.map((tab) => {
           const active = tab.id === activeTab?.id;
           return (

@@ -30,16 +30,6 @@ function InteractivePreview({
 
   return (
     <div className="rounded-2xl border bg-white p-4 shadow-sm" style={{ borderColor: isWarm ? "#fed7aa" : "#dbeafe" }}>
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <div className="text-sm font-semibold text-slate-900">可交互预览</div>
-          <div className="text-xs text-slate-500">你可以直接点击、输入体验</div>
-        </div>
-        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-          预览环境
-        </span>
-      </div>
-
       <div className="rounded-xl border bg-slate-50 p-4" style={{ borderColor: isWarm ? "#ffedd5" : "#e2e8f0" }}>
         <div className="mb-3 text-sm font-medium text-slate-800">
           {goal.includes("请假") ? "请假登记系统" : "项目预览"}
@@ -122,45 +112,23 @@ export function PreviewCanvas({
   if (projectCompleted) {
     return (
       <CanvasTabs
-        header={(
-          <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4 text-center">
-            <div className="text-3xl">🎉</div>
-            <h2 className="mt-2 text-xl font-semibold text-slate-900">MVP 体验完成</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              本次协作体验已完成。完整版将增加测试环境部署与上线确认。
-            </p>
-          </div>
-        )}
         tabs={[
           {
             id: "preview",
             label: "最终预览",
-            content: <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />,
+            content: (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm text-emerald-800">
+                  本次协作体验已完成
+                </div>
+                <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
+              </div>
+            ),
           },
         ]}
       />
     );
   }
-
-  const header = (
-    <div className="space-y-3">
-      <div className="rounded-xl border border-violet-100 bg-gradient-to-r from-violet-50 to-white p-4">
-        <div className="text-xs font-medium uppercase tracking-wide text-violet-600">
-          预览与验收
-        </div>
-        <h2 className="text-lg font-semibold text-slate-900">
-          {buildDone ? "请试用并验收" : "正在为你制作第一版"}
-        </h2>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-        <div
-          className="h-full rounded-full bg-violet-500 transition-all duration-700"
-          style={{ width: `${buildProgress}%` }}
-        />
-      </div>
-      <div className="text-sm text-slate-600">总进度 {buildProgress}%</div>
-    </div>
-  );
 
   const tabs = [
     {
@@ -243,7 +211,6 @@ export function PreviewCanvas({
 
   return (
     <CanvasTabs
-      header={header}
       tabs={tabs}
       activeTabId={activeTab}
       onTabChange={setActiveTab}

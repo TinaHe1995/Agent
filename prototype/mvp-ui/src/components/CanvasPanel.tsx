@@ -10,7 +10,7 @@ interface CanvasPanelProps {
 }
 
 export function CanvasPanel({ state, onSelectStyle, onToggleAcceptance }: CanvasPanelProps) {
-  const panelClass = "h-full min-h-0";
+  const panelClass = "h-full min-h-0 p-3 sm:p-4";
 
   if (state.stage === 1) {
     return (
