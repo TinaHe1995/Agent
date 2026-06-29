@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from openhands.agent_server.conversation_lease import (
+    DEFAULT_LEASE_TTL_SECONDS,
     ConversationLease,
     ConversationOwnershipLostError,
 )
@@ -81,6 +82,7 @@ class EventService:
     conversations_dir: Path
     cipher: Cipher | None = None
     owner_instance_id: str = field(default_factory=lambda: uuid4().hex)
+    lease_ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS
     _conversation: LocalConversation | None = field(default=None, init=False)
     _pub_sub: PubSub[Event] = field(
         default_factory=lambda: PubSub[Event](max_subscribers=50), init=False
@@ -605,10 +607,9 @@ class EventService:
         from callbacks that may run in different threads. Events are emitted through
         the conversation's normal event flow to ensure they are persisted.
         """
-        if self._main_loop and self._main_loop.is_running() and self._conversation:
-            # Capture conversation reference for closure
-            conversation = self._conversation
-
+        main_loop = self._main_loop
+        conversation = self._conversation
+        if main_loop and main_loop.is_running() and conversation:
             # Wrap _on_event with lock acquisition to ensure thread-safe access
             # to conversation state and event log during concurrent operations
             def locked_on_event():
@@ -617,7 +618,7 @@ class EventService:
 
             # Run the locked callback in an executor to ensure the event is
             # both persisted and sent to WebSocket subscribers
-            self._main_loop.run_in_executor(None, locked_on_event)
+            main_loop.run_in_executor(None, locked_on_event)
 
     def _setup_llm_log_streaming(self, agent: AgentBase) -> None:
         """Configure LLM log callbacks to stream logs via events."""
@@ -633,13 +634,16 @@ class EventService:
                 filename: str, log_data: str, uid=usage_id, model=model_name
             ) -> None:
                 """Callback to emit LLM completion logs as events."""
-                event = LLMCompletionLogEvent(
-                    filename=filename,
-                    log_data=log_data,
-                    model_name=model,
-                    usage_id=uid,
-                )
-                self._emit_event_from_thread(event)
+                try:
+                    event = LLMCompletionLogEvent(
+                        filename=filename,
+                        log_data=log_data,
+                        model_name=model,
+                        usage_id=uid,
+                    )
+                    self._emit_event_from_thread(event)
+                except Exception:
+                    logger.exception("Failed to emit LLM completion log event")
 
             llm.telemetry.set_log_completions_callback(log_callback)
 
@@ -731,12 +735,16 @@ class EventService:
 
         # self.stored contains an Agent configuration we can instantiate
         self.conversation_dir.mkdir(parents=True, exist_ok=True)
-        self._lease = ConversationLease(
-            conversation_dir=self.conversation_dir,
-            owner_instance_id=self.owner_instance_id,
-        )
-        lease_claim = self._lease.claim()
-        self._lease_generation = lease_claim.generation
+        # lease_ttl_seconds=0 disables leasing for single-instance deployments
+        # where shared-storage stale leases would otherwise block pod restarts.
+        if self.lease_ttl_seconds > 0:
+            self._lease = ConversationLease(
+                conversation_dir=self.conversation_dir,
+                owner_instance_id=self.owner_instance_id,
+                ttl_seconds=self.lease_ttl_seconds,
+            )
+            lease_claim = self._lease.claim()
+            self._lease_generation = lease_claim.generation
         workspace = self.stored.workspace
         assert isinstance(workspace, LocalWorkspace)
         working_dir = Path(workspace.working_dir)
@@ -823,6 +831,7 @@ class EventService:
             user_id=self.stored.user_id,
             observability_metadata=self.stored.observability_metadata,
             observability_tags=self.stored.observability_tags,
+            observability_span_name=self.stored.observability_span_name,
         )
 
         conversation.set_confirmation_policy(self.stored.confirmation_policy)
