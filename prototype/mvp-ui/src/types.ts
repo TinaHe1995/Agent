@@ -12,6 +12,16 @@ export type PathChoice = "self_build" | "saas" | "low_code" | null;
 
 export type TechChoice = "web" | "wechat" | "desktop" | null;
 
+export type EngineMode = "mock" | "live";
+
+export type EngineStatus = "mock" | "checking" | "ready" | "degraded" | "offline";
+
+export interface EngineInfo {
+  mode: EngineMode;
+  status: EngineStatus;
+  detail?: string;
+}
+
 export type MessageRole = "agent" | "user";
 
 export interface ChatMessage {

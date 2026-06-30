@@ -1,4 +1,16 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import {
+  AgentServerError,
+  checkAgentServerHealth,
+  deleteConversation,
+  extractAgentMessageText,
+  isAgentFinishedEvent,
+  isToolActionEvent,
+  sendConversationMessage,
+  startBuildConversation,
+  subscribeToConversationEvents,
+} from "./api/agentServer";
+import { getEngineMode, USE_MOCK } from "./config";
 import { appReducer, initialState } from "./store";
 import {
   DISCOVERY_FLOW,
@@ -6,7 +18,7 @@ import {
   detectBuildFeedback,
   detectStyleFeedback,
 } from "./mockAgent";
-import type { ChatMessage, PathChoice, TechChoice } from "./types";
+import type { ChatMessage, EngineInfo, PathChoice, TechChoice } from "./types";
 
 function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
   return {
@@ -21,11 +33,23 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface LiveSession {
+  conversationId: string;
+  unsubscribe: () => void;
+}
+
 export function useAppFlow() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
   const bootstrapped = useRef(false);
+  const liveSessionRef = useRef<LiveSession | null>(null);
+  const buildProgressRef = useRef(0);
+
+  const [engineInfo, setEngineInfo] = useState<EngineInfo>({
+    mode: getEngineMode(),
+    status: USE_MOCK ? "mock" : "checking",
+  });
 
   const pushAgentMessage = useCallback(async (content: string, pause = 700) => {
     dispatch({ type: "SET_AGENT_TYPING", value: true });
@@ -36,6 +60,47 @@ export function useAppFlow() {
     });
     dispatch({ type: "SET_AGENT_TYPING", value: false });
   }, []);
+
+  const cleanupLiveSession = useCallback(async () => {
+    const session = liveSessionRef.current;
+    liveSessionRef.current = null;
+    buildProgressRef.current = 0;
+    if (!session) return;
+    session.unsubscribe();
+    try {
+      await deleteConversation(session.conversationId);
+    } catch {
+      // ignore cleanup errors in prototype
+    }
+  }, []);
+
+  const checkEngine = useCallback(async () => {
+    if (USE_MOCK) {
+      setEngineInfo({ mode: "mock", status: "mock" });
+      return;
+    }
+    setEngineInfo({ mode: "live", status: "checking" });
+    const result = await checkAgentServerHealth();
+    if (result.health === "ready") {
+      setEngineInfo({ mode: "live", status: "ready" });
+    } else if (result.health === "alive") {
+      setEngineInfo({
+        mode: "live",
+        status: "degraded",
+        detail: result.detail ?? "Server not ready",
+      });
+    } else {
+      setEngineInfo({
+        mode: "live",
+        status: "offline",
+        detail: result.detail ?? "Cannot reach Agent Server",
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkEngine();
+  }, [checkEngine]);
 
   const startDiscoveryFlow = useCallback(async () => {
     await pushAgentMessage(
@@ -76,6 +141,103 @@ export function useAppFlow() {
     );
   }, [pushAgentMessage]);
 
+  const runLiveBuild = useCallback(async () => {
+    const current = stateRef.current;
+    if (engineInfo.status !== "ready") {
+      await pushAgentMessage(
+        `OpenHands Agent Server 未就绪（${engineInfo.detail ?? engineInfo.status}）。已回退为模拟制作。请在本机启动：uv run agent-server`,
+        800,
+      );
+      await runBuildSimulation();
+      return;
+    }
+
+    await cleanupLiveSession();
+    dispatch({ type: "SET_BUILD_PROGRESS", value: 5 });
+    dispatch({ type: "SET_AGENT_TYPING", value: true });
+
+    try {
+      const styleLabel = current.selectedStyleId
+        ? `风格 ${current.selectedStyleId}`
+        : undefined;
+
+      const info = await startBuildConversation({
+        requirements: current.requirements,
+        styleLabel,
+      });
+
+      buildProgressRef.current = 10;
+      dispatch({ type: "SET_BUILD_PROGRESS", value: 10 });
+
+      await pushAgentMessage(
+        "已连接 OpenHands 引擎，开始真实制作。右侧可看进度；完成后请验收。",
+        400,
+      );
+
+      const unsubscribe = subscribeToConversationEvents(
+        info.id,
+        (event) => {
+          if (isToolActionEvent(event)) {
+            buildProgressRef.current = Math.min(
+              95,
+              buildProgressRef.current + 8,
+            );
+            dispatch({
+              type: "SET_BUILD_PROGRESS",
+              value: buildProgressRef.current,
+            });
+          }
+
+          const text = extractAgentMessageText(event);
+          if (text) {
+            dispatch({
+              type: "ADD_MESSAGE",
+              message: createMessage("agent", text),
+            });
+          }
+
+          if (isAgentFinishedEvent(event)) {
+            dispatch({ type: "SET_BUILD_PROGRESS", value: 100 });
+            dispatch({ type: "SET_BUILD_DONE" });
+            dispatch({ type: "SET_AGENT_TYPING", value: false });
+            dispatch({ type: "SET_PENDING_GATE", gate: "acceptance" });
+          }
+        },
+        () => {
+          setEngineInfo((prev) => ({
+            ...prev,
+            status: "offline",
+            detail: "WebSocket error",
+          }));
+        },
+      );
+
+      liveSessionRef.current = {
+        conversationId: info.id,
+        unsubscribe,
+      };
+    } catch (err) {
+      dispatch({ type: "SET_AGENT_TYPING", value: false });
+      const msg =
+        err instanceof AgentServerError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Unknown error";
+      await pushAgentMessage(
+        `连接 OpenHands 失败：${msg}\n\n已回退为模拟制作。`,
+        500,
+      );
+      await runBuildSimulation();
+    }
+  }, [
+    cleanupLiveSession,
+    engineInfo.detail,
+    engineInfo.status,
+    pushAgentMessage,
+    runBuildSimulation,
+  ]);
+
   const runStagingSimulation = useCallback(async () => {
     dispatch({ type: "SET_STAGING_PROGRESS", value: 20 });
     await delay(500);
@@ -101,6 +263,27 @@ export function useAppFlow() {
       });
 
       const current = stateRef.current;
+
+      // Live engine: stage 3 messages go to Agent Server
+      if (
+        !USE_MOCK &&
+        current.stage === 3 &&
+        liveSessionRef.current &&
+        engineInfo.status === "ready"
+      ) {
+        dispatch({ type: "SET_AGENT_TYPING", value: true });
+        try {
+          await sendConversationMessage(
+            liveSessionRef.current.conversationId,
+            { role: "user", content: text, run: true },
+          );
+        } catch (err) {
+          dispatch({ type: "SET_AGENT_TYPING", value: false });
+          const msg = err instanceof Error ? err.message : String(err);
+          await pushAgentMessage(`发送失败：${msg}`);
+        }
+        return;
+      }
 
       if (current.stage === 0 && !current.discoveryReady) {
         const step = DISCOVERY_FLOW[current.questionIndex];
@@ -182,7 +365,22 @@ export function useAppFlow() {
         if (feedback) {
           await pushAgentMessage(feedback, 500);
           dispatch({ type: "REQUEST_CHANGES" });
-          await runBuildSimulation();
+          if (!USE_MOCK && liveSessionRef.current && engineInfo.status === "ready") {
+            try {
+              await sendConversationMessage(
+                liveSessionRef.current.conversationId,
+                {
+                  role: "user",
+                  content: `${text}\n\n请修复并更新预览。`,
+                  run: true,
+                },
+              );
+            } catch {
+              await runBuildSimulation();
+            }
+          } else {
+            await runBuildSimulation();
+          }
         } else {
           await pushAgentMessage(
             "请具体说说哪里需要改，例如「手机端打不开」或「导出字段顺序不对」。",
@@ -197,7 +395,7 @@ export function useAppFlow() {
         );
       }
     },
-    [pushAgentMessage, runBuildSimulation],
+    [engineInfo.status, pushAgentMessage, runBuildSimulation],
   );
 
   const selectPath = useCallback((choice: PathChoice) => {
@@ -244,8 +442,12 @@ export function useAppFlow() {
   const confirmStyle = useCallback(async () => {
     dispatch({ type: "CONFIRM_STYLE" });
     await pushAgentMessage("技术路线和风格已确认。我现在开始自动制作，请稍等片刻…", 600);
-    await runBuildSimulation();
-  }, [pushAgentMessage, runBuildSimulation]);
+    if (USE_MOCK) {
+      await runBuildSimulation();
+    } else {
+      await runLiveBuild();
+    }
+  }, [pushAgentMessage, runBuildSimulation, runLiveBuild]);
 
   const completeAcceptance = useCallback(async () => {
     dispatch({ type: "COMPLETE_ACCEPTANCE" });
@@ -271,11 +473,13 @@ export function useAppFlow() {
   }, [pushAgentMessage]);
 
   const resetDemo = useCallback(async () => {
+    await cleanupLiveSession();
     dispatch({ type: "RESET_DEMO" });
     bootstrapped.current = false;
     bootstrapped.current = true;
+    void checkEngine();
     await startDiscoveryFlow();
-  }, [startDiscoveryFlow]);
+  }, [checkEngine, cleanupLiveSession, startDiscoveryFlow]);
 
   const currentQuestion =
     state.stage === 1 ? QUESTION_FLOW[state.questionIndex] : undefined;
@@ -285,6 +489,7 @@ export function useAppFlow() {
 
   return {
     state,
+    engineInfo,
     currentQuestion,
     currentDiscoveryStep,
     sendUserMessage,

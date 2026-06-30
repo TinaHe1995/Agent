@@ -6,6 +6,7 @@ import { useAppFlow } from "./useAppFlow";
 export default function App() {
   const {
     state,
+    engineInfo,
     currentQuestion,
     currentDiscoveryStep,
     sendUserMessage,
@@ -34,8 +35,9 @@ export default function App() {
 
   return (
     <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-slate-100 lg:flex-row">
-      <LeftSidebar
-        stage={state.stage}
+        <LeftSidebar
+          engineInfo={engineInfo}
+          stage={state.stage}
         projectCompleted={state.projectCompleted}
         pathEndedBuy={state.pathEndedBuy}
         messages={state.messages}
