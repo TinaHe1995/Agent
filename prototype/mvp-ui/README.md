@@ -22,6 +22,44 @@ npm run dev
 
 然后打开终端里显示的地址，通常是 **http://localhost:5173**。
 
+### Mock 与真实引擎切换
+
+| 模式 | 配置 | 说明 |
+|------|------|------|
+| **模拟**（默认） | `VITE_USE_MOCK=true` | 无需后端，适合 GitHub Pages |
+| **真实引擎** | `VITE_USE_MOCK=false` | 阶段 3「制作」接入 OpenHands Agent Server |
+
+复制环境变量模板：
+
+```bash
+cp .env.example .env.local
+```
+
+**真实引擎联调步骤：**
+
+```bash
+# 终端 1：仓库根目录
+make build
+export LLM_API_KEY="你的密钥"
+uv run agent-server --port 8000
+
+# 终端 2：MVP UI
+cd prototype/mvp-ui
+echo "VITE_USE_MOCK=false" > .env.local
+npm run dev
+```
+
+开发模式下 Vite 会把 `/api`、`/sockets`、`/alive`、`/ready` 代理到 `localhost:8000`。
+
+- 阶段 **0～2**：仍用 `mockAgent`（轻量编排）
+- 阶段 **3 制作**：创建 OpenHands 会话，WebSocket 收事件；失败则自动回退模拟
+- 阶段 **3 预览**：制作完成后探测 workspace 静态文件（`index.html` / `dist/index.html`），在右侧 iframe 展示
+- 阶段 **4 部署**：向 Agent 发送部署指令，测试/正式链接来自 workspace 静态服务 URL
+- **Gate 确认**：`ConfirmRisky` 策略下 Agent 等待确认时，底部 Gate 调用 `respond_to_confirmation`
+- 左上角徽章显示：**模拟引擎** / **OpenHands 已连接** / **引擎离线**
+
+API 客户端骨架：`src/api/agentServer.ts`
+
 ### 为什么在 Cursor 远程环境里打不开 localhost？
 
 如果你是在 **Cursor 云端 / 远程工作区** 里开发：

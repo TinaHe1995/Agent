@@ -3,6 +3,8 @@ import { CanvasTabs } from "./CanvasTabs";
 interface ReleaseCanvasProps {
   stagingProgress: number;
   stagingReady: boolean;
+  stagingUrl: string | null;
+  liveUrl: string | null;
   goLiveChecks: [boolean, boolean, boolean];
   onToggleGoLiveCheck: (index: number) => void;
   projectCompleted: boolean;
@@ -17,10 +19,14 @@ const GO_LIVE_ITEMS = [
 export function ReleaseCanvas({
   stagingProgress,
   stagingReady,
+  stagingUrl,
+  liveUrl,
   goLiveChecks,
   onToggleGoLiveCheck,
   projectCompleted,
 }: ReleaseCanvasProps) {
+  const displayLiveUrl = liveUrl ?? "https://leave-app.example.com";
+  const displayStagingUrl = stagingUrl ?? "https://test.leave-app.example.com";
   if (projectCompleted) {
     return (
       <CanvasTabs
@@ -35,9 +41,19 @@ export function ReleaseCanvas({
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                   <div className="text-xs text-slate-500">正式地址</div>
-                  <div className="mt-1 font-medium text-indigo-700">
-                    https://leave-app.example.com
-                  </div>
+                  <a
+                    href={displayLiveUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 block break-all font-medium text-indigo-700 hover:underline"
+                  >
+                    {displayLiveUrl}
+                  </a>
+                  {liveUrl && (
+                    <p className="mt-2 text-xs text-emerald-700">
+                      链接来自 OpenHands workspace 静态服务
+                    </p>
+                  )}
                 </div>
               </div>
             ),
@@ -67,9 +83,19 @@ export function ReleaseCanvas({
         <div className="space-y-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs text-slate-500">测试环境链接</div>
-            <div className="mt-1 break-all font-medium text-indigo-700">
-              https://test.leave-app.example.com
-            </div>
+            <a
+              href={displayStagingUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 block break-all font-medium text-indigo-700 hover:underline"
+            >
+              {displayStagingUrl}
+            </a>
+            {stagingUrl && (
+              <p className="mt-2 text-xs text-emerald-700">
+                链接来自 OpenHands workspace 静态服务
+              </p>
+            )}
           </div>
           <p className="text-sm text-slate-600">
             建议先让 2～3 位同事试用，确认无问题后再决定是否上线。

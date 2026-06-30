@@ -6,11 +6,22 @@ export type GateType =
   | "style"
   | "acceptance"
   | "go_live"
+  | "sdk_confirm"
   | null;
 
 export type PathChoice = "self_build" | "saas" | "low_code" | null;
 
 export type TechChoice = "web" | "wechat" | "desktop" | null;
+
+export type EngineMode = "mock" | "live";
+
+export type EngineStatus = "mock" | "checking" | "ready" | "degraded" | "offline";
+
+export interface EngineInfo {
+  mode: EngineMode;
+  status: EngineStatus;
+  detail?: string;
+}
 
 export type MessageRole = "agent" | "user";
 
@@ -63,6 +74,12 @@ export interface AppState {
   goLiveChecks: [boolean, boolean, boolean];
   projectCompleted: boolean;
   pendingGate: GateType;
+  conversationId: string | null;
+  sdkConfirmationPending: boolean;
+  workspacePreviewUrl: string | null;
+  workspacePreviewPath: string | null;
+  stagingUrl: string | null;
+  liveUrl: string | null;
   isAgentTyping: boolean;
   styleWarmth: number;
   styleButtonSize: number;
@@ -94,4 +111,13 @@ export type AppAction =
   | { type: "TOGGLE_GO_LIVE_CHECK"; index: number }
   | { type: "COMPLETE_GO_LIVE" }
   | { type: "SET_PENDING_GATE"; gate: GateType }
+  | { type: "SET_CONVERSATION_ID"; id: string | null }
+  | { type: "SET_SDK_CONFIRMATION_PENDING"; value: boolean }
+  | {
+      type: "SET_WORKSPACE_PREVIEW";
+      url: string | null;
+      path?: string | null;
+    }
+  | { type: "SET_STAGING_URL"; url: string | null }
+  | { type: "SET_LIVE_URL"; url: string | null }
   | { type: "RESET_DEMO" };

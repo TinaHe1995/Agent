@@ -34,6 +34,12 @@ export const initialState: AppState = {
   goLiveChecks: [false, false, false],
   projectCompleted: false,
   pendingGate: null,
+  conversationId: null,
+  sdkConfirmationPending: false,
+  workspacePreviewUrl: null,
+  workspacePreviewPath: null,
+  stagingUrl: null,
+  liveUrl: null,
   isAgentTyping: false,
   styleWarmth: 50,
   styleButtonSize: 50,
@@ -135,6 +141,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         buildProgress: 0,
         acceptanceChecks: [false, false, false],
         pendingGate: null,
+        workspacePreviewUrl: null,
+        workspacePreviewPath: null,
       };
     case "COMPLETE_ACCEPTANCE":
       return {
@@ -170,6 +178,23 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     case "SET_PENDING_GATE":
       return { ...state, pendingGate: action.gate };
+    case "SET_CONVERSATION_ID":
+      return { ...state, conversationId: action.id };
+    case "SET_SDK_CONFIRMATION_PENDING":
+      return {
+        ...state,
+        sdkConfirmationPending: action.value,
+      };
+    case "SET_WORKSPACE_PREVIEW":
+      return {
+        ...state,
+        workspacePreviewUrl: action.url,
+        workspacePreviewPath: action.path ?? null,
+      };
+    case "SET_STAGING_URL":
+      return { ...state, stagingUrl: action.url };
+    case "SET_LIVE_URL":
+      return { ...state, liveUrl: action.url };
     case "RESET_DEMO":
       return { ...initialState };
     default:
