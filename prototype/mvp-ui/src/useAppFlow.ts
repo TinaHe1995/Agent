@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   AgentServerError,
+  LIVE_PREP_MESSAGE,
+  STAGING_PREP_MESSAGE,
   checkAgentServerHealth,
   deleteConversation,
+  eventImpliesConfirmationWait,
   extractAgentMessageText,
+  getConversation,
   isAgentFinishedEvent,
+  isConfirmationPendingEvent,
   isToolActionEvent,
+  isWaitingForConfirmation,
+  probeWorkspacePreview,
+  respondToConfirmation,
   sendConversationMessage,
   startBuildConversation,
   subscribeToConversationEvents,
@@ -72,7 +80,55 @@ export function useAppFlow() {
     } catch {
       // ignore cleanup errors in prototype
     }
+    dispatch({ type: "SET_CONVERSATION_ID", id: null });
+    dispatch({ type: "SET_SDK_CONFIRMATION_PENDING", value: false });
   }, []);
+
+  const syncWorkspacePreview = useCallback(async (conversationId: string) => {
+    const preview = await probeWorkspacePreview(conversationId);
+    if (preview) {
+      dispatch({
+        type: "SET_WORKSPACE_PREVIEW",
+        url: preview.url,
+        path: preview.path,
+      });
+    }
+    return preview;
+  }, []);
+
+  const syncConfirmationFromServer = useCallback(async (conversationId: string) => {
+    try {
+      const info = await getConversation(conversationId);
+      const pending = isWaitingForConfirmation(info);
+      dispatch({ type: "SET_SDK_CONFIRMATION_PENDING", value: pending });
+      return pending;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const respondSdkConfirmation = useCallback(
+    async (accept: boolean) => {
+      const session = liveSessionRef.current;
+      if (!session) return;
+
+      try {
+        await respondToConfirmation(
+          session.conversationId,
+          accept,
+          accept ? undefined : "用户在 Gate 中拒绝",
+        );
+        dispatch({ type: "SET_SDK_CONFIRMATION_PENDING", value: false });
+        if (!accept) {
+          await pushAgentMessage("已拒绝该操作。Agent 将暂停或调整方案。", 400);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await pushAgentMessage(`确认操作失败：${msg}`);
+      }
+    },
+    [pushAgentMessage],
+  );
 
   const checkEngine = useCallback(async () => {
     if (USE_MOCK) {
@@ -166,6 +222,7 @@ export function useAppFlow() {
         styleLabel,
       });
 
+      dispatch({ type: "SET_CONVERSATION_ID", id: info.id });
       buildProgressRef.current = 10;
       dispatch({ type: "SET_BUILD_PROGRESS", value: 10 });
 
@@ -177,6 +234,10 @@ export function useAppFlow() {
       const unsubscribe = subscribeToConversationEvents(
         info.id,
         (event) => {
+          if (eventImpliesConfirmationWait(event) || isConfirmationPendingEvent(event)) {
+            dispatch({ type: "SET_SDK_CONFIRMATION_PENDING", value: true });
+          }
+
           if (isToolActionEvent(event)) {
             buildProgressRef.current = Math.min(
               95,
@@ -201,6 +262,8 @@ export function useAppFlow() {
             dispatch({ type: "SET_BUILD_DONE" });
             dispatch({ type: "SET_AGENT_TYPING", value: false });
             dispatch({ type: "SET_PENDING_GATE", gate: "acceptance" });
+            void syncWorkspacePreview(info.id);
+            void syncConfirmationFromServer(info.id);
           }
         },
         () => {
@@ -236,6 +299,8 @@ export function useAppFlow() {
     engineInfo.status,
     pushAgentMessage,
     runBuildSimulation,
+    syncConfirmationFromServer,
+    syncWorkspacePreview,
   ]);
 
   const runStagingSimulation = useCallback(async () => {
@@ -251,6 +316,59 @@ export function useAppFlow() {
       700,
     );
   }, [pushAgentMessage]);
+
+  const runLiveStaging = useCallback(async () => {
+    const session = liveSessionRef.current;
+    if (!session || engineInfo.status !== "ready") {
+      await runStagingSimulation();
+      return;
+    }
+
+    if (stateRef.current.sdkConfirmationPending) {
+      await respondSdkConfirmation(true);
+    }
+
+    dispatch({ type: "SET_STAGING_PROGRESS", value: 15 });
+    dispatch({ type: "SET_AGENT_TYPING", value: true });
+
+    try {
+      await sendConversationMessage(session.conversationId, {
+        role: "user",
+        content: STAGING_PREP_MESSAGE,
+        run: true,
+      });
+
+      await delay(1200);
+      dispatch({ type: "SET_STAGING_PROGRESS", value: 60 });
+
+      const preview = await syncWorkspacePreview(session.conversationId);
+      if (preview) {
+        dispatch({ type: "SET_STAGING_URL", url: preview.url });
+      }
+
+      dispatch({ type: "SET_STAGING_PROGRESS", value: 100 });
+      dispatch({ type: "SET_STAGING_READY" });
+      dispatch({ type: "SET_AGENT_TYPING", value: false });
+
+      await pushAgentMessage(
+        preview
+          ? "测试环境已就绪。右侧链接来自 OpenHands workspace，请自测后决定是否上线。"
+          : "已通知 Agent 准备测试环境。若右侧未出现链接，可在对话中追问构建进度。",
+        500,
+      );
+    } catch (err) {
+      dispatch({ type: "SET_AGENT_TYPING", value: false });
+      const msg = err instanceof Error ? err.message : String(err);
+      await pushAgentMessage(`部署测试环境失败：${msg}\n\n已回退为模拟部署。`, 500);
+      await runStagingSimulation();
+    }
+  }, [
+    engineInfo.status,
+    pushAgentMessage,
+    respondSdkConfirmation,
+    runStagingSimulation,
+    syncWorkspacePreview,
+  ]);
 
   const sendUserMessage = useCallback(
     async (raw: string) => {
@@ -450,21 +568,68 @@ export function useAppFlow() {
   }, [pushAgentMessage, runBuildSimulation, runLiveBuild]);
 
   const completeAcceptance = useCallback(async () => {
+    if (stateRef.current.sdkConfirmationPending) {
+      await respondSdkConfirmation(true);
+    }
+
     dispatch({ type: "COMPLETE_ACCEPTANCE" });
     await pushAgentMessage(
       "验收通过。接下来我会部署到测试环境，你在右侧确认后再决定是否正式上线。",
       600,
     );
-    await runStagingSimulation();
-  }, [pushAgentMessage, runStagingSimulation]);
+    if (USE_MOCK) {
+      await runStagingSimulation();
+    } else {
+      await runLiveStaging();
+    }
+  }, [pushAgentMessage, respondSdkConfirmation, runLiveStaging, runStagingSimulation]);
 
   const confirmGoLive = useCallback(async () => {
+    const session = liveSessionRef.current;
+
+    if (!USE_MOCK && session && engineInfo.status === "ready") {
+      if (stateRef.current.sdkConfirmationPending) {
+        await respondSdkConfirmation(true);
+      }
+
+      dispatch({ type: "SET_AGENT_TYPING", value: true });
+      try {
+        await sendConversationMessage(session.conversationId, {
+          role: "user",
+          content: LIVE_PREP_MESSAGE,
+          run: true,
+        });
+        await delay(800);
+        const preview = await syncWorkspacePreview(session.conversationId);
+        const url =
+          preview?.url ??
+          stateRef.current.stagingUrl ??
+          stateRef.current.workspacePreviewUrl;
+        if (url) {
+          dispatch({ type: "SET_LIVE_URL", url });
+        }
+      } catch {
+        const fallback =
+          stateRef.current.stagingUrl ?? stateRef.current.workspacePreviewUrl;
+        if (fallback) {
+          dispatch({ type: "SET_LIVE_URL", url: fallback });
+        }
+      } finally {
+        dispatch({ type: "SET_AGENT_TYPING", value: false });
+      }
+    }
+
     dispatch({ type: "COMPLETE_GO_LIVE" });
     await pushAgentMessage(
       "已上线正式环境。右侧可复制正式地址和交付物清单。若要改需求或换风格，随时在对话里说，我们按迭代节奏继续。",
       700,
     );
-  }, [pushAgentMessage]);
+  }, [
+    engineInfo.status,
+    pushAgentMessage,
+    respondSdkConfirmation,
+    syncWorkspacePreview,
+  ]);
 
   const pauseProject = useCallback(async () => {
     await pushAgentMessage(
@@ -480,6 +645,17 @@ export function useAppFlow() {
     void checkEngine();
     await startDiscoveryFlow();
   }, [checkEngine, cleanupLiveSession, startDiscoveryFlow]);
+
+  useEffect(() => {
+    const session = liveSessionRef.current;
+    if (USE_MOCK || !session || engineInfo.status !== "ready") return;
+
+    const interval = window.setInterval(() => {
+      void syncConfirmationFromServer(session.conversationId);
+    }, 4000);
+
+    return () => window.clearInterval(interval);
+  }, [engineInfo.status, state.conversationId, syncConfirmationFromServer]);
 
   const currentQuestion =
     state.stage === 1 ? QUESTION_FLOW[state.questionIndex] : undefined;
@@ -504,6 +680,7 @@ export function useAppFlow() {
     confirmGoLive,
     pauseProject,
     resetDemo,
+    respondSdkConfirmation,
     dispatch,
   };
 }

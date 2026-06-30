@@ -3,6 +3,7 @@ import type { GateType, PathChoice, Stage, TechChoice } from "../types";
 interface GateBarProps {
   stage: Stage;
   pendingGate: GateType;
+  sdkConfirmationPending: boolean;
   pathChoice: PathChoice;
   discoveryReady: boolean;
   pathEndedBuy: boolean;
@@ -22,12 +23,14 @@ interface GateBarProps {
   onCompleteAcceptance: () => void;
   onConfirmGoLive: () => void;
   onPauseProject: () => void;
+  onRespondSdkConfirmation: (accept: boolean) => void;
   compact?: boolean;
 }
 
 export function GateBar({
   stage,
   pendingGate,
+  sdkConfirmationPending,
   pathChoice,
   discoveryReady,
   pathEndedBuy,
@@ -47,6 +50,7 @@ export function GateBar({
   onCompleteAcceptance,
   onConfirmGoLive,
   onPauseProject,
+  onRespondSdkConfirmation,
   compact = false,
 }: GateBarProps) {
   if (projectCompleted && !pathEndedBuy) {
@@ -68,6 +72,51 @@ export function GateBar({
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
         外部方案已确认。请在右侧按引导完成开通，或把「员工打开页」发给同事。
+      </div>
+    );
+  }
+
+  if (sdkConfirmationPending) {
+    return (
+      <div
+        className={[
+          compact
+            ? "rounded-xl border border-amber-200 bg-amber-50 px-3 py-3"
+            : "rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 shadow-sm",
+        ].join(" ")}
+      >
+        <div className={`flex flex-col gap-3 ${compact ? "" : "lg:flex-row lg:items-center lg:justify-between"}`}>
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wide text-amber-700">
+              OpenHands 等待确认
+            </div>
+            <div className="text-sm font-medium text-amber-950">
+              Agent 准备执行一项需你批准的操作（如终端命令）。批准后才会继续。
+            </div>
+          </div>
+          <div className={`flex gap-2 ${compact ? "flex-col" : "flex-wrap"}`}>
+            <button
+              type="button"
+              onClick={() => onRespondSdkConfirmation(false)}
+              className={[
+                "rounded-xl border border-amber-300 bg-white text-sm font-medium text-amber-900 hover:bg-amber-100",
+                compact ? "w-full px-3 py-2" : "px-4 py-2.5",
+              ].join(" ")}
+            >
+              拒绝
+            </button>
+            <button
+              type="button"
+              onClick={() => onRespondSdkConfirmation(true)}
+              className={[
+                "rounded-xl bg-amber-600 text-sm font-medium text-white hover:bg-amber-700",
+                compact ? "w-full px-3 py-2" : "px-4 py-2.5",
+              ].join(" ")}
+            >
+              批准，继续执行
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

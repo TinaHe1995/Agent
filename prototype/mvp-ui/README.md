@@ -53,6 +53,9 @@ npm run dev
 
 - 阶段 **0～2**：仍用 `mockAgent`（轻量编排）
 - 阶段 **3 制作**：创建 OpenHands 会话，WebSocket 收事件；失败则自动回退模拟
+- 阶段 **3 预览**：制作完成后探测 workspace 静态文件（`index.html` / `dist/index.html`），在右侧 iframe 展示
+- 阶段 **4 部署**：向 Agent 发送部署指令，测试/正式链接来自 workspace 静态服务 URL
+- **Gate 确认**：`ConfirmRisky` 策略下 Agent 等待确认时，底部 Gate 调用 `respond_to_confirmation`
 - 左上角徽章显示：**模拟引擎** / **OpenHands 已连接** / **引擎离线**
 
 API 客户端骨架：`src/api/agentServer.ts`

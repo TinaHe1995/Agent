@@ -21,6 +21,7 @@ export default function App() {
     confirmGoLive,
     pauseProject,
     resetDemo,
+    respondSdkConfirmation,
     dispatch,
   } = useAppFlow();
 
@@ -46,6 +47,7 @@ export default function App() {
         onSend={(text) => void sendUserMessage(text)}
         chatDisabled={state.isAgentTyping || state.projectCompleted}
         pendingGate={state.pendingGate}
+        sdkConfirmationPending={state.sdkConfirmationPending}
         pathChoice={state.pathChoice}
         discoveryReady={state.discoveryReady}
         requirementsComplete={state.requirementsComplete}
@@ -63,6 +65,7 @@ export default function App() {
         onCompleteAcceptance={() => void completeAcceptance()}
         onConfirmGoLive={() => void confirmGoLive()}
         onPauseProject={() => void pauseProject()}
+        onRespondSdkConfirmation={(accept) => void respondSdkConfirmation(accept)}
         onReset={() => void resetDemo()}
       />
 

@@ -13,6 +13,7 @@ interface LeftSidebarProps {
   onSend: (text: string) => void;
   chatDisabled: boolean;
   pendingGate: GateType;
+  sdkConfirmationPending: boolean;
   pathChoice: PathChoice;
   discoveryReady: boolean;
   requirementsComplete: boolean;
@@ -30,6 +31,7 @@ interface LeftSidebarProps {
   onCompleteAcceptance: () => void;
   onConfirmGoLive: () => void;
   onPauseProject: () => void;
+  onRespondSdkConfirmation: (accept: boolean) => void;
   onReset: () => void;
 }
 
@@ -44,6 +46,7 @@ export function LeftSidebar({
   onSend,
   chatDisabled,
   pendingGate,
+  sdkConfirmationPending,
   pathChoice,
   discoveryReady,
   requirementsComplete,
@@ -61,6 +64,7 @@ export function LeftSidebar({
   onCompleteAcceptance,
   onConfirmGoLive,
   onPauseProject,
+  onRespondSdkConfirmation,
   onReset,
 }: LeftSidebarProps) {
   const engineBadge = (() => {
@@ -123,6 +127,7 @@ export function LeftSidebar({
         <GateBar
           stage={stage}
           pendingGate={pendingGate}
+          sdkConfirmationPending={sdkConfirmationPending}
           pathChoice={pathChoice}
           discoveryReady={discoveryReady}
           pathEndedBuy={pathEndedBuy}
@@ -142,6 +147,7 @@ export function LeftSidebar({
           onCompleteAcceptance={onCompleteAcceptance}
           onConfirmGoLive={onConfirmGoLive}
           onPauseProject={onPauseProject}
+          onRespondSdkConfirmation={onRespondSdkConfirmation}
           compact
         />
       </div>

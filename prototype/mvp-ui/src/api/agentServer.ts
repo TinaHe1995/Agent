@@ -180,6 +180,11 @@ export async function startBuildConversation(
     workspace: {
       working_dir: workingDir,
     },
+    confirmation_policy: {
+      kind: "ConfirmRisky",
+      threshold: "high",
+      confirm_unknown: true,
+    },
     initial_message: {
       role: "user",
       content: toMessageContent(goal),
@@ -259,13 +264,14 @@ export async function deleteConversation(
 export async function respondToConfirmation(
   conversationId: string,
   accept: boolean,
+  reason?: string,
 ): Promise<void> {
   const res = await fetch(
     apiUrl(`/api/conversations/${conversationId}/events/respond_to_confirmation`),
     {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ accept }),
+      body: JSON.stringify({ accept, reason }),
     },
   );
   if (!res.ok) throw await parseError(res);
@@ -366,6 +372,98 @@ export function isAgentFinishedEvent(event: unknown): boolean {
 }
 
 export function isConfirmationPendingEvent(event: unknown): boolean {
+  if (eventImpliesConfirmationWait(event)) return true;
   const kind = getEventKind(event).toLowerCase();
   return kind.includes("confirmation") || kind.includes("confirm");
 }
+
+// ---------------------------------------------------------------------------
+// Execution status + workspace preview
+// ---------------------------------------------------------------------------
+
+export type WorkspacePreview = {
+  url: string;
+  path: string;
+};
+
+export function parseExecutionStatus(info: ConversationInfo): string | undefined {
+  const raw = info.execution_status;
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && "value" in raw) {
+    const v = (raw as { value?: unknown }).value;
+    return typeof v === "string" ? v : undefined;
+  }
+  return undefined;
+}
+
+export function isWaitingForConfirmationStatus(status: string | undefined): boolean {
+  return status === "waiting_for_confirmation" || status === "WAITING_FOR_CONFIRMATION";
+}
+
+export function isWaitingForConfirmation(info: ConversationInfo): boolean {
+  return isWaitingForConfirmationStatus(parseExecutionStatus(info));
+}
+
+/** Static workspace file URL served by agent server. */
+export function getWorkspaceFileUrl(conversationId: string, filePath: string): string {
+  const normalized = filePath.replace(/^\/+/, "");
+  return apiUrl(`/api/conversations/${conversationId}/workspace/${normalized}`);
+}
+
+const PREVIEW_CANDIDATES = [
+  "index.html",
+  "dist/index.html",
+  "build/index.html",
+  "public/index.html",
+  "preview/index.html",
+];
+
+/** Probe common HTML entry points in the agent workspace. */
+export async function probeWorkspacePreview(
+  conversationId: string,
+): Promise<WorkspacePreview | null> {
+  for (const path of PREVIEW_CANDIDATES) {
+    const url = getWorkspaceFileUrl(conversationId, path);
+    try {
+      const res = await fetch(url, { method: "HEAD", headers: authHeaders() });
+      if (res.ok) return { url, path };
+      const getRes = await fetch(url, {
+        method: "GET",
+        headers: { ...authHeaders(), Range: "bytes=0-0" },
+      });
+      if (getRes.ok) return { url, path };
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+export function eventImpliesConfirmationWait(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const e = event as Record<string, unknown>;
+  const kind = getEventKind(event);
+
+  if (kind === "ConversationStateUpdateEvent") {
+    const key = String(e.key ?? "");
+    const value = e.value;
+    if (key === "execution_status") {
+      if (typeof value === "string") {
+        return isWaitingForConfirmationStatus(value);
+      }
+      if (value && typeof value === "object" && "value" in value) {
+        const inner = (value as { value?: unknown }).value;
+        return typeof inner === "string" && isWaitingForConfirmationStatus(inner);
+      }
+    }
+  }
+
+  if (kind === "PauseEvent" && e.reason === "Confirmation") return true;
+  return false;
+}
+
+export const STAGING_PREP_MESSAGE =
+  "验收已通过。请在 workspace 中执行构建/打包，确保 dist 或 build 目录有可访问的 index.html，用于测试环境部署。";
+
+export const LIVE_PREP_MESSAGE =
+  "测试环境已验证。请整理最终交付物，并确认正式环境入口页面可访问。";

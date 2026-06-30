@@ -85,6 +85,8 @@ export function CanvasPanel({
           buildDone={state.buildDone}
           acceptanceChecks={state.acceptanceChecks}
           styleWarmth={state.styleWarmth}
+          workspacePreviewUrl={state.workspacePreviewUrl}
+          workspacePreviewPath={state.workspacePreviewPath}
           onToggleAcceptance={onToggleAcceptance}
         />
       </div>
@@ -96,6 +98,8 @@ export function CanvasPanel({
       <ReleaseCanvas
         stagingProgress={state.stagingProgress}
         stagingReady={state.stagingReady}
+        stagingUrl={state.stagingUrl}
+        liveUrl={state.liveUrl}
         goLiveChecks={state.goLiveChecks}
         onToggleGoLiveCheck={onToggleGoLiveCheck}
         projectCompleted={state.projectCompleted}

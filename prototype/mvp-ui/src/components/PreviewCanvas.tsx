@@ -8,6 +8,8 @@ interface PreviewCanvasProps {
   buildDone: boolean;
   acceptanceChecks: [boolean, boolean, boolean];
   styleWarmth: number;
+  workspacePreviewUrl: string | null;
+  workspacePreviewPath: string | null;
   onToggleAcceptance: (index: number) => void;
 }
 
@@ -89,6 +91,8 @@ export function PreviewCanvas({
   buildDone,
   acceptanceChecks,
   styleWarmth,
+  workspacePreviewUrl,
+  workspacePreviewPath,
   onToggleAcceptance,
 }: PreviewCanvasProps) {
   const [activeTab, setActiveTab] = useState("progress");
@@ -144,7 +148,30 @@ export function PreviewCanvas({
       disabled: !buildDone,
       badge: buildDone ? "可试用" : "制作中",
       content: buildDone ? (
-        <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
+        workspacePreviewUrl ? (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+              来自 OpenHands workspace
+              {workspacePreviewPath ? ` · ${workspacePreviewPath}` : ""}
+            </div>
+            <iframe
+              title="Workspace preview"
+              src={workspacePreviewUrl}
+              className="h-[min(520px,60vh)] w-full rounded-xl border border-slate-200 bg-white"
+              sandbox="allow-scripts allow-same-origin allow-forms"
+            />
+            <a
+              href={workspacePreviewUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block text-sm font-medium text-indigo-700 hover:underline"
+            >
+              在新标签页打开
+            </a>
+          </div>
+        ) : (
+          <InteractivePreview warmth={styleWarmth} goal={requirements.goal} />
+        )
       ) : (
         <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-500">
           制作完成后，可在此 Tab 试用
