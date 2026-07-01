@@ -145,6 +145,14 @@ def run_agent(app_dir: Path) -> ConversationExecutionStatus:
 
 def verify_app(app_dir: Path) -> bool:
     """Run post-build checks without starting Streamlit."""
+    main_py = app_dir / "main.py"
+    if not main_py.is_file():
+        logger.warning(
+            "No main.py in %s — agent may not have finished. Skip or re-run.",
+            app_dir,
+        )
+        return False
+
     checks: list[tuple[str, bool]] = []
 
     required = [

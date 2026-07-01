@@ -1,4 +1,7 @@
-"""Thin launcher — delegates to the canonical repo script."""
+"""Delegate to scripts/develop_project_mgmt_app.py.
+
+See project-mgmt-desktop/README.md for usage.
+"""
 
 import runpy
 import sys
