@@ -104,9 +104,7 @@ def resolve_api_key() -> str:
         if value:
             logger.info("Using API key from %s", name)
             return value
-    logger.error(
-        "未找到 API Key。请设置 DEEPSEEK_API_KEY 或 LLM_API_KEY 后重试。"
-    )
+    logger.error("未找到 API Key。请设置 DEEPSEEK_API_KEY 或 LLM_API_KEY 后重试。")
     sys.exit(1)
 
 
