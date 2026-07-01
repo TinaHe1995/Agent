@@ -98,13 +98,44 @@ TASK_PROMPT = """
 """.strip()
 
 
+def _load_dotenv_files() -> None:
+    """Load KEY=VALUE pairs from gitignored .env.local files if present."""
+    paths = (
+        REPO_ROOT / ".env.local",
+        REPO_ROOT / ".env",
+        DEFAULT_APP_DIR / ".env.local",
+    )
+    for path in paths:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+        logger.info("Loaded environment from %s", path)
+
+
 def resolve_api_key() -> str:
+    _load_dotenv_files()
     for name in ("DEEPSEEK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
         value = os.getenv(name)
         if value:
             logger.info("Using API key from %s", name)
             return value
-    logger.error("未找到 API Key。请设置 DEEPSEEK_API_KEY 或 LLM_API_KEY 后重试。")
+    logger.error(
+        "未找到 API Key。请在 Cursor Cloud Secrets 中设置 DEEPSEEK_API_KEY，"
+        "或在仓库根目录创建 .env.local（已 gitignore），然后重新启动 Agent。"
+    )
+    logger.error(
+        "诊断：当前进程中 DEEPSEEK_API_KEY=%s, LLM_API_KEY=%s",
+        "set" if os.getenv("DEEPSEEK_API_KEY") else "missing",
+        "set" if os.getenv("LLM_API_KEY") else "missing",
+    )
     sys.exit(1)
 
 
