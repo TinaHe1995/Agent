@@ -418,3 +418,31 @@ Note: This is separate from `persistence_dir` which is used for conversation sta
 </KNOWN_RACES_AND_GOTCHAS>
 
 </REPO>
+
+## Cursor Cloud specific instructions
+
+Dependencies are refreshed automatically on startup via `uv sync --dev` (the
+startup update script). Standard dev commands live in `<QUICK_COMMANDS>` /
+`Makefile`; only the non-obvious caveats below are worth remembering:
+
+- `make build` runs `uv run pre-commit install`, which fails in this environment
+  because git `core.hooksPath` is set (`[ERROR] Cowardly refusing to install
+  hooks with core.hooksPath set`). This does not affect dependency install or dev
+  work. To run hooks manually, use `uv run pre-commit run --files <path>`
+  directly (no install step needed). The startup update script therefore uses
+  `uv sync --dev` instead of `make build`.
+- The venv uses Python 3.13 (`.python-version`) managed by `uv`, even though the
+  system `python3` is 3.12. Always run tools via `uv run ...`.
+- Real agent runs need an LLM key. The `DEEPSEEK_API_KEY` secret is available in
+  this environment; run examples/hello-world with
+  `LLM_API_KEY="$DEEPSEEK_API_KEY" LLM_MODEL="deepseek/deepseek-chat"`. Unit
+  tests mock the LLM and need no key.
+- Two runnable products, both verified here:
+  - Standalone SDK (in-process): construct `LLM`/`Agent`/`Conversation` and call
+    `run()` (see `examples/01_standalone_sdk/01_hello_world.py`).
+  - Agent Server (FastAPI REST/WebSocket): start with
+    `uv run python -m openhands.agent_server --host 127.0.0.1 --port 8000`; probe
+    `GET /health`, `/alive`, `/server_info`. Drive it via `RemoteConversation` +
+    `Workspace(host=...)` (see `examples/02_remote_agent_server/`).
+- `docker` is not installed; the Docker/API/cloud-sandbox workspace examples are
+  not runnable here without extra setup.
