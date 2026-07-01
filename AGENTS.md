@@ -418,3 +418,12 @@ Note: This is separate from `persistence_dir` which is used for conversation sta
 </KNOWN_RACES_AND_GOTCHAS>
 
 </REPO>
+
+## Cursor Cloud specific instructions
+
+The startup update script already installs `uv` and runs `uv sync --dev`, so dependencies are ready when a session begins. Standard commands live in `<QUICK_COMMANDS>` above; notable caveats for this environment:
+
+- **Do not run `make build` for dependency refresh here.** Its `uv run pre-commit install` step fails in Cursor Cloud because the environment sets `core.hooksPath` to its own agent-hooks dir (`git config --get core.hooksPath`). Dependency sync is handled by `uv sync --dev` alone (what the update script runs). Do not unset `core.hooksPath` — the Cursor agent relies on it.
+- **`tests/sdk/context/prompts/test_prompt_snapshot.py::test_static_block_has_no_dynamic_content` fails here as a false positive.** It asserts `socket.gethostname() not in <static prompt>`, and the Cursor VM hostname is `cursor`, which is a substring of `.cursorrules`/`.cursor` in the static system prompt. These ~24 failures are environment naming artifacts, not code regressions; the rest of `tests/sdk` passes.
+- **Run the agent-server** with `uv run python -m openhands.agent_server --host 127.0.0.1 --port 8000` (add `--reload` for auto-reload). Health: `GET /health`; interactive API docs: `/docs`; version info: `/server_info`. VSCode/desktop services auto-disable when their binaries are absent; Chromium is available for the browser tool.
+- **`LLM_API_KEY` is required** to drive a real agent conversation (all `examples/*` assert it, and the litellm-backed `LLM` needs it). Without it you can still exercise core functionality via the server, e.g. `POST /api/bash/execute_bash_command` runs commands in the workspace. Most unit tests use mock/`TestLLM` and need no key.
