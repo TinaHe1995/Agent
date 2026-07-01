@@ -418,3 +418,12 @@ Note: This is separate from `persistence_dir` which is used for conversation sta
 </KNOWN_RACES_AND_GOTCHAS>
 
 </REPO>
+
+## Cursor Cloud specific instructions
+
+The startup update script already installs `uv` (to `~/.local/bin`), runs `uv sync --dev` for the Python monorepo, and runs `npm ci` in `prototype/mvp-ui` when that package exists. The notes below cover only non-obvious caveats for running/testing here.
+
+- `uv` is not in the base image and is installed to `~/.local/bin`. In a fresh shell where `uv` is not found, source `. "$HOME/.local/bin/env"` (the installer also appends this to `~/.bashrc`). Then use `uv run ...` for all Python commands.
+- The repo targets Python 3.13 (`.python-version`); `uv` provisions it automatically even though the system `python3` is 3.12. Do not run tests with the system Python.
+- Standard Python commands are in `Makefile`/`DEVELOPMENT.md`: `uv run ruff check` (lint), `uv run pytest` (tests, `-m 'not stress'` by default). Full `uv run pytest` is large; scope to a domain dir (e.g. `tests/sdk/...`) for quick checks. Running agents end-to-end needs an LLM API key (e.g. `LLM_API_KEY`), which is not set here.
+- `prototype/mvp-ui/` is a self-contained React + TypeScript + Vite frontend demo (branch-scoped; may not exist on `main`). It uses a mock agent and needs no API keys or backend. Run it with `npm --prefix prototype/mvp-ui run dev` (Vite dev server on port 5173, bound to `0.0.0.0`; use Cursor port forwarding to view). Lint with `npm --prefix prototype/mvp-ui run lint` (oxlint) and build with `npm --prefix prototype/mvp-ui run build` (`tsc -b && vite build`). The UI text is in Chinese; the end-to-end demo is the 3-stage flow (requirements → style → build/acceptance).
