@@ -33,13 +33,22 @@ PYTHONPATH=. uv run streamlit run main.py
 
 ## 使用 OpenHands + DeepSeek 自动开发/扩展
 
-已配置 DeepSeek API 时：
+**推荐：使用仓库根目录驱动脚本**
 
 ```bash
 export DEEPSEEK_API_KEY="你的密钥"
 # 或 export LLM_API_KEY="你的密钥"
 
-cd project-mgmt-desktop
+# 从仓库根目录执行（驱使 Agent 从零构建或完善本应用）
+./scripts/develop_project_mgmt_app.sh
+
+# 仅验证已有构建、不调用 Agent
+./scripts/develop_project_mgmt_app.sh --verify-only
+```
+
+也可在本目录直接调用（等价）：
+
+```bash
 uv run python run_with_openhands.py
 ```
 
